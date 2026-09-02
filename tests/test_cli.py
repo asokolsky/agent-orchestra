@@ -1,7 +1,10 @@
 """Tests for command-line operations."""
 
+import json
+import re
 import shutil
 import subprocess
+from dataclasses import fields
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -69,6 +72,7 @@ def test_enqueue_local_captures_current_diff(
     assert result == 0
     run = RunStore(database).list_runs()[0]
     assert run.diff_digest is not None
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', run.diff_digest)
     assert run.base_sha == run.head_sha
     assert str(run.id) in capsys.readouterr().out
 
@@ -306,8 +310,67 @@ def test_status_lists_persisted_run(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert str(run.id) in output
-    assert 'queued' in output
+    assert output.startswith('{\n  "schema_version": 1,\n  "runs": [\n    {\n')
+    assert output.endswith('\n}\n')
+    document = json.loads(output)
+    assert set(document['runs'][0]) == {field.name for field in fields(Run)}
+    assert document == {
+        'schema_version': 1,
+        'runs': [
+            {
+                'id': str(run.id),
+                'scenario': 'local_changes',
+                'repository_path': str(tmp_path),
+                'worktree_path': str(tmp_path),
+                'state': 'queued',
+                'base_sha': 'base',
+                'head_sha': 'head',
+                'diff_digest': 'digest',
+                'iteration': 0,
+                'remote_url': None,
+                'created_at': run.created_at.isoformat(),
+                'updated_at': run.updated_at.isoformat(),
+            }
+        ],
+    }
+
+
+def test_status_filters_json_document_by_run_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep single-run status output in the versioned runs envelope."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    first = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'first')
+    second = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'second')
+    store.add(first)
+    store.add(second)
+
+    result = main(['--database', str(database), 'status', str(first.id)])
+
+    assert result == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['schema_version'] == 1
+    assert [run['id'] for run in document['runs']] == [str(first.id)]
+
+
+def test_status_lists_empty_runs_as_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Return a stable empty collection for an initialized database."""
+
+    database = tmp_path / 'state.db'
+    RunStore(database).initialize()
+
+    result = main(['--database', str(database), 'status'])
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        'schema_version': 1,
+        'runs': [],
+    }
 
 
 def test_status_reports_unknown_run(
