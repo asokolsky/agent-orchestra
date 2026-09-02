@@ -272,7 +272,8 @@ uncommitted changes and a worktree in which agent-orchestra first asks a
 development agent to implement an objective.
 
 1. **Enqueue the worktree.** The user or calling process runs
-   `enqueue-local`. The CLI resolves `HEAD`, computes a SHA-256 identity from
+   `enqueue-local`, or runs `enqueue-locals` on a directory whose immediate
+   children are repos. The CLI resolves `HEAD`, computes a SHA-256 identity from
    the binary tracked diff and untracked file paths and contents, creates a
    `local_changes` run in `queued`, and returns the run ID. A clean worktree is
    rejected. The command does not commit, stash, reset, or clean anything.
@@ -434,7 +435,8 @@ The initial foundation provides:
 - an interface for bounded external agent adapters;
 - digest capture for tracked and untracked local changes;
 - Markdown review rendering;
-- commands to initialize state, enqueue local changes, and inspect runs;
+- commands to initialize state, enqueue local changes from one repo or a
+  directory of repos, and inspect runs;
 - a Python-native installer for Codex and Claude Code skills;
 - versioned developer and reviewer skills under `skills/`.
 
@@ -512,6 +514,14 @@ Initialize a state database and enqueue a local repo:
 mise run agent-orchestra -- init
 mise run agent-orchestra -- enqueue-local /path/to/repo
 mise run agent-orchestra -- status
+```
+
+Enqueue every immediate child repo with local changes. Clean repos and repos
+that cannot be read are reported and skipped; the command fails only when a
+repo failed and none could be enqueued:
+
+```shell
+mise run agent-orchestra -- enqueue-locals ~/Projects
 ```
 
 State defaults to `.agent-orchestra/state.db`. Use `--database PATH` to choose
