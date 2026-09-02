@@ -14,6 +14,21 @@ These choices optimize for local agents and minimum resource use. Python is the
 preferred implementation language, with a toolchain based on uv, Ruff, and
 mise.
 
+## Run identity
+
+A run ID is an immutable, repo-independent identifier with the form
+`{UTC timestamp}-{random hex}`, for example
+`20260902T130000Z-a7f3c921`. The timestamp makes IDs easy to sort and recognize;
+the random suffix prevents collisions between concurrent processes and hosts.
+
+Repo names and branch names are not part of the canonical identity. Both are
+mutable context, neither is globally unique, and a worktree may be detached.
+Including either would incorrectly imply that renaming or changing that context
+changes the run's identity. Repo path, worktree path, remote URL, Git SHAs, and
+any observed branch name belong in separate run metadata and human-facing
+labels. Existing identifiers are treated as opaque strings so older UUID-based
+runs remain readable without migration.
+
 ## Message representation
 
 Agent-orchestra messages are versioned JSON documents encoded as UTF-8. JSON is
@@ -60,7 +75,7 @@ Every message uses the same top-level envelope:
   "schema_version": 1,
   "message_id": "3bfc3f23-c25a-4b62-a7bf-610a54206f53",
   "in_reply_to": null,
-  "run_id": "416c0c1a-43a5-405c-8804-c9b18ea38462",
+  "run_id": "20260902T130000Z-a7f3c921",
   "sequence": 1,
   "iteration": 0,
   "message_type": "development_assignment",
@@ -84,7 +99,7 @@ Envelope fields have these meanings:
 | `schema_version` | Integer version of the JSON message schema. Version 1 is the initial contract. |
 | `message_id` | Globally unique UUID for idempotency and audit history. |
 | `in_reply_to` | Request `message_id` answered by this message, or `null` for an initiating message. |
-| `run_id` | Persistent orchestration run UUID. |
+| `run_id` | Persistent repo-independent UTC timestamp and random identifier. |
 | `sequence` | Monotonically increasing message number within the run. |
 | `iteration` | Review iteration; zero before the first review request. |
 | `message_type` | One of the message types defined below. |
@@ -202,10 +217,10 @@ with a new digest and review iteration.
 ## Workflow messages
 
 The messages below are the version 1 JSON message types defined in this design.
-File transport, message persistence, and provider adapters are not implemented
-yet. Until they are, the orchestrator passes part of the same information
-through typed Python requests and results; Markdown remains only a human review
-artifact.
+The first local review step implements file transport and message persistence
+through a command adapter. Other lifecycle steps still pass part of the same
+information through typed Python requests and results; Markdown remains only a
+human review artifact.
 
 Every message identifies:
 

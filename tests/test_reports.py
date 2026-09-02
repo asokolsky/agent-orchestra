@@ -1,7 +1,5 @@
 """Tests for Markdown review rendering."""
 
-from uuid import uuid4
-
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 
@@ -10,7 +8,7 @@ def test_render_review_includes_structured_finding() -> None:
     """Render the verdict, location, and explanation of a finding."""
 
     review = Review(
-        run_id=uuid4(),
+        run_id='20260902T150612Z-a7f3c921',
         iteration=1,
         diff_digest='abc123',
         verdict=Verdict.CHANGES_REQUESTED,

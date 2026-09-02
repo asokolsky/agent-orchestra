@@ -4,9 +4,12 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import fields
 from typing import TYPE_CHECKING
 from uuid import uuid4
+
+import pytest
 
 from agent_orchestra.cli import _working_tree_digest, main
 from agent_orchestra.models import Run
@@ -14,8 +17,6 @@ from agent_orchestra.store import RunStore
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def initialize_git_repository(path: Path) -> None:
@@ -41,6 +42,56 @@ def initialize_git_repository(path: Path) -> None:
         ],
         check=True,
         capture_output=True,
+    )
+
+
+def write_reviewer(path: Path, verdict: str) -> None:
+    """Write a deterministic reviewer command for CLI integration tests."""
+
+    path.write_text(
+        f'''"""Test reviewer command."""
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+request_path = Path(sys.argv[1])
+response_path = Path(sys.argv[2])
+request = json.loads(request_path.read_text())
+artifact_path = Path(request["payload"]["artifact_path"])
+artifact_path.write_text("# Review\\n")
+response = {{
+    "schema_version": 1,
+    "message_id": str(uuid4()),
+    "in_reply_to": request["message_id"],
+    "run_id": request["run_id"],
+    "sequence": 2,
+    "iteration": request["iteration"],
+    "message_type": "review_result",
+    "sender": "reviewer",
+    "recipient": "orchestrator",
+    "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    "scope": request["scope"],
+    "payload": {{
+        "verdict": "{verdict}",
+        "summary": "reviewed",
+        "findings": [] if "{verdict}" == "approved" else [{{
+            "finding_id": "F-001",
+            "severity": "medium",
+            "title": "fix",
+            "path": "tracked.txt",
+            "line": 1,
+            "explanation": "Needs correction.",
+            "acceptance_criterion": "Correct the content.",
+        }}],
+        "validation": [],
+        "verification_gaps": [],
+        "artifact_path": str(artifact_path),
+    }},
+}}
+response_path.write_text(json.dumps(response))
+'''
     )
 
 
@@ -71,6 +122,7 @@ def test_enqueue_local_captures_current_diff(
 
     assert result == 0
     run = RunStore(database).list_runs()[0]
+    assert re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', run.id)
     assert run.diff_digest is not None
     assert re.fullmatch(r'sha256:[0-9a-f]{64}', run.diff_digest)
     assert run.base_sha == run.head_sha
@@ -328,8 +380,8 @@ def test_status_lists_persisted_run(
                 'diff_digest': 'digest',
                 'iteration': 0,
                 'remote_url': None,
-                'created_at': run.created_at.isoformat(),
-                'updated_at': run.updated_at.isoformat(),
+                'created_at': run.created_at.isoformat().replace('+00:00', 'Z'),
+                'updated_at': run.updated_at.isoformat().replace('+00:00', 'Z'),
             }
         ],
     }
@@ -385,6 +437,269 @@ def test_status_reports_unknown_run(
 
     assert result == 2
     assert 'run not found' in capsys.readouterr().err
+
+
+def test_run_dispatches_review_and_awaits_commit_authorization(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Persist a correlated approved review and stop at the commit gate."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'approved')
+    runs_directory = tmp_path / 'runs'
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(runs_directory),
+            '--',
+            sys.executable,
+            str(reviewer),
+        ]
+    )
+
+    assert result == 0
+    assert RunStore(database).get(run.id).state.value == 'awaiting_commit_authorization'
+    run_directory = runs_directory / str(run.id)
+    assert (run_directory / 'messages/000001-review-request.json').is_file()
+    assert (run_directory / 'messages/000002-review-result.json').is_file()
+    assert (run_directory / 'artifacts/review-0001.md').is_file()
+    assert (
+        json.loads(capsys.readouterr().out)['state'] == 'awaiting_commit_authorization'
+    )
+
+
+def test_run_records_requested_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Advance a rejected review to the remediation boundary."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'changes_requested')
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(tmp_path / 'runs'),
+            '--',
+            sys.executable,
+            str(reviewer),
+        ]
+    )
+
+    assert result == 0
+    assert RunStore(database).get(run.id).state.value == 'changes_requested'
+
+
+def test_run_keeps_blocked_review_awaiting_resolution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Persist a blocked review without inventing a terminal state."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'blocked')
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(tmp_path / 'runs'),
+            '--',
+            sys.executable,
+            str(reviewer),
+        ]
+    )
+
+    assert result == 0
+    assert RunStore(database).get(run.id).state.value == 'awaiting_review'
+
+
+@pytest.mark.parametrize(
+    'reviewer_command', [['/missing/reviewer'], ['/usr/bin/false']]
+)
+def test_run_marks_reviewer_execution_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    reviewer_command: list[str],
+) -> None:
+    """Persist failed state for missing and nonzero reviewer commands."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(tmp_path / 'runs'),
+            '--',
+            *reviewer_command,
+        ]
+    )
+
+    assert result == 2
+    assert RunStore(database).get(run.id).state.value == 'failed'
+
+
+def test_run_marks_reviewer_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Persist failed state when the bounded reviewer exceeds its timeout."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    reviewer = tmp_path / 'slow.py'
+    reviewer.write_text('"""Slow test reviewer."""\nimport time\ntime.sleep(5)\n')
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--timeout',
+            '1',
+            '--runs-directory',
+            str(tmp_path / 'runs'),
+            '--',
+            sys.executable,
+            str(reviewer),
+        ]
+    )
+
+    assert result == 2
+    assert RunStore(database).get(run.id).state.value == 'failed'
+
+
+def test_run_handles_digest_failure_before_transition(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report a disappeared repo without a traceback or state mutation."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    shutil.rmtree(repository / '.git')
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--',
+            '/usr/bin/true',
+        ]
+    )
+
+    assert result == 2
+    assert RunStore(database).get(run.id).state.value == 'queued'
+    assert 'cannot compute worktree digest' in capsys.readouterr().err
+
+
+def test_run_marks_post_review_digest_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail durably when Git state disappears during reviewer execution."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'approved')
+    with reviewer.open('a') as file:
+        file.write('\nimport shutil\nshutil.rmtree(Path.cwd() / ".git")\n')
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(tmp_path / 'runs'),
+            '--',
+            sys.executable,
+            str(reviewer),
+        ]
+    )
+
+    assert result == 2
+    assert RunStore(database).get(run.id).state.value == 'failed'
 
 
 def test_skills_install_for_both_agents(

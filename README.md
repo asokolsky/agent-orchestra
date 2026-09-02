@@ -7,9 +7,28 @@ The project assumes a Git worktree workflow. It coordinates bounded agent
 invocations while keeping orchestration state, review artifacts, and lifecycle
 authorization explicit.
 
+## Problem We Are Trying to Solve
+
+Coding agents can implement and review changes, but coordinating several agent
+invocations is still largely manual. A user must preserve the original
+objective, assign the correct worktree and role, carry every review finding back
+to the developer, verify that approval still applies to the current diff, and
+separately authorize consequential actions such as committing and publishing.
+
+Conversational handoffs alone do not provide durable workflow state. Context
+can be omitted, a reviewer can inspect a different diff than the one eventually
+committed, feedback can be lost between invocations, and an agent can infer
+permission for an action that the user did not authorize.
+
+Agent-orchestra turns that coordination into an explicit, resumable protocol.
+It records each run, binds review approval to an immutable diff digest, gives
+development and review agents distinct capabilities, persists structured
+messages and artifacts, bounds external invocations and review iterations, and
+stops at separate authorization gates before changing local or remote Git state.
+
 ## Participants
 
-- A development agent implements changes and addresses review feedback.
+- A developer agent implements changes and addresses review feedback.
 - A reviewer agent evaluates the current diff and produces a Markdown review
   artifact.
 
@@ -27,11 +46,11 @@ yet.
 
 ## Practical workflow today
 
-Agent-orchestra does not require repos to be registered. It also does not yet
-dispatch agents or advance queued runs automatically. The implemented CLI can
-install the role skills, capture an existing uncommitted diff in SQLite, and
-show captured runs. The user must currently create the task worktree, invoke
-each agent role, and authorize lifecycle actions manually.
+Agent-orchestra does not require repos to be registered. The implemented CLI
+can install the role skills, capture an existing uncommitted diff in SQLite,
+show captured runs, and dispatch the first review through a supplied adapter.
+The user must still create the task worktree, initiate development, handle
+review remediation, and authorize lifecycle actions manually.
 
 ### Install the role skills once
 
@@ -39,14 +58,13 @@ From an agent-orchestra checkout, install both bundled skills for Codex and
 Claude Code:
 
 ```shell
-mise run agent-orchestra -- skills install \
-  --agent all \
-  --skill agent-orchestra-developer
-
-mise run agent-orchestra -- skills install \
-  --agent all \
+mise agent-orchestra -- skills install \
+  --skill agent-orchestra-developer \
   --skill agent-orchestra-reviewer
 ```
+
+By default, the command installs the selected skills for both Codex and Claude
+Code. Use `--agent codex` or `--agent claude-code` only to target one runtime.
 
 Repeat installation after a bundled skill version changes. The installer
 upgrades an unchanged managed installation and preserves locally modified
@@ -138,14 +156,63 @@ Merge <pull-request URL> and verify the resulting default-branch commit.
 
 `enqueue-local` records the current uncommitted diff for one repo.
 `enqueue-locals` scans immediate child repos, records dirty ones, and skips
-clean ones. These commands do not start development or review, and no worker
-currently consumes a run left in `queued`:
+clean ones. Each repo-independent run ID combines its UTC creation time with a
+random suffix, for example `20260902T150612Z-a7f3c921`. The repo and worktree
+remain separate run metadata. These commands record work but do not start
+development or review:
 
 ```shell
-mise run agent-orchestra -- enqueue-local /path/to/dirty/repo
-mise run agent-orchestra -- enqueue-locals ~/Projects
-mise run agent-orchestra -- status
+export RUN_ID="$(mise agent-orchestra -- enqueue-local /path/to/dirty/repo)"
+mise agent-orchestra -- status
 ```
+
+`enqueue-local` prints only the new run ID, so command substitution can save it
+directly in `RUN_ID`. Confirm it before continuing:
+
+```shell
+printf '%s\n' "$RUN_ID"
+```
+
+`enqueue-locals` prints one line per dirty repo with the run ID followed by its
+worktree path. If the enqueue output is no longer available, run `status` and
+use the `id` from the matching repo entry in its formatted JSON output:
+
+```json
+{
+  "schema_version": 1,
+  "runs": [
+    {
+      "id": "20260902T150612Z-a7f3c921",
+      "scenario": "local_changes",
+      "repository_path": "/path/to/repo",
+      "worktree_path": "/path/to/repo",
+      "state": "queued",
+      "base_sha": "<base-commit-sha>",
+      "head_sha": "<head-commit-sha>",
+      "diff_digest": "sha256:<working-tree-digest>",
+      "iteration": 0,
+      "remote_url": null,
+      "created_at": "2026-09-02T15:06:12Z",
+      "updated_at": "2026-09-02T15:06:12Z"
+    }
+  ]
+}
+```
+
+Run the first durable review step by supplying a bounded reviewer command. The
+command receives the request and response JSON paths as its final two arguments,
+writes the correlated response and requested Markdown artifact, and runs with
+the target worktree as its current directory:
+
+```shell
+mise agent-orchestra -- run "$RUN_ID" \
+  --objective "Review the queued implementation" \
+  -- /path/to/reviewer-adapter
+```
+
+The worker persists the request, response, artifact, and process logs outside
+the target worktree. Approval stops at `awaiting_commit_authorization`; requested
+changes stop at `changes_requested`. No commit or remote action is performed.
 
 The intended automatic orchestration described below is the target contract,
 not the current CLI behavior.
@@ -172,8 +239,10 @@ development agent to implement an objective.
 
 2. **Prepare the run.** The orchestrator moves the run to `preparing`, reads
    applicable repo instructions, records the existing worktree state, and
-   confirms that the worktree and changes can be preserved. A missing or
-   ambiguous worktree produces a blocked or failed result without mutation.
+   confirms that the worktree and changes can be preserved. It recomputes and
+   records the current digest if the worktree changed since enqueueing; the
+   review request preserves that new scope durably. A missing or ambiguous
+   worktree produces a blocked or failed result without mutation.
 
 3. **Obtain a developer handoff.** If implementation is still required, the
    orchestrator moves the run to `developing` and sends a
@@ -243,10 +312,11 @@ development agent to implement an objective.
     and remote cleanup are separate actions and require their own safety checks
     and authorization.
 
-Only enqueueing, local digest capture, state storage, status inspection, and the
-underlying models are implemented today. Agent invocation, review persistence,
-authorization commands, commit/publication execution, iteration limits, and
-resumption are the target contract described above.
+Enqueueing, local digest capture, state storage, status inspection, skill
+installation, and one bounded durable review step are implemented today.
+Developer invocation and remediation, authorization commands,
+commit/publication execution, iteration limits, and resumption remain target
+contract work.
 
 ## Scenario: remote pull-request review
 
@@ -351,8 +421,7 @@ A development agent imports `agent-orchestra-developer`. From the root of an
 agent-orchestra checkout, install it for both supported agent runtimes with:
 
 ```shell
-mise run agent-orchestra -- skills install \
-  --agent all \
+mise agent-orchestra -- skills install \
   --skill agent-orchestra-developer
 ```
 
@@ -366,8 +435,7 @@ A reviewer agent imports `agent-orchestra-reviewer`. From the root of an
 agent-orchestra checkout, install it for both supported agent runtimes with:
 
 ```shell
-mise run agent-orchestra -- skills install \
-  --agent all \
+mise agent-orchestra -- skills install \
   --skill agent-orchestra-reviewer
 ```
 
@@ -403,9 +471,9 @@ mise run tests
 Initialize a state database and enqueue a local repo:
 
 ```shell
-mise run agent-orchestra -- init
-mise run agent-orchestra -- enqueue-local /path/to/repo
-mise run agent-orchestra -- status
+mise agent-orchestra -- init
+mise agent-orchestra -- enqueue-local /path/to/repo
+mise agent-orchestra -- status
 ```
 
 `status` writes an indented, versioned JSON document to stdout for both list and
@@ -415,8 +483,8 @@ worktree paths, Git identities, diff digest, iteration, remote URL, and
 timestamps:
 
 ```shell
-mise run agent-orchestra -- status
-mise run agent-orchestra -- status <run-id>
+mise agent-orchestra -- status
+mise agent-orchestra -- status <run-id>
 ```
 
 Enqueue every immediate child repo with local changes. Clean repos and repos
@@ -424,7 +492,7 @@ that cannot be read are reported and skipped; the command fails only when a
 repo failed and none could be enqueued:
 
 ```shell
-mise run agent-orchestra -- enqueue-locals ~/Projects
+mise agent-orchestra -- enqueue-locals ~/Projects
 ```
 
 State defaults to `.agent-orchestra/state.db`. Use `--database PATH` to choose
