@@ -1,0 +1,116 @@
+"""Tests for SQLite run persistence."""
+
+import sqlite3
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pytest
+
+from agent_orchestra.models import Run, RunState
+from agent_orchestra.store import ConcurrentUpdateError, RunNotFoundError, RunStore
+from agent_orchestra.workflow import transition
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def test_run_round_trip(tmp_path: Path) -> None:
+    """Persist and load all initial run attributes."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = replace(
+        Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
+        remote_url='https://example.test/pull/1',
+    )
+    store.add(run)
+
+    assert store.get(run.id) == run
+
+
+def test_update_records_new_state(tmp_path: Path) -> None:
+    """Persist a valid state transition."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+
+    updated = transition(run, RunState.PREPARING)
+    store.update(updated, expected_state=RunState.QUEUED)
+
+    assert store.get(run.id).state is RunState.PREPARING
+
+
+def test_update_detects_stale_state(tmp_path: Path) -> None:
+    """Reject an update whose expected state is no longer current."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    updated = transition(run, RunState.PREPARING)
+    store.update(updated, expected_state=RunState.QUEUED)
+
+    with pytest.raises(ConcurrentUpdateError):
+        store.update(updated, expected_state=RunState.QUEUED)
+
+
+def test_update_distinguishes_missing_run(tmp_path: Path) -> None:
+    """Report a missing run separately from a stale state."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    updated = transition(run, RunState.PREPARING)
+
+    with pytest.raises(RunNotFoundError):
+        store.update(updated, expected_state=RunState.QUEUED)
+
+
+def test_update_does_not_rewrite_creation_time(tmp_path: Path) -> None:
+    """Keep persisted creation history immutable during updates."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    changed_history = replace(
+        transition(run, RunState.PREPARING),
+        created_at=datetime(2000, 1, 1, tzinfo=UTC),
+    )
+
+    store.update(changed_history, expected_state=RunState.QUEUED)
+
+    assert store.get(run.id).created_at == run.created_at
+
+
+def test_public_operations_close_connections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close every short-lived SQLite connection deterministically."""
+
+    connections: list[sqlite3.Connection] = []
+    original_connect = sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        """SQLite connection retained by the test after closure."""
+
+    def tracking_connect(database: Path) -> sqlite3.Connection:
+        connection = original_connect(database, factory=TrackingConnection)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, 'connect', tracking_connect)
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    store.get(run.id)
+    store.list_runs()
+    store.update(transition(run, RunState.PREPARING), RunState.QUEUED)
+
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            connection.execute('SELECT 1')

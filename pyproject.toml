@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-orchestra"
+version = "0.1.0"
+description = "A lightweight local workflow orchestrator for development and review agents."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Alex Sokolsky" }]
+dependencies = []
+
+[project.scripts]
+agent-orchestra = "agent_orchestra.cli:main"
+
+[dependency-groups]
+# uv sync --group dev
+dev = [
+    "mypy>=1.16.1",
+    "pytest>=8.4",
+    "ruff>=0.12.1",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["agent_orchestra"]
+
+[tool.setuptools.package-data]
+agent_orchestra = ["py.typed"]
+
+[tool.setuptools.data-files]
+"share/agent-orchestra/skills/agent-orchestra-developer" = [
+    "skills/agent-orchestra-developer/SKILL.md",
+    "skills/agent-orchestra-developer/SKILL-meta.md",
+]
+"share/agent-orchestra/skills/agent-orchestra-reviewer" = [
+    "skills/agent-orchestra-reviewer/SKILL.md",
+    "skills/agent-orchestra-reviewer/SKILL-meta.md",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "A001","A002","ANN401","ARG001",
+    "B006","B011","BLE001",
+    "C901","COM812","CPY001",
+    "D100","D101","D102","D103","D104","D107","D200","D202","D203","D205","D212","D400","D401","D415",
+    "E501","EM102","ERA001",
+    "FBT001",
+    "G004",
+    "Q000","Q003",
+    "N801","N803","N806",
+    "PT009","PT015","PT027","PLR0915","PLR1711","PLR0912","PLR0913","PLR2004","PLW0603",
+    "RET505","RET507","RUF022",
+    "S101","S603","SIM114","SLF001",
+    "T201",
+    "TRY003","TRY300"
+]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
