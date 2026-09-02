@@ -199,20 +199,28 @@ use the `id` from the matching repo entry in its formatted JSON output:
 }
 ```
 
-Run the first durable review step by supplying a bounded reviewer command. The
-command receives the request and response JSON paths as its final two arguments,
-writes the correlated response and requested Markdown artifact, and runs with
-the target worktree as its current directory:
+Run the first durable review step with the built-in Codex adapter:
 
 ```shell
 mise agent-orchestra -- run "$RUN_ID" \
-  --objective "Review the queued implementation" \
-  -- /path/to/reviewer-adapter
+  --objective "Review the queued implementation"
 ```
+
+The adapter invokes `codex exec` non-interactively in a read-only sandbox. It
+ignores personal Codex configuration for deterministic automation while retaining
+the user's authentication and installed skills. It requests a schema-constrained
+result, then writes the correlated response and Markdown artifact outside the
+target worktree. To use another adapter, add `--` and its command;
+agent-orchestra appends the request and response JSON paths.
+
+If the managed Codex default is not supported by the locally installed CLI,
+select a compatible model explicitly with `--codex-model <model>`.
 
 The worker persists the request, response, artifact, and process logs outside
 the target worktree. Approval stops at `awaiting_commit_authorization`; requested
 changes stop at `changes_requested`. No commit or remote action is performed.
+The state database and `--runs-directory` must both be outside the reviewed
+worktree so their own writes cannot change the review digest.
 
 The intended automatic orchestration described below is the target contract,
 not the current CLI behavior.
@@ -313,7 +321,7 @@ development agent to implement an objective.
     and authorization.
 
 Enqueueing, local digest capture, state storage, status inspection, skill
-installation, and one bounded durable review step are implemented today.
+installation, and one bounded durable Codex review step are implemented today.
 Developer invocation and remediation, authorization commands,
 commit/publication execution, iteration limits, and resumption remain target
 contract work.
@@ -495,5 +503,6 @@ repo failed and none could be enqueued:
 mise agent-orchestra -- enqueue-locals ~/Projects
 ```
 
-State defaults to `.agent-orchestra/state.db`. Use `--database PATH` to choose
-another location.
+State defaults to `~/.local/state/agent-orchestra/state.db`, outside reviewed
+worktrees. Use `--database PATH` to choose another location; custom state paths
+must also be outside the worktree being reviewed.

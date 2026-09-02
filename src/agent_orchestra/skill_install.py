@@ -72,7 +72,16 @@ def install_skills(
     root = find_skills_root(source_root)
     sources = {name: _validate_source(root, name) for name in skill_names}
     destinations = [
-        (agent, name, _destination(agent, name, codex_home, claude_home))
+        (
+            agent,
+            name,
+            skill_destination(
+                agent,
+                name,
+                codex_home=codex_home,
+                claude_home=claude_home,
+            ),
+        )
         for agent in agents
         for name in skill_names
     ]
@@ -122,13 +131,14 @@ def _validate_source(root: Path, skill_name: str) -> Path:
     return source
 
 
-def _destination(
+def skill_destination(
     agent: AgentTarget,
     skill_name: str,
-    codex_home: Path | None,
-    claude_home: Path | None,
+    *,
+    codex_home: Path | None = None,
+    claude_home: Path | None = None,
 ) -> Path:
-    """Resolve the personal skill destination for an agent runtime."""
+    """Resolve a personal skill destination for an agent runtime."""
 
     if agent is AgentTarget.CODEX:
         configured = codex_home
