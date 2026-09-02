@@ -182,6 +182,13 @@ def test_rejects_changed_worktree_digest() -> None:
         _require_unchanged('sha256:new', 'sha256:reviewed')
 
 
+def test_accepts_legacy_digest_spelling() -> None:
+    """Accept a bare persisted SHA-256 digest when content is unchanged."""
+
+    bare_digest = 'a' * 64
+    _require_unchanged(f'sha256:{bare_digest}', bare_digest)
+
+
 def test_normalizes_digest_failures(tmp_path: Path) -> None:
     """Keep Git and filesystem failures inside the worker error contract."""
 

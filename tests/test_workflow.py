@@ -85,6 +85,21 @@ def test_approval_requires_a_changed_digest_for_invalidation() -> None:
         invalidate_approval(run, 'digest-1')
 
 
+def test_legacy_digest_spelling_does_not_invalidate_approval() -> None:
+    """Treat a legacy bare SHA-256 digest as its canonical prefixed form."""
+
+    bare_digest = 'a' * 64
+    run = Run.create_local(
+        Path('/repo'), Path('/worktree'), 'base', 'head', bare_digest
+    )
+    run = transition(run, RunState.PREPARING)
+    run = transition(run, RunState.AWAITING_REVIEW)
+    run = transition(run, RunState.APPROVED)
+
+    with pytest.raises(ApprovalInvalidationError):
+        invalidate_approval(run, f'sha256:{bare_digest}')
+
+
 def test_terminal_state_cannot_transition() -> None:
     """Reject transitions out of a terminal state."""
 

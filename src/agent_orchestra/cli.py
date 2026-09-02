@@ -25,12 +25,20 @@ from agent_orchestra.worker import WorkerError, run_queued_review
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-DEFAULT_DATABASE = Path('.agent-orchestra/state.db')
+DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 HASH_CHUNK_SIZE = 1024 * 1024
+STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
 
 class GitCommandError(RuntimeError):
     """Raised when a required read-only Git command fails."""
+
+
+def _require_external_database(database: Path, worktree: Path) -> None:
+    """Reject mutable orchestration state inside the reviewed worktree."""
+
+    if database.resolve().is_relative_to(worktree.resolve()):
+        raise WorkerError(STATE_DATABASE_INSIDE_WORKTREE)
 
 
 def _git_bytes(repository: Path, *arguments: str) -> bytes:
@@ -124,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('run_id')
     run.add_argument('--objective', required=True)
     run.add_argument('--timeout', type=int, default=1800)
+    run.add_argument('--codex-model')
     run.add_argument(
         '--runs-directory',
         type=Path,
@@ -271,13 +280,30 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
     if not args.database.is_file():
         print(f'state database not found: {args.database}', file=sys.stderr)
         return 2
+    if args.reviewer_command and args.codex_model:
+        print(
+            'error: --codex-model cannot be combined with a custom reviewer command',
+            file=sys.stderr,
+        )
+        return 2
     try:
         run = store.get(args.run_id)
+        _require_external_database(args.database, run.worktree_path)
+        if args.reviewer_command:
+            reviewer_command = args.reviewer_command
+        else:
+            reviewer_command = [
+                sys.executable,
+                '-m',
+                'agent_orchestra.codex_reviewer',
+            ]
+            if args.codex_model:
+                reviewer_command.extend(['--model', args.codex_model])
         result = run_queued_review(
             store=store,
             run=run,
             objective=args.objective,
-            reviewer_command=args.reviewer_command,
+            reviewer_command=reviewer_command,
             runs_directory=args.runs_directory,
             timeout_seconds=args.timeout,
             digest_worktree=_working_tree_digest,

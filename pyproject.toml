@@ -15,6 +15,7 @@ dependencies = []
 
 [project.scripts]
 agent-orchestra = "agent_orchestra.cli:main"
+agent-orchestra-codex-reviewer = "agent_orchestra.codex_reviewer:main"
 
 [dependency-groups]
 # uv sync --group dev

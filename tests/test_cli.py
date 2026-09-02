@@ -6,17 +6,14 @@ import shutil
 import subprocess
 import sys
 from dataclasses import fields
-from typing import TYPE_CHECKING
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from agent_orchestra.cli import _working_tree_digest, main
+from agent_orchestra.cli import DEFAULT_DATABASE, _working_tree_digest, main
 from agent_orchestra.models import Run
 from agent_orchestra.store import RunStore
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def initialize_git_repository(path: Path) -> None:
@@ -483,6 +480,107 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     )
 
 
+def test_run_uses_builtin_codex_adapter_by_default(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Select the packaged Codex adapter when no custom command is supplied."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    observed: dict[str, object] = {}
+
+    def review(**kwargs: object) -> Run:
+        """Capture the selected command without starting Codex."""
+
+        observed.update(kwargs)
+        return run
+
+    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+        ]
+    )
+
+    assert result == 0
+    assert observed['reviewer_command'] == [
+        sys.executable,
+        '-m',
+        'agent_orchestra.codex_reviewer',
+    ]
+
+
+def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
+    """Keep default orchestration state outside a typical reviewed repo."""
+
+    repository = Path.home() / 'Projects/repo'
+
+    assert Path.home() / '.local/state/agent-orchestra/state.db' == DEFAULT_DATABASE
+    assert not DEFAULT_DATABASE.is_relative_to(repository)
+
+
+def test_run_passes_explicit_codex_model_to_builtin_adapter(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow callers to avoid an incompatible managed Codex model default."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    observed: dict[str, object] = {}
+
+    def review(**kwargs: object) -> Run:
+        """Capture the selected command without starting Codex."""
+
+        observed.update(kwargs)
+        return run
+
+    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--codex-model',
+            'compatible-model',
+        ]
+    )
+
+    assert result == 0
+    assert observed['reviewer_command'] == [
+        sys.executable,
+        '-m',
+        'agent_orchestra.codex_reviewer',
+        '--model',
+        'compatible-model',
+    ]
+
+
 def test_run_records_requested_changes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -629,6 +727,68 @@ def test_run_marks_reviewer_timeout(
 
     assert result == 2
     assert RunStore(database).get(run.id).state.value == 'failed'
+
+
+def test_run_rejects_state_database_inside_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep mutable orchestration state outside the reviewed worktree."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = repository / '.agent-orchestra/state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+        ]
+    )
+
+    assert result == 2
+    assert RunStore(database).get(run.id).state.value == 'queued'
+    assert 'state database must be outside' in capsys.readouterr().err
+
+
+def test_run_rejects_evidence_directory_inside_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep mutable review messages and artifacts outside the reviewed worktree."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(repository / 'runs'),
+        ]
+    )
+
+    assert result == 2
+    assert RunStore(database).get(run.id).state.value == 'queued'
+    assert 'evidence directory must be outside' in capsys.readouterr().err
 
 
 def test_run_handles_digest_failure_before_transition(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from agent_orchestra.models import Run, RunState, utc_now
+from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 
 
 class InvalidTransitionError(ValueError):
@@ -80,7 +80,7 @@ def invalidate_approval(run: Run, diff_digest: str) -> Run:
     invalidatable = {RunState.APPROVED, RunState.AWAITING_COMMIT_AUTHORIZATION}
     if run.state not in invalidatable:
         raise ApprovalInvalidationError(f'cannot invalidate approval from {run.state}')
-    if not diff_digest or diff_digest == run.diff_digest:
+    if not diff_digest or same_diff_digest(diff_digest, run.diff_digest):
         message = 'approval invalidation requires a new diff digest'
         raise ApprovalInvalidationError(message)
     return replace(

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from agent_orchestra.models import Run, RunState, utc_now
+from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
@@ -36,12 +36,13 @@ EMPTY_OBJECTIVE = 'objective must not be empty'
 EMPTY_COMMAND = 'reviewer command must not be empty'
 NO_CHANGES = 'worktree has no local changes'
 WORKTREE_CHANGED = 'worktree changed during read-only review'
+EVIDENCE_INSIDE_WORKTREE = 'run evidence directory must be outside the worktree'
 
 
 def _require_unchanged(actual: str | None, expected: str) -> None:
     """Reject a review when its worktree digest changed during execution."""
 
-    if actual != expected:
+    if not same_diff_digest(actual, expected):
         raise WorkerError(WORKTREE_CHANGED)
 
 
@@ -193,6 +194,10 @@ def run_queued_review(
     if not run.worktree_path.is_dir():
         raise WorkerError(f'worktree not found: {run.worktree_path}')
 
+    run_directory = runs_directory.expanduser().resolve() / str(run.id)
+    if run_directory.is_relative_to(run.worktree_path.resolve()):
+        raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
+
     current_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
     if current_digest is None:
         raise WorkerError(NO_CHANGES)
@@ -205,7 +210,6 @@ def run_queued_review(
     reviewing = transition(prepared, RunState.AWAITING_REVIEW)
     store.update(reviewing, expected_state=RunState.PREPARING)
 
-    run_directory = runs_directory.expanduser().resolve() / str(run.id)
     messages = run_directory / 'messages'
     artifacts = run_directory / 'artifacts'
     logs = run_directory / 'logs'

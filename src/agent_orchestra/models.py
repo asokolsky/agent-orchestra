@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -10,6 +11,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+BARE_SHA256 = re.compile(r'^[0-9a-f]{64}$')
 
 
 def utc_now() -> datetime:
@@ -23,6 +26,20 @@ def create_run_id(created_at: datetime) -> str:
 
     timestamp = created_at.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')
     return f'{timestamp}-{secrets.token_hex(4)}'
+
+
+def normalize_diff_digest(diff_digest: str | None) -> str | None:
+    """Return the canonical spelling of a current or legacy diff digest."""
+
+    if diff_digest is not None and BARE_SHA256.fullmatch(diff_digest):
+        return f'sha256:{diff_digest}'
+    return diff_digest
+
+
+def same_diff_digest(left: str | None, right: str | None) -> bool:
+    """Compare diff digests while accepting the legacy bare SHA-256 form."""
+
+    return normalize_diff_digest(left) == normalize_diff_digest(right)
 
 
 class ScenarioType(StrEnum):

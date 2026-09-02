@@ -218,9 +218,12 @@ with a new digest and review iteration.
 
 The messages below are the version 1 JSON message types defined in this design.
 The first local review step implements file transport and message persistence
-through a command adapter. Other lifecycle steps still pass part of the same
-information through typed Python requests and results; Markdown remains only a
-human review artifact.
+through a command adapter. The default Codex adapter invokes `codex exec` with
+a read-only sandbox and a strict output schema, then writes the correlated JSON
+response and Markdown artifact itself. A custom command adapter may be supplied
+after `--`. Other lifecycle steps still pass part of the same information
+through typed Python requests and results; Markdown remains only a human review
+artifact.
 
 Every message identifies:
 
