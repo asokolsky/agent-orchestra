@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -90,7 +91,7 @@ def _working_tree_digest(repository: Path, base_sha: str) -> str | None:
             with path.open('rb') as file:
                 while chunk := file.read(HASH_CHUNK_SIZE):
                     digest.update(chunk)
-    return digest.hexdigest()
+    return f'sha256:{digest.hexdigest()}'
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -214,7 +215,7 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
 
 
 def _status(args: argparse.Namespace, store: RunStore) -> int:
-    """Display persisted run status without creating state."""
+    """Write persisted run status as versioned JSON without creating state."""
 
     if not args.database.is_file():
         print(f'state database not found: {args.database}', file=sys.stderr)
@@ -224,8 +225,27 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
     except RunNotFoundError as error:
         print(f'run not found: {error}', file=sys.stderr)
         return 2
-    for run in runs:
-        print(f'{run.id}  {run.state:<30}  {run.worktree_path}')
+    document = {
+        'schema_version': 1,
+        'runs': [
+            {
+                'id': str(run.id),
+                'scenario': str(run.scenario),
+                'repository_path': str(run.repository_path),
+                'worktree_path': str(run.worktree_path),
+                'state': str(run.state),
+                'base_sha': run.base_sha,
+                'head_sha': run.head_sha,
+                'diff_digest': run.diff_digest,
+                'iteration': run.iteration,
+                'remote_url': run.remote_url,
+                'created_at': run.created_at.isoformat(),
+                'updated_at': run.updated_at.isoformat(),
+            }
+            for run in runs
+        ],
+    }
+    print(json.dumps(document, indent=2))
     return 0
 
 

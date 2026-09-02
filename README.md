@@ -408,6 +408,17 @@ mise run agent-orchestra -- enqueue-local /path/to/repo
 mise run agent-orchestra -- status
 ```
 
+`status` writes an indented, versioned JSON document to stdout for both list and
+single-run queries, with no formatter required. The `runs` array contains the
+complete persisted run records, including their scenario, state, repo and
+worktree paths, Git identities, diff digest, iteration, remote URL, and
+timestamps:
+
+```shell
+mise run agent-orchestra -- status
+mise run agent-orchestra -- status <run-id>
+```
+
 Enqueue every immediate child repo with local changes. Clean repos and repos
 that cannot be read are reported and skipped; the command fails only when a
 repo failed and none could be enqueued:
