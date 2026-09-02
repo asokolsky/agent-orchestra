@@ -1,0 +1,60 @@
+[tools]
+uv = 'latest'
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.venv]
+description = "Set a virtual environment for the project"
+run = [
+    'uv sync --group dev'
+]
+
+[tasks.agent-orchestra]
+description = "Run agent-orchestra"
+depends = ["venv"]
+run = [
+    'uv run python -m agent_orchestra'
+]
+
+[tasks.build]
+description = "Build source and wheel distributions"
+run = [
+    'uv build'
+]
+
+[tasks.clean]
+description = "Do local clean-up"
+run = [
+    'rm -rf .mypy_cache .pytest_cache .ruff_cache .venv build dist src/agent_orchestra.egg-info',
+    'find . -name __pycache__ | xargs rm -rf'
+]
+
+[tasks.format]
+description = "Format python sources"
+run = [
+    # sort imports
+    'uv run ruff check --select I --fix src/agent_orchestra tests',
+    # reformat sources
+    'uv run ruff format -v src/agent_orchestra tests',
+]
+
+[tasks.lint]
+description = "Lint python sources"
+run = [
+    # check imports
+    'uv run ruff check -v --select I src/agent_orchestra tests',
+    'uv run ruff check -v src/agent_orchestra tests'
+]
+
+[tasks.mypy]
+description = "Check typing"
+run = [
+    'uv run mypy src/agent_orchestra tests'
+]
+
+[tasks.tests]
+description = "Execute unit tests"
+run = [
+    'uv run pytest -v tests',
+]
