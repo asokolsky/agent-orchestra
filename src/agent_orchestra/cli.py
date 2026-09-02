@@ -9,9 +9,9 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from agent_orchestra.models import Run
 from agent_orchestra.skill_install import (
@@ -20,6 +20,7 @@ from agent_orchestra.skill_install import (
     install_skills,
 )
 from agent_orchestra.store import RunNotFoundError, RunStore
+from agent_orchestra.worker import WorkerError, run_queued_review
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -117,7 +118,18 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue_many.add_argument('--base', default='HEAD')
 
     status = commands.add_parser('status', help='show one run or list all runs')
-    status.add_argument('run_id', nargs='?', type=UUID)
+    status.add_argument('run_id', nargs='?')
+
+    run = commands.add_parser('run', help='review one queued local run')
+    run.add_argument('run_id')
+    run.add_argument('--objective', required=True)
+    run.add_argument('--timeout', type=int, default=1800)
+    run.add_argument(
+        '--runs-directory',
+        type=Path,
+        default=Path('~/.local/state/agent-orchestra/runs'),
+    )
+    run.set_defaults(reviewer_command=())
 
     skills = commands.add_parser('skills', help='manage bundled agent skills')
     skill_commands = skills.add_subparsers(dest='skill_command', required=True)
@@ -239,13 +251,46 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
                 'diff_digest': run.diff_digest,
                 'iteration': run.iteration,
                 'remote_url': run.remote_url,
-                'created_at': run.created_at.isoformat(),
-                'updated_at': run.updated_at.isoformat(),
+                'created_at': run.created_at.astimezone(UTC)
+                .isoformat()
+                .replace('+00:00', 'Z'),
+                'updated_at': run.updated_at.astimezone(UTC)
+                .isoformat()
+                .replace('+00:00', 'Z'),
             }
             for run in runs
         ],
     }
     print(json.dumps(document, indent=2))
+    return 0
+
+
+def _run(args: argparse.Namespace, store: RunStore) -> int:
+    """Consume one queued local run through its first review decision."""
+
+    if not args.database.is_file():
+        print(f'state database not found: {args.database}', file=sys.stderr)
+        return 2
+    try:
+        run = store.get(args.run_id)
+        result = run_queued_review(
+            store=store,
+            run=run,
+            objective=args.objective,
+            reviewer_command=args.reviewer_command,
+            runs_directory=args.runs_directory,
+            timeout_seconds=args.timeout,
+            digest_worktree=_working_tree_digest,
+        )
+    except (OSError, RunNotFoundError, WorkerError) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {'schema_version': 1, 'run_id': str(result.id), 'state': result.state},
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -278,7 +323,15 @@ def _install_skills(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command-line interface."""
 
-    args = build_parser().parse_args(argv)
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    reviewer_command: list[str] = []
+    if 'run' in arguments and '--' in arguments:
+        separator = arguments.index('--')
+        reviewer_command = arguments[separator + 1 :]
+        arguments = arguments[:separator]
+    args = build_parser().parse_args(arguments)
+    if args.command == 'run':
+        args.reviewer_command = reviewer_command
     store = RunStore(args.database)
 
     if args.command == 'init':
@@ -291,6 +344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _enqueue_locals(args, store)
     if args.command == 'status':
         return _status(args, store)
+    if args.command == 'run':
+        return _run(args, store)
     if args.command == 'skills' and args.skill_command == 'install':
         return _install_skills(args)
 

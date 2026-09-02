@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,6 +16,13 @@ def utc_now() -> datetime:
     """Return a timezone-aware current timestamp."""
 
     return datetime.now(UTC)
+
+
+def create_run_id(created_at: datetime) -> str:
+    """Create a repo-independent identifier from UTC time and random entropy."""
+
+    timestamp = created_at.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')
+    return f'{timestamp}-{secrets.token_hex(4)}'
 
 
 class ScenarioType(StrEnum):
@@ -76,7 +83,7 @@ class Finding:
 class Review:
     """One review of an immutable diff digest."""
 
-    run_id: UUID
+    run_id: str
     iteration: int
     diff_digest: str
     verdict: Verdict
@@ -89,7 +96,7 @@ class Review:
 class Run:
     """Persistent orchestration run state."""
 
-    id: UUID
+    id: str
     scenario: ScenarioType
     repository_path: Path
     worktree_path: Path
@@ -113,8 +120,9 @@ class Run:
     ) -> Run:
         """Create a queued run for local changes."""
 
+        created_at = utc_now()
         return cls(
-            id=uuid4(),
+            id=create_run_id(created_at),
             scenario=ScenarioType.LOCAL_CHANGES,
             repository_path=repository_path.resolve(),
             worktree_path=worktree_path.resolve(),
@@ -122,4 +130,6 @@ class Run:
             base_sha=base_sha,
             head_sha=head_sha,
             diff_digest=diff_digest,
+            created_at=created_at,
+            updated_at=created_at,
         )

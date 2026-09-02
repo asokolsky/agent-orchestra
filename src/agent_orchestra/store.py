@@ -6,7 +6,6 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
 
 from agent_orchestra.models import Run, RunState, ScenarioType
 
@@ -79,7 +78,7 @@ class RunStore:
                 (str(run.id), run.state, run.created_at.isoformat()),
             )
 
-    def get(self, run_id: UUID) -> Run:
+    def get(self, run_id: str) -> Run:
         """Return a run by identifier."""
 
         with closing(self._connect()) as connection, connection:
@@ -172,7 +171,7 @@ class RunStore:
         """Convert a database row to a domain model."""
 
         return Run(
-            id=UUID(row['id']),
+            id=row['id'],
             scenario=ScenarioType(row['scenario']),
             repository_path=Path(row['repository_path']),
             worktree_path=Path(row['worktree_path']),
