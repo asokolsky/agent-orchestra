@@ -108,6 +108,13 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument('repository', nargs='?', type=Path, default=Path.cwd())
     enqueue.add_argument('--base', default='HEAD')
 
+    enqueue_many = commands.add_parser(
+        'enqueue-locals',
+        help='enqueue local changes from immediate child Git repositories',
+    )
+    enqueue_many.add_argument('directory', type=Path)
+    enqueue_many.add_argument('--base', default='HEAD')
+
     status = commands.add_parser('status', help='show one run or list all runs')
     status.add_argument('run_id', nargs='?', type=UUID)
 
@@ -126,25 +133,84 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _capture_local_run(repository: Path, base: str) -> Run | None:
+    """Capture a local-changes run without persisting it."""
+
+    base_sha = _git(repository, 'rev-parse', '--verify', base)
+    head_sha = _git(repository, 'rev-parse', '--verify', 'HEAD')
+    diff_digest = _working_tree_digest(repository, base_sha)
+    if diff_digest is None:
+        return None
+    return Run.create_local(repository, repository, base_sha, head_sha, diff_digest)
+
+
 def _enqueue_local(args: argparse.Namespace, store: RunStore) -> int:
     """Enqueue local changes described by parsed CLI arguments."""
 
     repository = args.repository.resolve()
     try:
-        base_sha = _git(repository, 'rev-parse', '--verify', args.base)
-        head_sha = _git(repository, 'rev-parse', '--verify', 'HEAD')
-        diff_digest = _working_tree_digest(repository, base_sha)
+        run = _capture_local_run(repository, args.base)
     except (GitCommandError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
-    if diff_digest is None:
+    if run is None:
         print('error: no local changes to enqueue', file=sys.stderr)
         return 2
-    run = Run.create_local(repository, repository, base_sha, head_sha, diff_digest)
     store.initialize()
     store.add(run)
     print(run.id)
     return 0
+
+
+def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
+    """Enqueue changed Git repositories immediately below a directory."""
+
+    directory = args.directory.expanduser().resolve()
+    if not directory.is_dir():
+        print(f'error: directory not found: {directory}', file=sys.stderr)
+        return 2
+
+    repositories = sorted(
+        (
+            child.resolve()
+            for child in directory.iterdir()
+            if child.is_dir() and (child / '.git').exists()
+        ),
+        key=lambda path: path.name,
+    )
+    if not repositories:
+        print(f'no Git repositories found in {directory}')
+        return 0
+
+    runs: list[Run] = []
+    clean_count = 0
+    failed_count = 0
+    for repository in repositories:
+        try:
+            run = _capture_local_run(repository, args.base)
+        except (GitCommandError, OSError) as error:
+            print(f'error: {repository}: {error}', file=sys.stderr)
+            failed_count += 1
+            continue
+        if run is None:
+            clean_count += 1
+        else:
+            runs.append(run)
+
+    if runs:
+        store.initialize()
+        for run in runs:
+            store.add(run)
+            print(f'{run.id}  {run.worktree_path}')
+    repository_word = 'repository' if len(runs) == 1 else 'repositories'
+    clean_word = 'repository' if clean_count == 1 else 'repositories'
+    failed_word = 'repository' if failed_count == 1 else 'repositories'
+    print(
+        f'enqueued {len(runs)} {repository_word}; '
+        f'skipped {clean_count} clean {clean_word}; '
+        f'failed {failed_count} {failed_word}'
+    )
+    return 2 if not runs and failed_count else 0
 
 
 def _status(args: argparse.Namespace, store: RunStore) -> int:
@@ -201,6 +267,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == 'enqueue-local':
         return _enqueue_local(args, store)
+    if args.command == 'enqueue-locals':
+        return _enqueue_locals(args, store)
     if args.command == 'status':
         return _status(args, store)
     if args.command == 'skills' and args.skill_command == 'install':

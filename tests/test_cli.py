@@ -122,6 +122,161 @@ def test_enqueue_local_rejects_clean_repository(
     assert not database.exists()
 
 
+def test_enqueue_locals_captures_changed_child_repositories(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Enqueue changed immediate child repos while skipping clean repos."""
+
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    changed_b = projects / 'changed-b'
+    changed_a = projects / 'changed-a'
+    clean = projects / 'clean'
+    not_a_repository = projects / 'notes'
+    for repository in (changed_b, changed_a, clean):
+        repository.mkdir()
+        initialize_git_repository(repository)
+    not_a_repository.mkdir()
+    (changed_a / 'tracked.txt').write_text('changed a\n')
+    (changed_b / 'untracked.txt').write_text('changed b\n')
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', str(projects)])
+
+    assert result == 0
+    runs = RunStore(database).list_runs()
+    assert {run.worktree_path for run in runs} == {changed_a, changed_b}
+    output = capsys.readouterr().out
+    assert output.index(str(changed_a)) < output.index(str(changed_b))
+    assert (
+        'enqueued 2 repositories; skipped 1 clean repository; failed 0 repositories'
+    ) in output
+
+
+def test_enqueue_locals_accepts_tilde_directory(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expand a leading tilde in the projects directory argument."""
+
+    projects = tmp_path / 'Projects'
+    repository = projects / 'repo'
+    repository.mkdir(parents=True)
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', '~/Projects'])
+
+    assert result == 0
+    assert RunStore(database).list_runs()[0].worktree_path == repository
+    assert 'enqueued 1 repository' in capsys.readouterr().out
+
+
+def test_enqueue_locals_with_no_changed_repositories_does_not_create_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Succeed without state when no child repository has local changes."""
+
+    projects = tmp_path / 'projects'
+    repository = projects / 'clean'
+    repository.mkdir(parents=True)
+    initialize_git_repository(repository)
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', str(projects)])
+
+    assert result == 0
+    assert not database.exists()
+    assert (
+        'enqueued 0 repositories; skipped 1 clean repository; failed 0 repositories'
+    ) in capsys.readouterr().out
+
+
+def test_enqueue_locals_continues_after_repository_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Enqueue valid changes despite an unreadable sibling repository."""
+
+    projects = tmp_path / 'projects'
+    changed = projects / 'changed'
+    fresh = projects / 'fresh'
+    changed.mkdir(parents=True)
+    fresh.mkdir()
+    initialize_git_repository(changed)
+    (changed / 'tracked.txt').write_text('changed\n')
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run([git, 'init', str(fresh)], check=True, capture_output=True)
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', str(projects)])
+
+    assert result == 0
+    assert RunStore(database).list_runs()[0].worktree_path == changed
+    captured = capsys.readouterr()
+    assert f'error: {fresh}:' in captured.err
+    assert (
+        'enqueued 1 repository; skipped 0 clean repositories; failed 1 repository'
+    ) in captured.out
+
+
+def test_enqueue_locals_fails_when_every_repository_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Return nonzero when no repository can be enqueued and one fails."""
+
+    projects = tmp_path / 'projects'
+    fresh = projects / 'fresh'
+    fresh.mkdir(parents=True)
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run([git, 'init', str(fresh)], check=True, capture_output=True)
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', str(projects)])
+
+    assert result == 2
+    assert not database.exists()
+    captured = capsys.readouterr()
+    assert f'error: {fresh}:' in captured.err
+    assert 'failed 1 repository' in captured.out
+
+
+def test_enqueue_locals_reports_directory_without_repositories(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Distinguish an empty repository scan from an all-clean scan."""
+
+    projects = tmp_path / 'projects'
+    (projects / 'notes').mkdir(parents=True)
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', str(projects)])
+
+    assert result == 0
+    assert not database.exists()
+    assert f'no Git repositories found in {projects}' in capsys.readouterr().out
+
+
+def test_enqueue_locals_rejects_missing_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report a stable error when the projects directory does not exist."""
+
+    database = tmp_path / 'state.db'
+
+    result = main(
+        ['--database', str(database), 'enqueue-locals', str(tmp_path / 'missing')]
+    )
+
+    assert result == 2
+    assert 'directory not found' in capsys.readouterr().err
+    assert not database.exists()
+
+
 def test_status_does_not_create_missing_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
