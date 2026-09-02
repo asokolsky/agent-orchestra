@@ -14,6 +14,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_orchestra.models import (
+    REVIEW_FINDING_FIELDS,
+    Finding,
+    Review,
+    Severity,
+    Verdict,
+)
+from agent_orchestra.reports import render_review
+from agent_orchestra.skill_install import AgentTarget, skill_destination
+
 
 class CodexReviewerError(RuntimeError):
     """Raised when Codex cannot produce a valid structured review."""
@@ -28,6 +38,12 @@ APPROVED_WITH_FINDINGS = 'approved Codex review cannot contain findings'
 MISSING_REQUEST_PATHS = 'review request is missing required paths'
 CODEX_NOT_FOUND = 'codex executable not found'
 CODEX_TIMEOUT = 'codex review timed out'
+REVIEWER_SKILL_MISSING = (
+    'agent-orchestra-reviewer skill is not installed; run '
+    '`agent-orchestra skills install --agent codex --skill agent-orchestra-reviewer`'
+)
+ARTIFACT_OUTSIDE_RUN = 'review artifact path must be inside the request run directory'
+REQUEST_OUTSIDE_MESSAGES = 'review request must be inside a run messages directory'
 
 
 REVIEW_SCHEMA: dict[str, Any] = {
@@ -51,15 +67,7 @@ REVIEW_SCHEMA: dict[str, Any] = {
             'items': {
                 'type': 'object',
                 'additionalProperties': False,
-                'required': [
-                    'finding_id',
-                    'severity',
-                    'title',
-                    'path',
-                    'line',
-                    'explanation',
-                    'acceptance_criterion',
-                ],
+                'required': sorted(REVIEW_FINDING_FIELDS),
                 'properties': {
                     'finding_id': {'type': 'string'},
                     'severity': {
@@ -144,18 +152,9 @@ def _validate_result(result: dict[str, Any]) -> None:
         for key in ('validation', 'verification_gaps')
     ):
         raise CodexReviewerError(INVALID_LISTS)
-    finding_keys = {
-        'finding_id',
-        'severity',
-        'title',
-        'path',
-        'line',
-        'explanation',
-        'acceptance_criterion',
-    }
     if any(
         not isinstance(item, dict)
-        or set(item) != finding_keys
+        or set(item) != REVIEW_FINDING_FIELDS
         or item['severity'] not in {'critical', 'high', 'medium', 'low'}
         or any(
             not isinstance(item[key], str)
@@ -182,49 +181,41 @@ def _validate_result(result: dict[str, Any]) -> None:
         raise CodexReviewerError(APPROVED_WITH_FINDINGS)
 
 
-def _render_artifact(request: dict[str, Any], result: dict[str, Any]) -> str:
-    """Render the structured Codex result as a durable Markdown artifact."""
+def _review(request: dict[str, Any], result: dict[str, Any]) -> Review:
+    """Convert a validated adapter result into the typed review model."""
 
-    lines = [
-        f'# Review: run {request["run_id"]}',
-        '',
-        f'- Iteration: {request["iteration"]}',
-        f'- Diff digest: `{request["scope"]["diff_digest"]}`',
-        f'- Verdict: **{result["verdict"]}**',
-        '',
-        '## Summary',
-        '',
-        result['summary'],
-        '',
-        '## Findings',
-        '',
-    ]
-    if not result['findings']:
-        lines.append('No findings.')
-    for finding in result['findings']:
-        location = finding['path'] or 'general'
-        if finding['line'] is not None:
-            location = f'{location}:{finding["line"]}'
-        lines.extend(
-            [
-                f'### {finding["finding_id"]}: {finding["severity"]} - {finding["title"]}',
-                '',
-                f'Location: `{location}`',
-                '',
-                finding['explanation'],
-                '',
-                f'Acceptance criterion: {finding["acceptance_criterion"]}',
-                '',
-            ]
-        )
-    for heading, key, empty in (
-        ('Validation', 'validation', 'No validation reported.'),
-        ('Verification gaps', 'verification_gaps', 'No verification gaps reported.'),
-    ):
-        lines.extend(['', f'## {heading}', ''])
-        values = result[key]
-        lines.extend((f'- {value}' for value in values) if values else [empty])
-    return '\n'.join(lines).rstrip() + '\n'
+    return Review(
+        run_id=str(request['run_id']),
+        iteration=int(request['iteration']),
+        diff_digest=str(request['scope']['diff_digest']),
+        verdict=Verdict(result['verdict']),
+        summary=result['summary'],
+        findings=tuple(
+            Finding(
+                finding_id=finding['finding_id'],
+                severity=Severity(finding['severity']),
+                title=finding['title'],
+                explanation=finding['explanation'],
+                acceptance_criterion=finding['acceptance_criterion'],
+                path=finding['path'],
+                line=finding['line'],
+            )
+            for finding in result['findings']
+        ),
+        validation=tuple(result['validation']),
+        verification_gaps=tuple(result['verification_gaps']),
+    )
+
+
+def _require_safe_artifact_path(request_path: Path, artifact_path: Path) -> None:
+    """Require an artifact inside the run directory containing the request."""
+
+    request_parent = request_path.resolve().parent
+    if request_parent.name != 'messages':
+        raise CodexReviewerError(REQUEST_OUTSIDE_MESSAGES)
+    run_directory = request_parent.parent
+    if not artifact_path.resolve().is_relative_to(run_directory):
+        raise CodexReviewerError(ARTIFACT_OUTSIDE_RUN)
 
 
 def run_codex_reviewer(
@@ -239,11 +230,16 @@ def run_codex_reviewer(
         timeout_seconds = int(request['payload']['timeout_seconds'])
     except (KeyError, TypeError, ValueError) as error:
         raise CodexReviewerError(MISSING_REQUEST_PATHS) from error
+    _require_safe_artifact_path(request_path, artifact_path)
     if timeout_seconds <= 0:
         raise CodexReviewerError(CODEX_TIMEOUT)
     codex = shutil.which('codex')
     if codex is None:
         raise CodexReviewerError(CODEX_NOT_FOUND)
+    if not (
+        skill_destination(AgentTarget.CODEX, 'agent-orchestra-reviewer') / 'SKILL.md'
+    ).is_file():
+        raise CodexReviewerError(REVIEWER_SKILL_MISSING)
 
     response_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -291,7 +287,7 @@ def run_codex_reviewer(
         result = _read_object(result_path)
 
     _validate_result(result)
-    _write_text_atomic(artifact_path, _render_artifact(request, result))
+    _write_text_atomic(artifact_path, render_review(_review(request, result)))
     response = {
         'schema_version': 1,
         'message_id': str(uuid4()),

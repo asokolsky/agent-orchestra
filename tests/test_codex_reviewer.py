@@ -11,9 +11,11 @@ from uuid import uuid4
 import pytest
 
 from agent_orchestra.codex_reviewer import (
+    REVIEW_SCHEMA,
     CodexReviewerError,
     run_codex_reviewer,
 )
+from agent_orchestra.models import REVIEW_FINDING_FIELDS
 
 
 def write_request(path: Path, worktree: Path, artifact: Path) -> None:
@@ -44,7 +46,21 @@ def write_request(path: Path, worktree: Path, artifact: Path) -> None:
             'prior_review_path': None,
         },
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(request), encoding='utf-8')
+
+
+@pytest.fixture(autouse=True)
+def installed_reviewer_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide an isolated installed reviewer skill for adapter tests."""
+
+    skill = tmp_path / 'codex/skills/agent-orchestra-reviewer'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('review instructions\n')
+    monkeypatch.setattr(
+        'agent_orchestra.codex_reviewer.skill_destination',
+        lambda *_args, **_kwargs: skill,
+    )
 
 
 def approved_result() -> dict[str, object]:
@@ -57,6 +73,14 @@ def approved_result() -> dict[str, object]:
         'validation': ['pytest passed'],
         'verification_gaps': [],
     }
+
+
+def test_review_schema_has_deterministic_required_field_order() -> None:
+    """Keep the serialized schema stable across interpreter processes."""
+
+    finding_schema = REVIEW_SCHEMA['properties']['findings']['items']
+
+    assert finding_schema['required'] == sorted(REVIEW_FINDING_FIELDS)
 
 
 def test_codex_adapter_runs_read_only_and_writes_protocol_files(
@@ -111,8 +135,8 @@ def test_codex_adapter_requires_installed_cli(
 
     worktree = tmp_path / 'repo'
     worktree.mkdir()
-    request = tmp_path / 'request.json'
-    write_request(request, worktree, tmp_path / 'review.md')
+    request = tmp_path / 'messages/request.json'
+    write_request(request, worktree, tmp_path / 'artifacts/review.md')
     monkeypatch.setattr('agent_orchestra.codex_reviewer.shutil.which', lambda _: None)
 
     with pytest.raises(CodexReviewerError, match='codex executable not found'):
@@ -126,8 +150,8 @@ def test_codex_adapter_rejects_approved_findings(
 
     worktree = tmp_path / 'repo'
     worktree.mkdir()
-    request = tmp_path / 'request.json'
-    write_request(request, worktree, tmp_path / 'review.md')
+    request = tmp_path / 'messages/request.json'
+    write_request(request, worktree, tmp_path / 'artifacts/review.md')
     response = tmp_path / 'response.json'
     result = approved_result()
     result['findings'] = [
@@ -156,3 +180,51 @@ def test_codex_adapter_rejects_approved_findings(
 
     with pytest.raises(CodexReviewerError, match='cannot contain findings'):
         run_codex_reviewer(request, response)
+
+
+def test_codex_adapter_requires_reviewer_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject a silent fallback when the reviewer role skill is absent."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'messages/request.json'
+    write_request(request, worktree, tmp_path / 'artifacts/review.md')
+    monkeypatch.setattr(
+        'agent_orchestra.codex_reviewer.shutil.which', lambda _: '/bin/codex'
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.codex_reviewer.skill_destination',
+        lambda *_args, **_kwargs: tmp_path / 'missing-skill',
+    )
+
+    with pytest.raises(CodexReviewerError, match='skills install'):
+        run_codex_reviewer(request, tmp_path / 'response.json')
+
+
+def test_codex_adapter_rejects_artifact_outside_run_directory(tmp_path: Path) -> None:
+    """Prevent a standalone request from writing an arbitrary artifact path."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    run_directory = tmp_path / 'run'
+    request = run_directory / 'messages/request.json'
+    write_request(request, worktree, tmp_path / 'outside/review.md')
+
+    with pytest.raises(CodexReviewerError, match='inside the request run directory'):
+        run_codex_reviewer(request, run_directory / 'response.json')
+
+
+def test_codex_adapter_reports_request_outside_messages_directory(
+    tmp_path: Path,
+) -> None:
+    """Diagnose an unsupported standalone request layout accurately."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'request.json'
+    write_request(request, worktree, tmp_path / 'artifacts/review.md')
+
+    with pytest.raises(CodexReviewerError, match='run messages directory'):
+        run_codex_reviewer(request, tmp_path / 'response.json')

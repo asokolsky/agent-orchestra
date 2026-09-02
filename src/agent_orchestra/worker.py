@@ -10,7 +10,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
+from agent_orchestra.models import (
+    REVIEW_FINDING_FIELDS,
+    Run,
+    RunState,
+    same_diff_digest,
+    utc_now,
+)
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
@@ -144,17 +150,8 @@ def _validate_review_response(
     for key in ('findings', 'validation', 'verification_gaps'):
         if not isinstance(payload[key], list):
             raise WorkerError(INVALID_PAYLOAD)
-    finding_keys = {
-        'finding_id',
-        'severity',
-        'title',
-        'path',
-        'line',
-        'explanation',
-        'acceptance_criterion',
-    }
     if any(
-        not isinstance(finding, dict) or set(finding) != finding_keys
+        not isinstance(finding, dict) or set(finding) != REVIEW_FINDING_FIELDS
         for finding in payload['findings']
     ):
         raise WorkerError(INVALID_PAYLOAD)

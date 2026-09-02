@@ -13,6 +13,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 BARE_SHA256 = re.compile(r'^[0-9a-f]{64}$')
+REVIEW_FINDING_FIELDS = frozenset(
+    {
+        'finding_id',
+        'severity',
+        'title',
+        'path',
+        'line',
+        'explanation',
+        'acceptance_criterion',
+    }
+)
 
 
 def utc_now() -> datetime:
@@ -89,9 +100,11 @@ class Severity(StrEnum):
 class Finding:
     """A structured reviewer finding."""
 
+    finding_id: str
     severity: Severity
     title: str
     explanation: str
+    acceptance_criterion: str
     path: str | None = None
     line: int | None = None
 
@@ -106,6 +119,8 @@ class Review:
     verdict: Verdict
     summary: str
     findings: tuple[Finding, ...] = ()
+    validation: tuple[str, ...] = ()
+    verification_gaps: tuple[str, ...] = ()
     created_at: datetime = field(default_factory=utc_now)
 
 
