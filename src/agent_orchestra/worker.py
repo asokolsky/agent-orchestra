@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -17,6 +17,12 @@ from agent_orchestra.agents import (
     CommandAgentAdapter,
     DeveloperRequest,
     ReviewerRequest,
+)
+from agent_orchestra.invocations import (
+    InvocationIdentity,
+    InvocationRecord,
+    timestamp,
+    write_record,
 )
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.schemas import (
@@ -116,6 +122,65 @@ def _write_text_atomic(path: Path, content: str) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _output_text(value: str | bytes | None) -> str:
+    """Normalize captured subprocess output for durable UTF-8 logs."""
+
+    if value is None:
+        return ''
+    return value.decode(errors='replace') if isinstance(value, bytes) else value
+
+
+def _record_invocation(
+    *,
+    run: Run,
+    role: Literal['developer', 'reviewer'],
+    identity: InvocationIdentity,
+    iteration: int,
+    sequence: int,
+    started_at: str,
+    logs: Path,
+    invocations: Path,
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+    exit_code: int | None,
+    timed_out: bool = False,
+    interrupted: bool = False,
+    invocation_id: str | None = None,
+    finished: bool = True,
+) -> str:
+    """Persist separate streams and their adapter-neutral invocation record."""
+
+    invocation_id = invocation_id or str(uuid4())
+    log_stem = f'{sequence:06d}-{role}'
+    stdout_path = logs / f'{log_stem}.stdout.log'
+    stderr_path = logs / f'{log_stem}.stderr.log'
+    if stdout is not None or not stdout_path.exists():
+        _write_text_atomic(stdout_path, _output_text(stdout))
+    if stderr is not None or not stderr_path.exists():
+        _write_text_atomic(stderr_path, _output_text(stderr))
+    write_record(
+        invocations / f'{log_stem}.json',
+        InvocationRecord(
+            schema_version=1,
+            run_id=str(run.id),
+            invocation_id=invocation_id,
+            role=role,
+            agent_vendor=identity.vendor,
+            agent_model=identity.model,
+            runtime=identity.runtime,
+            iteration=iteration,
+            started_at=started_at,
+            finished_at=timestamp() if finished else None,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            interrupted=interrupted,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+        ),
+    )
+    return invocation_id
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -306,6 +371,8 @@ def _run_queued_review(
     developer_timeout_seconds: int | None = None,
     max_iterations: int = 3,
     digest_worktree: Callable[[Path, str], str | None],
+    reviewer_identity: InvocationIdentity,
+    developer_identity: InvocationIdentity,
 ) -> Run:
     """Consume one queued local run through a bounded review-remediation loop."""
 
@@ -343,6 +410,7 @@ def _run_queued_review(
     messages = run_directory / 'messages'
     artifacts = run_directory / 'artifacts'
     logs = run_directory / 'logs'
+    invocations = run_directory / 'invocations'
     _write_json_atomic(
         run_directory / 'execution.json',
         {
@@ -356,6 +424,7 @@ def _run_queued_review(
     )
     artifacts.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
+    invocations.mkdir(parents=True, exist_ok=True)
     reviewing = transition(prepared, RunState.REVIEWING)
     store.update(reviewing, expected_state=RunState.PREPARING)
     sequence = 1
@@ -396,6 +465,21 @@ def _run_queued_review(
         }
         _validate_review_request(request, run_directory=run_directory)
         _write_json_atomic(request_path, request)
+        started_at = timestamp()
+        invocation_id = _record_invocation(
+            run=run,
+            role='reviewer',
+            identity=reviewer_identity,
+            iteration=reviewing.iteration,
+            sequence=sequence,
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout='',
+            stderr='',
+            exit_code=None,
+            finished=False,
+        )
         try:
             completed = reviewer_adapter.execute(
                 ReviewerRequest(
@@ -410,21 +494,82 @@ def _run_queued_review(
                     artifact_path=artifact_path,
                     request_path=request_path,
                     response_path=response_path,
+                    stdout_path=logs / f'{sequence:06d}-reviewer.stdout.log',
+                    stderr_path=logs / f'{sequence:06d}-reviewer.stderr.log',
                 )
             )
         except subprocess.TimeoutExpired as error:
+            _record_invocation(
+                run=run,
+                role='reviewer',
+                identity=reviewer_identity,
+                iteration=reviewing.iteration,
+                sequence=sequence,
+                started_at=started_at,
+                logs=logs,
+                invocations=invocations,
+                stdout=error.stdout,
+                stderr=error.stderr,
+                exit_code=None,
+                timed_out=True,
+                invocation_id=invocation_id,
+            )
             failed = transition(reviewing, RunState.FAILED)
             store.update(failed, expected_state=RunState.REVIEWING)
             raise WorkerError(
                 f'reviewer timed out after {timeout_seconds} seconds'
             ) from error
+        except KeyboardInterrupt:
+            _record_invocation(
+                run=run,
+                role='reviewer',
+                identity=reviewer_identity,
+                iteration=reviewing.iteration,
+                sequence=sequence,
+                started_at=started_at,
+                logs=logs,
+                invocations=invocations,
+                stdout=None,
+                stderr=None,
+                exit_code=None,
+                interrupted=True,
+                invocation_id=invocation_id,
+            )
+            interrupted = transition(reviewing, RunState.INTERRUPTED)
+            store.update(interrupted, expected_state=RunState.REVIEWING)
+            raise
         except OSError as error:
+            _record_invocation(
+                run=run,
+                role='reviewer',
+                identity=reviewer_identity,
+                iteration=reviewing.iteration,
+                sequence=sequence,
+                started_at=started_at,
+                logs=logs,
+                invocations=invocations,
+                stdout='',
+                stderr=str(error),
+                exit_code=None,
+                invocation_id=invocation_id,
+            )
             failed = transition(reviewing, RunState.FAILED)
             store.update(failed, expected_state=RunState.REVIEWING)
             raise WorkerError(f'cannot execute reviewer: {error}') from error
-        log_stem = f'{sequence:06d}-reviewer'
-        _write_text_atomic(logs / f'{log_stem}.stdout.log', completed.stdout)
-        _write_text_atomic(logs / f'{log_stem}.stderr.log', completed.stderr)
+        _record_invocation(
+            run=run,
+            role='reviewer',
+            identity=reviewer_identity,
+            iteration=reviewing.iteration,
+            sequence=sequence,
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.exit_code,
+            invocation_id=invocation_id,
+        )
         if not completed.succeeded:
             failed = transition(reviewing, RunState.FAILED)
             store.update(failed, expected_state=RunState.REVIEWING)
@@ -501,6 +646,21 @@ def _run_queued_review(
         }
         _validate_remediation_request(remediation, run_directory=run_directory)
         _write_json_atomic(remediation_path, remediation)
+        started_at = timestamp()
+        invocation_id = _record_invocation(
+            run=run,
+            role='developer',
+            identity=developer_identity,
+            iteration=reviewing.iteration,
+            sequence=sequence,
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout='',
+            stderr='',
+            exit_code=None,
+            finished=False,
+        )
         try:
             completed = developer_adapter.execute(
                 DeveloperRequest(
@@ -511,21 +671,82 @@ def _run_queued_review(
                     timeout_seconds=developer_timeout_seconds,
                     request_path=remediation_path,
                     response_path=handoff_temporary,
+                    stdout_path=logs / f'{sequence:06d}-developer.stdout.log',
+                    stderr_path=logs / f'{sequence:06d}-developer.stderr.log',
                 )
             )
         except subprocess.TimeoutExpired as error:
+            _record_invocation(
+                run=run,
+                role='developer',
+                identity=developer_identity,
+                iteration=reviewing.iteration,
+                sequence=sequence,
+                started_at=started_at,
+                logs=logs,
+                invocations=invocations,
+                stdout=error.stdout,
+                stderr=error.stderr,
+                exit_code=None,
+                timed_out=True,
+                invocation_id=invocation_id,
+            )
             failed = transition(developing, RunState.FAILED)
             store.update(failed, expected_state=RunState.DEVELOPING)
             raise WorkerError(
                 f'developer timed out after {developer_timeout_seconds} seconds'
             ) from error
+        except KeyboardInterrupt:
+            _record_invocation(
+                run=run,
+                role='developer',
+                identity=developer_identity,
+                iteration=reviewing.iteration,
+                sequence=sequence,
+                started_at=started_at,
+                logs=logs,
+                invocations=invocations,
+                stdout=None,
+                stderr=None,
+                exit_code=None,
+                interrupted=True,
+                invocation_id=invocation_id,
+            )
+            interrupted = transition(developing, RunState.INTERRUPTED)
+            store.update(interrupted, expected_state=RunState.DEVELOPING)
+            raise
         except OSError as error:
+            _record_invocation(
+                run=run,
+                role='developer',
+                identity=developer_identity,
+                iteration=reviewing.iteration,
+                sequence=sequence,
+                started_at=started_at,
+                logs=logs,
+                invocations=invocations,
+                stdout='',
+                stderr=str(error),
+                exit_code=None,
+                invocation_id=invocation_id,
+            )
             failed = transition(developing, RunState.FAILED)
             store.update(failed, expected_state=RunState.DEVELOPING)
             raise WorkerError(f'cannot execute developer: {error}') from error
-        log_stem = f'{sequence:06d}-developer'
-        _write_text_atomic(logs / f'{log_stem}.stdout.log', completed.stdout)
-        _write_text_atomic(logs / f'{log_stem}.stderr.log', completed.stderr)
+        _record_invocation(
+            run=run,
+            role='developer',
+            identity=developer_identity,
+            iteration=reviewing.iteration,
+            sequence=sequence,
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.exit_code,
+            invocation_id=invocation_id,
+        )
         if not completed.succeeded:
             failed = transition(developing, RunState.FAILED)
             store.update(failed, expected_state=RunState.DEVELOPING)
@@ -607,10 +828,18 @@ def run_queued_review(
     developer_timeout_seconds: int | None = None,
     max_iterations: int = 3,
     digest_worktree: Callable[[Path, str], str | None],
+    reviewer_identity: InvocationIdentity | None = None,
+    developer_identity: InvocationIdentity | None = None,
 ) -> Run:
     """Run the bounded loop and persist every worker failure as durable evidence."""
 
     run_directory = runs_directory.expanduser().resolve() / str(run.id)
+    reviewer_identity = reviewer_identity or InvocationIdentity(
+        vendor='unknown', model=None, runtime='custom-command'
+    )
+    developer_identity = developer_identity or InvocationIdentity(
+        vendor='unknown', model=None, runtime='custom-command'
+    )
     try:
         return _run_queued_review(
             store=store,
@@ -623,6 +852,8 @@ def run_queued_review(
             developer_timeout_seconds=developer_timeout_seconds,
             max_iterations=max_iterations,
             digest_worktree=digest_worktree,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):

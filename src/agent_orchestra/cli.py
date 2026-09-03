@@ -10,9 +10,16 @@ import shutil
 import subprocess
 import sys
 from datetime import UTC
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_orchestra.invocations import (
+    InvocationEvidenceError,
+    InvocationIdentity,
+    legacy_log_groups,
+    read_records,
+)
 from agent_orchestra.models import Run
 from agent_orchestra.skill_install import (
     AgentTarget,
@@ -26,9 +33,18 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
-CLI_SCHEMA_VERSION = 2
+CLI_SCHEMA_VERSION = 3
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
+
+
+def _distribution_version() -> str:
+    """Return the installed distribution version or a source-tree fallback."""
+
+    try:
+        return version('agent-orchestra')
+    except PackageNotFoundError:
+        return '0+unknown'
 
 
 class GitCommandError(RuntimeError):
@@ -108,6 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
 
     parser = argparse.ArgumentParser(prog='agent-orchestra')
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {_distribution_version()}',
+    )
     parser.add_argument('--database', type=Path, default=DEFAULT_DATABASE)
     commands = parser.add_subparsers(dest='command', required=True)
 
@@ -128,6 +149,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser('status', help='show one run or list all runs')
     status.add_argument('run_id', nargs='?')
+
+    logs = commands.add_parser('logs', help='show process logs for one run')
+    logs.add_argument('run_id')
+    logs.add_argument('--iteration', type=int)
+    logs.add_argument('--role', choices=('developer', 'reviewer'))
+    logs.add_argument('--invocation')
+    logs.add_argument('--runtime')
+    logs.add_argument('--stream', choices=('stdout', 'stderr'))
+    logs.add_argument(
+        '--runs-directory',
+        type=Path,
+        default=Path('~/.local/state/agent-orchestra/runs'),
+    )
 
     run = commands.add_parser('run', help='run a bounded review-remediation loop')
     run.add_argument('run_id')
@@ -195,11 +229,26 @@ def _enqueue_local(args: argparse.Namespace, store: RunStore) -> int:
 
 
 def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
-    """Enqueue changed Git repositories immediately below a directory."""
+    """Enqueue changed child repos and write one versioned JSON result."""
 
     directory = args.directory.expanduser().resolve()
     if not directory.is_dir():
-        print(f'error: directory not found: {directory}', file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    'schema_version': CLI_SCHEMA_VERSION,
+                    'directory': str(directory),
+                    'runs': [],
+                    'summary': {'enqueued': 0, 'clean': 0, 'failed': 0},
+                    'failures': [],
+                    'error': {
+                        'code': 'directory_not_found',
+                        'message': f'directory not found: {directory}',
+                    },
+                },
+                indent=2,
+            )
+        )
         return 2
 
     repositories = sorted(
@@ -210,19 +259,14 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
         ),
         key=lambda path: path.name,
     )
-    if not repositories:
-        print(f'no Git repositories found in {directory}')
-        return 0
-
     runs: list[Run] = []
     clean_count = 0
-    failed_count = 0
+    failures: list[dict[str, str]] = []
     for repository in repositories:
         try:
             run = _capture_local_run(repository, args.base)
         except (GitCommandError, OSError) as error:
-            print(f'error: {repository}: {error}', file=sys.stderr)
-            failed_count += 1
+            failures.append({'repository_path': str(repository), 'message': str(error)})
             continue
         if run is None:
             clean_count += 1
@@ -233,16 +277,27 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
         store.initialize()
         for run in runs:
             store.add(run)
-            print(f'{run.id}  {run.worktree_path}')
-    repository_word = 'repository' if len(runs) == 1 else 'repositories'
-    clean_word = 'repository' if clean_count == 1 else 'repositories'
-    failed_word = 'repository' if failed_count == 1 else 'repositories'
     print(
-        f'enqueued {len(runs)} {repository_word}; '
-        f'skipped {clean_count} clean {clean_word}; '
-        f'failed {failed_count} {failed_word}'
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'directory': str(directory),
+                'runs': [
+                    {'id': str(run.id), 'worktree_path': str(run.worktree_path)}
+                    for run in runs
+                ],
+                'summary': {
+                    'enqueued': len(runs),
+                    'clean': clean_count,
+                    'failed': len(failures),
+                },
+                'failures': failures,
+                'error': None,
+            },
+            indent=2,
+        )
     )
-    return 2 if not runs and failed_count else 0
+    return 2 if not runs and failures else 0
 
 
 def _status(args: argparse.Namespace, store: RunStore) -> int:
@@ -307,6 +362,9 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         _require_external_database(args.database, run.worktree_path)
         if args.reviewer_command:
             reviewer_command = args.reviewer_command
+            reviewer_identity = InvocationIdentity(
+                vendor='unknown', model=None, runtime='custom-command'
+            )
         else:
             module = (
                 'agent_orchestra.adapter.codex'
@@ -320,6 +378,11 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
             ]
             if args.reviewer_model:
                 reviewer_command.extend(['--model', args.reviewer_model])
+            reviewer_identity = InvocationIdentity(
+                vendor='openai' if args.reviewer_agent == 'codex' else 'anthropic',
+                model=args.reviewer_model,
+                runtime=args.reviewer_agent,
+            )
         developer_command: list[str] = []
         if not args.reviewer_command:
             developer_module = (
@@ -336,6 +399,11 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
             ]
             if args.developer_model:
                 developer_command.extend(['--model', args.developer_model])
+        developer_identity = InvocationIdentity(
+            vendor=('openai' if args.developer_agent == 'codex' else 'anthropic'),
+            model=args.developer_model,
+            runtime=args.developer_agent,
+        )
         result = run_queued_review(
             store=store,
             run=run,
@@ -347,6 +415,8 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
             developer_timeout_seconds=args.developer_timeout,
             max_iterations=args.max_iterations,
             digest_worktree=_working_tree_digest,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
         )
     except (OSError, RunNotFoundError, WorkerError) as error:
         print(f'error: {error}', file=sys.stderr)
@@ -362,6 +432,219 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         )
     )
     return 0
+
+
+def _log_stream_document(
+    *,
+    role: str,
+    vendor: str | None,
+    model: str | None,
+    runtime: str | None,
+    iteration: int | None,
+    invocation_id: str,
+    stream: str,
+    path: Path,
+    started_at: str | None,
+    finished_at: str | None,
+    exit_code: int | None,
+    timed_out: bool | None,
+    interrupted: bool | None,
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    """Return one log stream document or a structured missing-file failure."""
+
+    if not path.is_file():
+        return None, {
+            'code': 'missing_log',
+            'stream': stream,
+            'path': str(path),
+            'message': f'missing {stream} log: {path}',
+        }
+    return (
+        {
+            'invocation_id': invocation_id,
+            'role': role,
+            'agent_vendor': vendor,
+            'agent_model': model,
+            'runtime': runtime,
+            'iteration': iteration,
+            'started_at': started_at,
+            'finished_at': finished_at,
+            'exit_code': exit_code,
+            'timed_out': timed_out,
+            'interrupted': interrupted,
+            'stream': stream,
+            'path': str(path),
+            'content': path.read_text(encoding='utf-8', errors='replace'),
+            'legacy': iteration is None,
+        },
+        None,
+    )
+
+
+def _write_logs_document(
+    run_id: str,
+    *,
+    streams: list[dict[str, object]] | None = None,
+    failures: list[dict[str, object]] | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Write one versioned JSON logs result to standard output."""
+
+    print(
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'run_id': run_id,
+                'streams': streams or [],
+                'failures': failures or [],
+                'error': (
+                    {'code': error_code, 'message': error_message}
+                    if error_code is not None
+                    else None
+                ),
+            },
+            indent=2,
+        )
+    )
+
+
+def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
+    """Write process logs as JSON without initializing or modifying run state."""
+
+    if not args.database.is_file():
+        _write_logs_document(
+            args.run_id,
+            error_code='state_database_not_found',
+            error_message=f'state database not found: {args.database}',
+        )
+        return 2
+    try:
+        store.get(args.run_id)
+    except RunNotFoundError as error:
+        _write_logs_document(
+            args.run_id,
+            error_code='run_not_found',
+            error_message=f'run not found: {error}',
+        )
+        return 2
+    root = args.runs_directory.expanduser().resolve()
+    run_directory = root / args.run_id
+    if run_directory.is_symlink() or not run_directory.resolve().is_relative_to(root):
+        _write_logs_document(
+            args.run_id,
+            error_code='run_evidence_escape',
+            error_message='run evidence escapes the configured runs directory',
+        )
+        return 2
+    if not run_directory.is_dir():
+        _write_logs_document(
+            args.run_id,
+            error_code='run_evidence_not_found',
+            error_message=f'run evidence not found: {run_directory}',
+        )
+        return 2
+    requested_streams = (args.stream,) if args.stream else ('stdout', 'stderr')
+    stream_documents: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    try:
+        records = read_records(run_directory, args.run_id)
+        if records:
+            for record in records:
+                if args.iteration is not None and record.iteration != args.iteration:
+                    continue
+                if args.role is not None and record.role != args.role:
+                    continue
+                if (
+                    args.invocation is not None
+                    and record.invocation_id != args.invocation
+                ):
+                    continue
+                if args.runtime is not None and record.runtime != args.runtime:
+                    continue
+                for stream in requested_streams:
+                    path = Path(
+                        record.stdout_path if stream == 'stdout' else record.stderr_path
+                    )
+                    document, failure = _log_stream_document(
+                        role=record.role,
+                        vendor=record.agent_vendor,
+                        model=record.agent_model,
+                        runtime=record.runtime,
+                        iteration=record.iteration,
+                        invocation_id=record.invocation_id,
+                        stream=stream,
+                        path=path,
+                        started_at=record.started_at,
+                        finished_at=record.finished_at,
+                        exit_code=record.exit_code,
+                        timed_out=record.timed_out,
+                        interrupted=record.interrupted,
+                    )
+                    if document is not None:
+                        stream_documents.append(document)
+                    if failure is not None:
+                        failures.append(failure)
+        else:
+            if (
+                args.iteration is not None
+                or args.invocation is not None
+                or args.runtime is not None
+            ):
+                _write_logs_document(
+                    args.run_id,
+                    error_code='legacy_metadata_unavailable',
+                    error_message=(
+                        'legacy logs do not contain iteration, invocation, or runtime metadata'
+                    ),
+                )
+                return 2
+            for sequence, role, stdout_path, stderr_path in legacy_log_groups(
+                run_directory
+            ):
+                if args.role is not None and role != args.role:
+                    continue
+                for stream in requested_streams:
+                    path = stdout_path if stream == 'stdout' else stderr_path
+                    document, failure = _log_stream_document(
+                        role=role,
+                        vendor=None,
+                        model=None,
+                        runtime=None,
+                        iteration=None,
+                        invocation_id=f'legacy-{sequence}-{role}',
+                        stream=stream,
+                        path=path,
+                        started_at=None,
+                        finished_at=None,
+                        exit_code=None,
+                        timed_out=None,
+                        interrupted=None,
+                    )
+                    if document is not None:
+                        stream_documents.append(document)
+                    if failure is not None:
+                        failures.append(failure)
+    except (InvocationEvidenceError, OSError) as error:
+        _write_logs_document(
+            args.run_id,
+            error_code='invalid_evidence',
+            error_message=str(error),
+        )
+        return 2
+    if not stream_documents and not failures:
+        _write_logs_document(
+            args.run_id,
+            error_code='no_matching_logs',
+            error_message='no matching logs found',
+        )
+        return 2
+    _write_logs_document(
+        args.run_id,
+        streams=stream_documents,
+        failures=failures,
+    )
+    return 2 if failures else 0
 
 
 def _install_skills(args: argparse.Namespace) -> int:
@@ -390,7 +673,7 @@ def _install_skills(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
     """Run the command-line interface."""
 
     arguments = list(argv) if argv is not None else sys.argv[1:]
@@ -414,6 +697,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _enqueue_locals(args, store)
     if args.command == 'status':
         return _status(args, store)
+    if args.command == 'logs':
+        return _logs(args, store)
     if args.command == 'run':
         return _run(args, store)
     if args.command == 'skills' and args.skill_command == 'install':

@@ -19,6 +19,7 @@ from agent_orchestra.adapter.developer import (
     read_request,
     write_handoff,
 )
+from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.schemas import (
@@ -223,14 +224,11 @@ def run_claude_code_reviewer(
     if model:
         command.extend(['--model', model])
     try:
-        completed = subprocess.run(
+        completed = run_streaming_process(
             command,
             cwd=worktree,
             env={**os.environ, 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB': '1'},
             input=_prompt(request),
-            check=False,
-            capture_output=True,
-            text=True,
             timeout=max(1, timeout_seconds - 5),
         )
     except subprocess.TimeoutExpired as error:
@@ -318,14 +316,11 @@ def run_claude_code_developer(
     if model:
         command.extend(['--model', model])
     try:
-        completed = subprocess.run(
+        completed = run_streaming_process(
             command,
             cwd=worktree,
             env={**os.environ, 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB': '1'},
             input=developer_prompt(request, '/agent-orchestra-developer'),
-            check=False,
-            capture_output=True,
-            text=True,
             timeout=max(1, timeout_seconds - 5),
         )
     except subprocess.TimeoutExpired as error:

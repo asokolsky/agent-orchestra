@@ -100,7 +100,9 @@ def test_claude_code_reviewer_is_read_only_and_writes_protocol_files(
     monkeypatch.setattr(
         'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
     )
-    monkeypatch.setattr('agent_orchestra.adapter.claude_code.subprocess.run', run)
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.run_streaming_process', run
+    )
 
     run_claude_code_reviewer(request, response, model='sonnet')
 
@@ -143,7 +145,7 @@ def test_claude_code_reviewer_requires_structured_output(
         'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
     )
     monkeypatch.setattr(
-        'agent_orchestra.adapter.claude_code.subprocess.run',
+        'agent_orchestra.adapter.claude_code.run_streaming_process',
         lambda command, **_kwargs: subprocess.CompletedProcess(
             command, 0, stdout='{"result":"text"}', stderr=''
         ),
@@ -151,6 +153,42 @@ def test_claude_code_reviewer_requires_structured_output(
 
     with pytest.raises(ClaudeCodeReviewerError, match='structured_output'):
         run_claude_code_reviewer(request, tmp_path / 'run/result.json')
+
+
+def test_claude_code_reviewer_parses_structured_output_with_invalid_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfdbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    """Preserve invalid bytes while parsing the decoded structured response."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    artifact = tmp_path / 'run/artifacts/review.md'
+    request = tmp_path / 'run/messages/request.json'
+    response = tmp_path / 'run/result.json'
+    _write_request(request, worktree, artifact)
+    raw_output = (
+        b'{"noise":"\xe9","structured_output":'
+        + json.dumps(_approved_result()).encode()
+        + b'}'
+    )
+    executable = tmp_path / 'bin/claude'
+    executable.parent.mkdir()
+    executable.write_text(
+        f'#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write({raw_output!r})\n'
+    )
+    executable.chmod(0o755)
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.shutil.which', lambda _: str(executable)
+    )
+
+    run_claude_code_reviewer(request, response)
+
+    captured = capfdbinary.readouterr()
+    assert captured.out == raw_output
+    assert json.loads(response.read_text())['payload']['verdict'] == 'approved'
+    assert artifact.is_file()
 
 
 def test_claude_code_reviewer_requires_installed_skill(

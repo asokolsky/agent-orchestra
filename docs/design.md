@@ -142,7 +142,7 @@ match its repo and worktree in the `runs` array:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "runs": [
     {
       "id": "20260902T150612Z-a7f3c921",
@@ -163,10 +163,23 @@ match its repo and worktree in the `runs` array:
 ```
 
 This CLI output is not a workflow message. The message contract begins below.
-CLI output schema version 2 renames `awaiting_review` to `reviewing`. Existing
-databases remain readable, and initialization rewrites the legacy stored value.
-Consumers of schema version 1 should treat the two names as the same lifecycle
-state while migrating to version 2.
+CLI output schema version 3 changes `enqueue-locals` from plain-text rows and
+stderr diagnostics to one JSON document. Version 2 renamed `awaiting_review` to
+`reviewing`. Existing databases remain readable, and initialization rewrites the
+legacy stored value. Consumers of schema version 1 should treat the two names as
+the same lifecycle state while migrating to a current schema.
+
+## Batch enqueue output
+
+`enqueue-locals` prints one versioned JSON document. Its `directory` identifies
+the scanned parent, `runs` lists enqueued run IDs and absolute worktree paths in
+repo-basename order, and `summary` contains numeric `enqueued`, `clean`, and
+`failed` counts. Independent repo failures appear in `failures` with their
+source path and diagnostic. A command-level failure uses the top-level `error`
+object; successful and completed partial scans set `error` to `null`.
+
+This JSON is CLI output rather than a workflow message. Callers must use the
+declared schema version and treat run IDs as opaque strings.
 
 ## Message representation
 
@@ -324,6 +337,34 @@ diff, the valid handoff is preserved and the run returns to
 `changes_requested`. A `decision-required.json` record with the stable
 `developer_disagreement` reason makes the reviewer/developer disagreement a
 human decision rather than a failed or endlessly retried run.
+
+## Invocation evidence and logs
+
+Every attempted external process writes one versioned JSON record under the
+run's `invocations/` directory. The record is runtime-neutral and contains the
+run and invocation IDs, role, selected agent vendor, explicit model override,
+adapter runtime, iteration, start and finish timestamps, exit code, timeout and
+interruption flags, and paths to separate stdout and stderr files under `logs/`.
+The model is `null` when the runtime chooses its own default; the orchestrator
+does not infer an effective remote model it cannot verify. Records and streams
+are finalized atomically. Command arguments and environment snapshots are
+excluded because they may contain secrets.
+
+Built-in adapters tee their underlying Codex or Claude process streams through
+the wrapper's stdout and stderr while retaining the text needed for structured
+result parsing and diagnostics. Because the worker redirects those wrapper
+streams before launch, child output is durable as it arrives and output written
+before a timeout or nonzero exit remains available.
+
+`logs RUN_ID` is a read-only JSON view over that evidence. Its versioned
+envelope contains the selected stdout and stderr entries, independently missing
+stream failures, and a command-level error. Filters select iteration, role,
+invocation, runtime, or stream without merging stdout and stderr. Every path
+must resolve beneath the configured runs directory and match the selected run
+ID; traversal, symlink escape, malformed metadata, and missing streams are
+reported through the same JSON contract. Legacy filename-only logs remain
+readable, but fields that cannot be established from existing evidence are
+`null` and the entry is marked `legacy`.
 
 ## Request and response validation
 

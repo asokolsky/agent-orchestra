@@ -20,6 +20,7 @@ from agent_orchestra.adapter.developer import (
     read_request,
     write_handoff,
 )
+from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.schemas import (
@@ -202,12 +203,9 @@ def run_codex_reviewer(
             if model:
                 command.extend(['--model', model])
             command.append('-')
-            completed = subprocess.run(
+            completed = run_streaming_process(
                 command,
                 input=_prompt(request),
-                check=False,
-                capture_output=True,
-                text=True,
                 timeout=max(1, timeout_seconds - 5),
             )
         except subprocess.TimeoutExpired as error:
@@ -286,12 +284,9 @@ def run_codex_developer(
             command.extend(['--model', model])
         command.append('-')
         try:
-            completed = subprocess.run(
+            completed = run_streaming_process(
                 command,
                 input=developer_prompt(request, '$agent-orchestra-developer'),
-                check=False,
-                capture_output=True,
-                text=True,
                 timeout=max(1, timeout_seconds - 5),
             )
         except subprocess.TimeoutExpired as error:

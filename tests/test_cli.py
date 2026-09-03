@@ -1,18 +1,22 @@
 """Tests for command-line operations."""
 
 import json
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 from dataclasses import fields
+from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
 from agent_orchestra.cli import DEFAULT_DATABASE, _working_tree_digest, main
+from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run
 from agent_orchestra.store import RunStore
 from agent_orchestra.worker import (
@@ -21,6 +25,18 @@ from agent_orchestra.worker import (
     WorkerError,
     run_queued_review,
 )
+
+
+def test_version_reports_installed_distribution(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report the package version without requiring a subcommand."""
+
+    with pytest.raises(SystemExit) as raised:
+        main(['--version'])
+
+    assert raised.value.code == 0
+    assert capsys.readouterr().out == f'agent-orchestra {version("agent-orchestra")}\n'
 
 
 def initialize_git_repository(path: Path) -> None:
@@ -167,6 +183,40 @@ response_path.write_text(json.dumps(response))
     )
 
 
+def write_fake_codex(path: Path, *, mode: str) -> None:
+    """Write a fake Codex executable that emits identifiable child output."""
+
+    terminal_statement = {
+        'approved': '',
+        'nonzero': 'raise SystemExit(9)',
+        'timeout': 'time.sleep(5)',
+    }[mode]
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        f'''#!/usr/bin/env python3
+"""Fake Codex process for built-in adapter integration tests."""
+import json
+import sys
+import time
+from pathlib import Path
+
+sys.stdin.read()
+print("child stdout", flush=True)
+print("child stderr", file=sys.stderr, flush=True)
+{terminal_statement}
+result_path = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
+result_path.write_text(json.dumps({{
+    "verdict": "approved",
+    "summary": "Ready.",
+    "findings": [],
+    "validation": [],
+    "verification_gaps": [],
+}}))
+'''
+    )
+    path.chmod(0o755)
+
+
 def test_init_creates_database(tmp_path: Path) -> None:
     """Initialize the requested state database."""
 
@@ -274,11 +324,18 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert result == 0
     runs = RunStore(database).list_runs()
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
-    output = capsys.readouterr().out
-    assert output.index(str(changed_a)) < output.index(str(changed_b))
-    assert (
-        'enqueued 2 repositories; skipped 1 clean repository; failed 0 repositories'
-    ) in output
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        'schema_version': 3,
+        'directory': str(projects),
+        'runs': [
+            {'id': str(runs[1].id), 'worktree_path': str(changed_a)},
+            {'id': str(runs[0].id), 'worktree_path': str(changed_b)},
+        ],
+        'summary': {'enqueued': 2, 'clean': 1, 'failed': 0},
+        'failures': [],
+        'error': None,
+    }
 
 
 def test_enqueue_locals_accepts_tilde_directory(
@@ -300,7 +357,7 @@ def test_enqueue_locals_accepts_tilde_directory(
 
     assert result == 0
     assert RunStore(database).list_runs()[0].worktree_path == repository
-    assert 'enqueued 1 repository' in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)['summary']['enqueued'] == 1
 
 
 def test_enqueue_locals_with_no_changed_repositories_does_not_create_state(
@@ -318,9 +375,11 @@ def test_enqueue_locals_with_no_changed_repositories_does_not_create_state(
 
     assert result == 0
     assert not database.exists()
-    assert (
-        'enqueued 0 repositories; skipped 1 clean repository; failed 0 repositories'
-    ) in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)['summary'] == {
+        'enqueued': 0,
+        'clean': 1,
+        'failed': 0,
+    }
 
 
 def test_enqueue_locals_continues_after_repository_failure(
@@ -345,10 +404,11 @@ def test_enqueue_locals_continues_after_repository_failure(
     assert result == 0
     assert RunStore(database).list_runs()[0].worktree_path == changed
     captured = capsys.readouterr()
-    assert f'error: {fresh}:' in captured.err
-    assert (
-        'enqueued 1 repository; skipped 0 clean repositories; failed 1 repository'
-    ) in captured.out
+    assert captured.err == ''
+    document = json.loads(captured.out)
+    assert document['summary'] == {'enqueued': 1, 'clean': 0, 'failed': 1}
+    assert document['failures'][0]['repository_path'] == str(fresh)
+    assert document['failures'][0]['message']
 
 
 def test_enqueue_locals_fails_when_every_repository_fails(
@@ -369,8 +429,10 @@ def test_enqueue_locals_fails_when_every_repository_fails(
     assert result == 2
     assert not database.exists()
     captured = capsys.readouterr()
-    assert f'error: {fresh}:' in captured.err
-    assert 'failed 1 repository' in captured.out
+    assert captured.err == ''
+    document = json.loads(captured.out)
+    assert document['summary'] == {'enqueued': 0, 'clean': 0, 'failed': 1}
+    assert document['failures'][0]['repository_path'] == str(fresh)
 
 
 def test_enqueue_locals_reports_directory_without_repositories(
@@ -386,7 +448,12 @@ def test_enqueue_locals_reports_directory_without_repositories(
 
     assert result == 0
     assert not database.exists()
-    assert f'no Git repositories found in {projects}' in capsys.readouterr().out
+    document = json.loads(capsys.readouterr().out)
+    assert document['directory'] == str(projects)
+    assert document['runs'] == []
+    assert document['summary'] == {'enqueued': 0, 'clean': 0, 'failed': 0}
+    assert document['failures'] == []
+    assert document['error'] is None
 
 
 def test_enqueue_locals_rejects_missing_directory(
@@ -401,7 +468,11 @@ def test_enqueue_locals_rejects_missing_directory(
     )
 
     assert result == 2
-    assert 'directory not found' in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    document = json.loads(captured.out)
+    assert document['error']['code'] == 'directory_not_found'
+    assert 'directory not found' in document['error']['message']
     assert not database.exists()
 
 
@@ -434,12 +505,12 @@ def test_status_lists_persisted_run(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 2,\n  "runs": [\n    {\n')
+    assert output.startswith('{\n  "schema_version": 3,\n  "runs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     assert set(document['runs'][0]) == {field.name for field in fields(Run)}
     assert document == {
-        'schema_version': 2,
+        'schema_version': 3,
         'runs': [
             {
                 'id': str(run.id),
@@ -476,7 +547,7 @@ def test_status_filters_json_document_by_run_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 2
+    assert document['schema_version'] == 3
     assert [run['id'] for run in document['runs']] == [str(first.id)]
 
 
@@ -499,7 +570,7 @@ def test_status_reads_legacy_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 2
+    assert document['schema_version'] == 3
     assert document['runs'][0]['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -520,7 +591,7 @@ def test_status_lists_empty_runs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 2,
+        'schema_version': 3,
         'runs': [],
     }
 
@@ -578,11 +649,122 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert (run_directory / 'messages/000001-review-request.json').is_file()
     assert (run_directory / 'messages/000002-review-result.json').is_file()
     assert (run_directory / 'artifacts/review-0001.md').is_file()
+    invocation = json.loads(
+        (run_directory / 'invocations/000001-reviewer.json').read_text()
+    )
+    assert invocation['run_id'] == str(run.id)
+    assert invocation['role'] == 'reviewer'
+    assert invocation['agent_vendor'] == 'unknown'
+    assert invocation['runtime'] == 'custom-command'
+    assert invocation['exit_code'] == 0
+    assert invocation['timed_out'] is False
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 2,
+        'schema_version': 3,
         'run_id': str(run.id),
         'state': 'awaiting_commit_authorization',
     }
+
+
+def test_run_preserves_non_utf8_reviewer_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Archive the exact bytes written by a redirected reviewer process."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'approved')
+    reviewer.write_bytes(
+        reviewer.read_bytes().replace(
+            b'import sys\n',
+            b'import sys\nsys.stdout.buffer.write(b"caf\\xe9 latin-1 byte\\n")\n'
+            b'sys.stdout.buffer.flush()\n',
+            1,
+        )
+    )
+    runs_directory = tmp_path / 'runs'
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--runs-directory',
+            str(runs_directory),
+            '--',
+            sys.executable,
+            str(reviewer),
+        ]
+    )
+
+    assert result == 0
+    stdout_log = runs_directory / str(run.id) / 'logs/000001-reviewer.stdout.log'
+    assert stdout_log.read_bytes() == b'caf\xe9 latin-1 byte\n'
+
+
+@pytest.mark.parametrize('interrupted_role', ['reviewer', 'developer'])
+def test_worker_persists_interrupted_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupted_role: str,
+) -> None:
+    """Keep durable run state aligned with interrupted invocation evidence."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    digest = _working_tree_digest(repository, 'HEAD')
+    assert digest is not None
+    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    store.add(run)
+    reviewer = tmp_path / 'reviewer.py'
+    write_loop_reviewer(reviewer)
+    original_execute = CommandAgentAdapter.execute
+
+    def interrupt_selected(
+        adapter: CommandAgentAdapter, request: AgentRequest
+    ) -> AgentResult:
+        """Interrupt only the requested role."""
+
+        if request.role == interrupted_role:
+            raise KeyboardInterrupt
+        return original_execute(adapter, request)
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', interrupt_selected)
+    runs_directory = tmp_path / 'runs'
+
+    with pytest.raises(KeyboardInterrupt):
+        run_queued_review(
+            store=store,
+            run=run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=('unused-developer',),
+            runs_directory=runs_directory,
+            timeout_seconds=30,
+            digest_worktree=_working_tree_digest,
+        )
+
+    assert store.get(run.id).state.value == 'interrupted'
+    invocation_files = sorted(
+        (runs_directory / str(run.id) / 'invocations').glob('*.json')
+    )
+    invocation = json.loads(invocation_files[-1].read_text())
+    assert invocation['role'] == interrupted_role
+    assert invocation['interrupted'] is True
 
 
 def test_run_uses_builtin_codex_adapter_by_default(
@@ -627,6 +809,11 @@ def test_run_uses_builtin_codex_adapter_by_default(
         '-m',
         'agent_orchestra.adapter.codex',
     ]
+    identity = observed['reviewer_identity']
+    assert isinstance(identity, InvocationIdentity)
+    assert identity.vendor == 'openai'
+    assert identity.model is None
+    assert identity.runtime == 'codex'
 
 
 def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
@@ -1033,6 +1220,87 @@ def test_run_marks_reviewer_timeout(
 
     assert result == 2
     assert RunStore(database).get(run.id).state.value == 'failed'
+    invocation = json.loads(
+        (tmp_path / f'runs/{run.id}/invocations/000001-reviewer.json').read_text()
+    )
+    assert invocation['exit_code'] is None
+    assert invocation['timed_out'] is True
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        ('approved', '30', 0, False),
+        ('nonzero', '30', 2, False),
+        ('timeout', '1', 2, True),
+    ],
+)
+def test_builtin_run_exposes_child_output_through_logs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, str, int, bool],
+) -> None:
+    """Retain built-in child streams across success, error, and timeout."""
+
+    mode, timeout, expected_result, timed_out = case
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    runs_directory = tmp_path / 'runs'
+    fake_codex = tmp_path / 'bin/codex'
+    write_fake_codex(fake_codex, mode=mode)
+    current_path = os.environ.get('PATH', '')
+    monkeypatch.setenv('PATH', f'{fake_codex.parent}{os.pathsep}{current_path}')
+    codex_home = tmp_path / 'codex-home'
+    skill = codex_home / 'skills/agent-orchestra-reviewer'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('review instructions\n')
+    monkeypatch.setenv('CODEX_HOME', str(codex_home))
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--reviewer-model',
+            'test-model',
+            '--timeout',
+            timeout,
+            '--runs-directory',
+            str(runs_directory),
+        ]
+    )
+    capsys.readouterr()
+
+    assert result == expected_result
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'logs',
+                str(run.id),
+                '--runs-directory',
+                str(runs_directory),
+            ]
+        )
+        == 0
+    )
+    document = json.loads(capsys.readouterr().out)
+    streams = {entry['stream']: entry for entry in document['streams']}
+    assert 'child stdout\n' in streams['stdout']['content']
+    assert 'child stderr\n' in streams['stderr']['content']
+    assert streams['stdout']['agent_model'] == 'test-model'
+    assert streams['stdout']['timed_out'] is timed_out
 
 
 def test_run_rejects_state_database_inside_worktree(

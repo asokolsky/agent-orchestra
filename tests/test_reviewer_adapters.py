@@ -103,7 +103,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
             result_path.write_text(json.dumps(_result()), encoding='utf-8')
             return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
 
-        monkeypatch.setattr('agent_orchestra.adapter.codex.subprocess.run', run)
+        monkeypatch.setattr('agent_orchestra.adapter.codex.run_streaming_process', run)
         invoke: Callable[..., None] = run_codex_reviewer
     else:
         monkeypatch.setattr(
@@ -125,7 +125,9 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
             output = json.dumps({'structured_output': _result()})
             return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
 
-        monkeypatch.setattr('agent_orchestra.adapter.claude_code.subprocess.run', run)
+        monkeypatch.setattr(
+            'agent_orchestra.adapter.claude_code.run_streaming_process', run
+        )
         invoke = run_claude_code_reviewer
 
     invoke(request, response, model='runtime-model')
@@ -195,7 +197,7 @@ def test_reviewer_adapters_report_stable_execution_failures(
             return subprocess.CompletedProcess(command, 0, stdout='not-json', stderr='')
         return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
 
-    monkeypatch.setattr(f'{module}.subprocess.run', fail)
+    monkeypatch.setattr(f'{module}.run_streaming_process', fail)
     invoke = run_codex_reviewer if runtime == 'codex' else run_claude_code_reviewer
 
     with pytest.raises(RuntimeError, match=expected):
