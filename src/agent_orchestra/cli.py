@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
+CLI_SCHEMA_VERSION = 2
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -247,7 +248,7 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
         print(f'run not found: {error}', file=sys.stderr)
         return 2
     document = {
-        'schema_version': 1,
+        'schema_version': CLI_SCHEMA_VERSION,
         'runs': [
             {
                 'id': str(run.id),
@@ -313,7 +314,11 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         return 2
     print(
         json.dumps(
-            {'schema_version': 1, 'run_id': str(result.id), 'state': result.state},
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'run_id': str(result.id),
+                'state': result.state,
+            },
             indent=2,
         )
     )

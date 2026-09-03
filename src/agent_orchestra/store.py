@@ -9,6 +9,8 @@ from pathlib import Path
 
 from agent_orchestra.models import Run, RunState, ScenarioType
 
+LEGACY_REVIEW_STATE = 'awaiting_review'
+
 
 class RunNotFoundError(LookupError):
     """Raised when a requested run does not exist."""
@@ -58,6 +60,18 @@ class RunStore:
                 );
                 """
             )
+            connection.execute(
+                'UPDATE runs SET state = ? WHERE state = ?',
+                (RunState.REVIEWING, LEGACY_REVIEW_STATE),
+            )
+            connection.execute(
+                'UPDATE transitions SET from_state = ? WHERE from_state = ?',
+                (RunState.REVIEWING, LEGACY_REVIEW_STATE),
+            )
+            connection.execute(
+                'UPDATE transitions SET to_state = ? WHERE to_state = ?',
+                (RunState.REVIEWING, LEGACY_REVIEW_STATE),
+            )
 
     def add(self, run: Run) -> None:
         """Insert a newly created run and its initial transition record."""
@@ -101,6 +115,11 @@ class RunStore:
     def update(self, run: Run, expected_state: RunState) -> None:
         """Persist a run when its current stored state matches the expectation."""
 
+        expected_values = (
+            (str(expected_state), LEGACY_REVIEW_STATE)
+            if expected_state is RunState.REVIEWING
+            else (str(expected_state), str(expected_state))
+        )
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """
@@ -108,7 +127,7 @@ class RunStore:
                     scenario = ?, repository_path = ?, worktree_path = ?, state = ?,
                     base_sha = ?, head_sha = ?, diff_digest = ?, iteration = ?,
                     remote_url = ?, updated_at = ?
-                WHERE id = ? AND state = ?
+                WHERE id = ? AND state IN (?, ?)
                 """,
                 (
                     run.scenario,
@@ -122,7 +141,7 @@ class RunStore:
                     run.remote_url,
                     run.updated_at.isoformat(),
                     str(run.id),
-                    expected_state,
+                    *expected_values,
                 ),
             )
             if cursor.rowcount != 1:
@@ -175,7 +194,11 @@ class RunStore:
             scenario=ScenarioType(row['scenario']),
             repository_path=Path(row['repository_path']),
             worktree_path=Path(row['worktree_path']),
-            state=RunState(row['state']),
+            state=(
+                RunState.REVIEWING
+                if row['state'] == LEGACY_REVIEW_STATE
+                else RunState(row['state'])
+            ),
             base_sha=row['base_sha'],
             head_sha=row['head_sha'],
             diff_digest=row['diff_digest'],

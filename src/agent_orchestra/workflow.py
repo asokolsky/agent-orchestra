@@ -22,15 +22,15 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.PREPARING: frozenset(
         {
             RunState.DEVELOPING,
-            RunState.AWAITING_REVIEW,
+            RunState.REVIEWING,
             RunState.FAILED,
             RunState.INTERRUPTED,
         }
     ),
     RunState.DEVELOPING: frozenset(
-        {RunState.AWAITING_REVIEW, RunState.FAILED, RunState.INTERRUPTED}
+        {RunState.REVIEWING, RunState.FAILED, RunState.INTERRUPTED}
     ),
-    RunState.AWAITING_REVIEW: frozenset(
+    RunState.REVIEWING: frozenset(
         {
             RunState.CHANGES_REQUESTED,
             RunState.APPROVED,
@@ -54,7 +54,7 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
         {
             RunState.PREPARING,
             RunState.DEVELOPING,
-            RunState.AWAITING_REVIEW,
+            RunState.REVIEWING,
             RunState.CANCELLED,
         }
     ),
@@ -68,9 +68,7 @@ def transition(run: Run, target: RunState) -> Run:
     if target not in allowed:
         raise InvalidTransitionError(f'cannot transition from {run.state} to {target}')
 
-    iteration = (
-        run.iteration + 1 if target is RunState.AWAITING_REVIEW else run.iteration
-    )
+    iteration = run.iteration + 1 if target is RunState.REVIEWING else run.iteration
     return replace(run, state=target, iteration=iteration, updated_at=utc_now())
 
 
@@ -85,7 +83,7 @@ def invalidate_approval(run: Run, diff_digest: str) -> Run:
         raise ApprovalInvalidationError(message)
     return replace(
         run,
-        state=RunState.AWAITING_REVIEW,
+        state=RunState.REVIEWING,
         diff_digest=diff_digest,
         iteration=run.iteration + 1,
         updated_at=utc_now(),

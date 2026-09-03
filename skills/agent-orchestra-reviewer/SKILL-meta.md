@@ -10,7 +10,7 @@ tags:
 authors:
   - "asokolsky@gmail.com"
 created-at: "2026-09-02T14:31:12+0200"
-updated-at: "2026-09-02T14:31:12+0200"
+updated-at: "2026-09-03T09:35:00+0200"
 ---
 
 # Agent Orchestra Reviewer Meta
@@ -40,8 +40,8 @@ by agent-orchestra.
 | `git` | [Git](https://git-scm.com/) | `brew install git` |
 
 Git establishes the assigned revisions, status, and exact diff. If Git is
-unavailable or the review scope cannot be established, return `blocked` without
-issuing a verdict.
+unavailable or the review scope cannot be established, return a `blocked`
+verdict without findings.
 
 ## Departures And Rationale
 

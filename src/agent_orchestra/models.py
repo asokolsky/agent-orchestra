@@ -66,7 +66,7 @@ class RunState(StrEnum):
     QUEUED = 'queued'
     PREPARING = 'preparing'
     DEVELOPING = 'developing'
-    AWAITING_REVIEW = 'awaiting_review'
+    REVIEWING = 'reviewing'
     CHANGES_REQUESTED = 'changes_requested'
     APPROVED = 'approved'
     AWAITING_COMMIT_AUTHORIZATION = 'awaiting_commit_authorization'

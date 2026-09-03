@@ -27,9 +27,11 @@
 
 ## Workflow and message contract
 
-- Follow the design contract in [docs/design.md](./docs/design.md) and the
-  scenario contracts in [README.md](./README.md). Do not duplicate their
-  schemas or workflow descriptions here.
+- Follow the conceptual model in [docs/concepts.md](./docs/concepts.md), the
+  role contracts in `docs/role-*.md`, the scenario contracts in
+  [docs/workflows.md](./docs/workflows.md), and the protocol contract in
+  [docs/design.md](./docs/design.md). Do not duplicate their definitions,
+  schemas, or workflow descriptions here.
 - Treat versioned UTF-8 JSON messages as the canonical machine contract.
   Markdown is a human artifact, and agent stdout/stderr are execution logs;
   neither is workflow state.

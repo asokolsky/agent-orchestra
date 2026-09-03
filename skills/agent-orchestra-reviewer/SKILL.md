@@ -2,7 +2,7 @@
 name: agent-orchestra-reviewer
 description: Review an exact diff produced by an agent-orchestra development run and return structured, actionable findings without modifying the worktree. Use for the reviewer role, including repeat reviews after fixes.
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
   source: "https://github.com/asokolsky/agent-orchestra/tree/main/skills/agent-orchestra-reviewer"
 ---
 
@@ -25,9 +25,10 @@ equivalent repo instruction file, then inspect:
 - affected callers, tests, schemas, documentation, and persisted contracts;
 - prior findings and developer dispositions during a repeat review.
 
-Return `blocked` without a verdict if the assigned revisions or diff cannot be
-established, the worktree no longer matches the assigned digest, or essential
-evidence is unavailable. A changed diff requires a new review iteration.
+Return a `blocked` verdict without findings if the assigned revisions or diff
+cannot be established, the worktree no longer matches the assigned digest, or
+essential evidence is unavailable. A changed diff requires a new review
+iteration.
 
 Skip condition: none. Every review must establish the exact immutable scope.
 
