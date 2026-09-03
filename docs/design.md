@@ -29,10 +29,10 @@ Approval applies only to the reviewed diff. Commit and publication require
 separate decisions from the
 [authorization authority](concepts.md#system-participants).
 
-The current CLI implements one local review request and result through the
-Codex reviewer adapter. The remaining lifecycle is the target contract. See
-[Current scope](../README.md#current-scope) and the
-[workflow contracts](workflows.md) for that boundary.
+The current CLI implements this bounded loop for existing local changes through
+the Codex and Claude Code adapters. Custom reviewer commands retain the
+single-review compatibility path. See [Current scope](../README.md#current-scope)
+and the [workflow contracts](workflows.md) for that boundary.
 
 ## Why SQLite
 
@@ -47,6 +47,48 @@ Keep the database outside target worktrees so state changes do not affect the
 diff under review. SQLite fits one-machine coordination; a distributed or
 multi-host service would need a different storage implementation behind the
 same interface.
+
+## Synchronization and collision avoidance
+
+Agents do not maintain inboxes or wait on a shared message queue. The current
+orchestrator is an on-demand, synchronous CLI process. Before starting an
+adapter, it atomically writes that role's complete request under the run
+directory and passes the request and response paths to a newly invoked agent
+process. The agent therefore starts with a message already available; it does
+not poll for one. The orchestrator waits for that subprocess to exit, subject
+to the role-specific positive timeout, and then validates the response file.
+Stdout and stderr are logs only and are not synchronization channels.
+
+Each accepted response determines the next dispatch. For example, a valid
+`changes_requested` review is persisted before the developer process starts,
+and a valid developer handoff plus a new diff digest is persisted before the
+next reviewer starts. Atomic file replacement prevents consumers from seeing a
+partially written request or response. Monotonic per-run sequence numbers,
+unique message IDs, `in_reply_to`, iteration, and exact scope correlation make
+stale or duplicate messages invalid.
+
+If a future resident worker or independently running agent needs asynchronous
+delivery, it may poll durable run state and message sequence numbers or use a
+wakeup notification as an optimization. SQLite state and canonical message
+files must remain authoritative: a notification alone must never advance the
+workflow, and a missed notification must be recoverable by rereading durable
+state.
+
+SQLite prevents competing orchestrators from silently advancing the same run.
+Every store mutation runs in a transaction. A state update uses compare-and-set
+semantics: its `UPDATE` matches both the run ID and the expected current state.
+The state change and its transition-history row commit together. If another
+worker wins the race, the losing update affects no row and raises a concurrent
+update error instead of overwriting the newer state. Primary keys prevent run
+ID collisions, foreign keys protect transition ownership, and a five-second
+busy timeout bounds lock contention.
+
+WAL mode lets readers inspect status while a writer commits and allows only one
+writer to commit at a time. These database guarantees protect durable run
+metadata; they do not replace diff-digest checks or message validation. The
+worker still freezes and verifies the exact worktree digest around every
+read-only review, because SQLite cannot lock arbitrary worktree files changed
+by another process.
 
 ## Principles
 
@@ -198,10 +240,10 @@ The flow, purpose, and payload for each message type are explicit:
 | Message type | Flow | Purpose | Required payload fields |
 |---|---|---|---|
 | `development_assignment` | Orchestrator to developer | Implement the initial objective. | `objective`, `allowed_actions`, `timeout_seconds` |
-| `developer_handoff` | Developer to orchestrator | Report readiness, changes, validation, and risks. | `status`, `summary`, `files_changed`, `validation`, `finding_dispositions`, `remaining_risks` |
+| `developer_handoff` | Developer to orchestrator | Report readiness, changes, validation, and risks. | `status`, `summary`, `files_changed`, `validation`, `dispositions`, `remaining_risks` |
 | `review_request` | Orchestrator to reviewer | Review one exact diff digest. | `objective`, `allowed_actions`, `timeout_seconds`, `artifact_path`, `prior_review_path` |
 | `review_result` | Reviewer to orchestrator | Return the verdict, findings, evidence, and artifact. | `verdict`, `summary`, `findings`, `validation`, `verification_gaps`, `artifact_path` |
-| `remediation_assignment` | Orchestrator to developer | Deliver a review and request remediation. | `objective`, `review_message_id`, `review_artifact_path`, `allowed_actions`, `timeout_seconds` |
+| `remediation_request` | Orchestrator to developer | Deliver an accepted review and request remediation. | `objective`, `review_result_path`, `review_artifact_path`, `allowed_actions`, `timeout_seconds` |
 | `authorization_request` | Orchestrator to user | Request one commit or remote action. | `action`, `action_parameters`, `reason`, `expires_at` |
 | `authorization_decision` | User to orchestrator | Allow or deny the requested action. | `approved`, `action`, `decided_by`, `reason` |
 | `operation_result` | Developer or provider adapter to orchestrator | Report an authorized operation's outcome. | `action`, `status`, `identifiers`, `summary`, `errors` |
@@ -216,10 +258,7 @@ Validation entries use this shape:
 ```json
 {
   "command": "mise run tests",
-  "exit_code": 0,
-  "summary": "25 tests passed",
-  "stdout_artifact": null,
-  "stderr_artifact": null
+  "outcome": "passed"
 }
 ```
 
@@ -243,11 +282,26 @@ communicates feedback disposition without rewriting the finding:
 ```json
 {
   "finding_id": "F-001",
-  "status": "addressed",
-  "summary": "Approval invalidation now requires a new digest.",
-  "evidence": ["tests/test_workflow.py::test_changed_diff_invalidates_approval"]
+  "disposition": "addressed",
+  "rationale": "Approval invalidation now requires a new digest."
 }
 ```
+
+`review_result_path` names the complete canonical JSON result accepted by the
+orchestrator; `review_artifact_path` names its human-readable Markdown artifact.
+Both paths must resolve inside the run directory. A developer disposition is
+required exactly once for every finding ID and uses `addressed`, `rejected`, or
+`blocked`.
+
+Terminal worker failures are written atomically to `failure.json` in the run
+directory. The record contains the run ID, resulting durable state, stable
+error type and message, and timestamp. Rejected agent responses remain in
+`logs/`; neither stderr nor a rejected response is the sole failure record.
+If a developer rejects or blocks every accepted finding without changing the
+diff, the valid handoff is preserved and the run returns to
+`changes_requested`. A `decision-required.json` record with the stable
+`developer_disagreement` reason makes the reviewer/developer disagreement a
+human decision rather than a failed or endlessly retried run.
 
 ## Request and response validation
 

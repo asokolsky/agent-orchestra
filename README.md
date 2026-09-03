@@ -167,7 +167,7 @@ contract and example.
 
 ### 2. Run the review
 
-Start the review with the built-in Codex adapter:
+Start the review with the default built-in Codex adapter:
 
 ```shell
 mise agent-orchestra -- run "$RUN_ID" \
@@ -181,7 +181,31 @@ worktree. To use another adapter, add `--` and its command; agent-orchestra
 appends the request and response JSON paths.
 
 If the managed Codex default is not supported by the locally installed CLI,
-select a compatible model explicitly with `--codex-model <model>`.
+select a compatible model explicitly with `--reviewer-model <model>`.
+
+Select Claude Code independently for the reviewer role with:
+
+```shell
+mise agent-orchestra -- run "$RUN_ID" \
+  --objective "Review the queued implementation" \
+  --reviewer-agent claude-code \
+  --reviewer-model sonnet
+```
+
+Select the developer runtime and its model independently with
+`--developer-agent` and `--developer-model`. The default developer and reviewer
+are both Codex. `--timeout` bounds each review, `--developer-timeout` bounds
+each remediation, and `--max-iterations` limits review requests (default: 3).
+The Claude Code developer runs with OS-enforced filesystem sandboxing: writes
+use the runtime's primary-working-directory boundary rooted at the assigned
+worktree, user and project setting sources are excluded, unsandboxed retries
+are disabled, and a missing sandbox is a hard failure.
+
+Both built-in adapters invoke the same canonical reviewer skill, receive the
+same request, and return the same validated result schema. Runtime output is
+kept as logs and does not enter the durable message contract.
+The Claude Code reviewer also excludes personal settings and MCP servers and
+runs shell inspection under an OS-enforced read-only worktree sandbox.
 
 Keep the state database and `--runs-directory` outside the reviewed worktree.
 The worker stores the request, response, review, and logs there without changing
@@ -189,10 +213,19 @@ the review digest.
 
 ### 3. Inspect the result
 
-Run `status` and inspect the stored response, review, and logs. Approval stops
-at `awaiting_commit_authorization`; requested changes stop at
-`changes_requested`. Return requested changes to a developer, or authorize the
-next Git action separately after approval.
+Run `status` and inspect the stored messages, reviews, execution configuration,
+and per-invocation logs. A built-in review that requests changes dispatches the
+selected developer and repeats review after a new digest is produced. Approval
+stops at `awaiting_commit_authorization`; blocked review, non-progress, invalid
+handoff, timeout, or iteration exhaustion stops without committing. A custom
+reviewer command retains the one-review compatibility path and stops at
+`changes_requested` because no custom developer command is configured.
+Worker failures are also recorded in the run's `failure.json`, so the exact
+stable diagnostic remains available after the CLI exits.
+When the developer rejects or blocks every finding with rationale and makes no
+change, the run returns to `changes_requested` and records
+`decision-required.json` for human resolution instead of misclassifying the
+disagreement as non-progress.
 
 The [workflow contracts](docs/workflows.md) describe the intended automatic
 orchestration.
@@ -211,8 +244,10 @@ The current implementation provides:
   directory of repos, and inspect runs;
 - a Python-native installer for Codex and Claude Code skills;
 - versioned developer and reviewer skills under `skills/`;
-- a built-in Codex adapter for the reviewer role and a custom reviewer-command
-  escape hatch.
+- built-in Codex and Claude Code adapters for developer and reviewer roles,
+  selected independently, plus a custom one-review command escape hatch;
+- a bounded remediation loop with strict messages, finding dispositions,
+  digest progress checks, role-specific timeouts, and iteration exhaustion.
 
 The supported roles are documented separately:
 
@@ -222,10 +257,10 @@ The supported roles are documented separately:
 Installation and invocation examples are in
 [Development and review cycle](#development-and-review-cycle).
 
-One local review request, result, artifact, and its process logs are persisted
-today. Developer dispatch, automated remediation, Claude Code adapters, generic
-role registration, worktree creation, leases, Git provider integration, and
-authorization commands remain subsequent increments.
+Every review and remediation request, result, artifact, invocation
+configuration, process log, and terminal failure is persisted outside the
+worktree. Initial clean-worktree development, worktree creation, leases, Git
+provider integration, and authorization commands remain subsequent increments.
 
 ## Development
 

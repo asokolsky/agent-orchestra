@@ -129,11 +129,20 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser('status', help='show one run or list all runs')
     status.add_argument('run_id', nargs='?')
 
-    run = commands.add_parser('run', help='review one queued local run')
+    run = commands.add_parser('run', help='run a bounded review-remediation loop')
     run.add_argument('run_id')
     run.add_argument('--objective', required=True)
     run.add_argument('--timeout', type=int, default=1800)
-    run.add_argument('--codex-model')
+    run.add_argument('--developer-timeout', type=int, default=1800)
+    run.add_argument('--max-iterations', type=int, default=3)
+    run.add_argument(
+        '--developer-agent', choices=('codex', 'claude-code'), default='codex'
+    )
+    run.add_argument('--developer-model')
+    run.add_argument(
+        '--reviewer-agent', choices=('codex', 'claude-code'), default='codex'
+    )
+    run.add_argument('--reviewer-model')
     run.add_argument(
         '--runs-directory',
         type=Path,
@@ -276,14 +285,20 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
 
 
 def _run(args: argparse.Namespace, store: RunStore) -> int:
-    """Consume one queued local run through its first review decision."""
+    """Consume one queued local run through its bounded agent loop."""
 
     if not args.database.is_file():
         print(f'state database not found: {args.database}', file=sys.stderr)
         return 2
-    if args.reviewer_command and args.codex_model:
+    if args.reviewer_command and (
+        args.reviewer_model
+        or args.reviewer_agent != 'codex'
+        or args.developer_model
+        or args.developer_agent != 'codex'
+    ):
         print(
-            'error: --codex-model cannot be combined with a custom reviewer command',
+            'error: built-in reviewer options cannot be combined with a custom '
+            'reviewer command',
             file=sys.stderr,
         )
         return 2
@@ -293,20 +308,44 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         if args.reviewer_command:
             reviewer_command = args.reviewer_command
         else:
+            module = (
+                'agent_orchestra.adapter.codex'
+                if args.reviewer_agent == 'codex'
+                else 'agent_orchestra.adapter.claude_code'
+            )
             reviewer_command = [
                 sys.executable,
                 '-m',
-                'agent_orchestra.codex_reviewer',
+                module,
             ]
-            if args.codex_model:
-                reviewer_command.extend(['--model', args.codex_model])
+            if args.reviewer_model:
+                reviewer_command.extend(['--model', args.reviewer_model])
+        developer_command: list[str] = []
+        if not args.reviewer_command:
+            developer_module = (
+                'agent_orchestra.adapter.codex'
+                if args.developer_agent == 'codex'
+                else 'agent_orchestra.adapter.claude_code'
+            )
+            developer_command = [
+                sys.executable,
+                '-m',
+                developer_module,
+                '--role',
+                'developer',
+            ]
+            if args.developer_model:
+                developer_command.extend(['--model', args.developer_model])
         result = run_queued_review(
             store=store,
             run=run,
             objective=args.objective,
             reviewer_command=reviewer_command,
+            developer_command=developer_command,
             runs_directory=args.runs_directory,
             timeout_seconds=args.timeout,
+            developer_timeout_seconds=args.developer_timeout,
+            max_iterations=args.max_iterations,
             digest_worktree=_working_tree_digest,
         )
     except (OSError, RunNotFoundError, WorkerError) as error:

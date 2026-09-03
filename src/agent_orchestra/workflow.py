@@ -28,7 +28,12 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
         }
     ),
     RunState.DEVELOPING: frozenset(
-        {RunState.REVIEWING, RunState.FAILED, RunState.INTERRUPTED}
+        {
+            RunState.REVIEWING,
+            RunState.CHANGES_REQUESTED,
+            RunState.FAILED,
+            RunState.INTERRUPTED,
+        }
     ),
     RunState.REVIEWING: frozenset(
         {

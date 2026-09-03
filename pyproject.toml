@@ -11,11 +11,14 @@ requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Alex Sokolsky" }]
-dependencies = []
+dependencies = ["pydantic>=2.12,<3"]
 
 [project.scripts]
 agent-orchestra = "agent_orchestra.cli:main"
-agent-orchestra-codex-reviewer = "agent_orchestra.codex_reviewer:main"
+agent-orchestra-codex-reviewer = "agent_orchestra.adapter.codex:main"
+agent-orchestra-claude-code-reviewer = "agent_orchestra.adapter.claude_code:main"
+agent-orchestra-codex-developer = "agent_orchestra.adapter.codex:developer_main"
+agent-orchestra-claude-code-developer = "agent_orchestra.adapter.claude_code:developer_main"
 
 [dependency-groups]
 # uv sync --group dev
@@ -30,7 +33,7 @@ default-groups = ["dev"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-packages = ["agent_orchestra"]
+packages = ["agent_orchestra", "agent_orchestra.adapter"]
 
 [tool.setuptools.package-data]
 agent_orchestra = ["py.typed"]
