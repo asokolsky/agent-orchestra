@@ -18,6 +18,28 @@ roles:
    the developer. The developer addresses them, and the reviewer evaluates the
    new diff. This cycle continues until approval or a stopping condition.
 
+The sequence diagram focuses on the two agent roles. The orchestrator mediates,
+validates, and durably persists every exchange shown between them.
+
+```mermaid
+sequenceDiagram
+    participant developer
+    participant reviewer
+
+    developer->>reviewer: Handoff with exact diff digest
+    reviewer->>reviewer: Review the diff read-only
+    alt Changes requested
+        reviewer-->>developer: Findings bound to the reviewed digest
+        developer->>developer: Edit and validate the worktree
+        developer->>reviewer: Remediated handoff with a new digest
+        Note over developer,reviewer: Repeat until approval or a stopping condition
+    else Approved
+        reviewer-->>developer: Approval bound to the reviewed digest
+    else Blocked
+        reviewer-->>developer: Verification gap or required decision
+    end
+```
+
 The developer and reviewer communicate through versioned
 [messages](concepts.md#canonical-messages-and-artifacts). A
 [runtime](concepts.md#runtimes) and [adapter](concepts.md#adapters) execute each
