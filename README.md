@@ -1,85 +1,69 @@
 # agent-orchestra
 
-`agent-orchestra` is a lightweight local workflow orchestrator for development
-and review agents.
+`agent-orchestra` is a local CLI for coordinating coding agents. Each agent gets
+a role and an assigned Git worktree. Workflow state and review artifacts stay
+outside that worktree.
 
-The project assumes a Git worktree workflow. It coordinates bounded agent
-invocations while keeping orchestration state, review artifacts, and lifecycle
-authorization explicit.
+Use an isolated linked worktree for development and an exact-head detached
+worktree for remote review.
 
 ## Problem We Are Trying to Solve
 
 Coding agents can implement and review changes, but coordinating several agent
-invocations is still largely manual. A user must preserve the original
-objective, assign the correct worktree and role, carry every review finding back
-to the developer, verify that approval still applies to the current diff, and
-separately authorize consequential actions such as committing and publishing.
+invocations is still largely manual.
 
-Conversational handoffs alone do not provide durable workflow state. Context
-can be omitted, a reviewer can inspect a different diff than the one eventually
-committed, feedback can be lost between invocations, and an agent can infer
-permission for an action that the user did not authorize.
+Agent-orchestra intends to be a thin coordination layer offering improved agent productivity.
 
-Agent-orchestra turns that coordination into an explicit, resumable protocol.
-It records each run, binds review approval to an immutable diff digest, gives
-development and review agents distinct capabilities, persists structured
-messages and artifacts, bounds external invocations and review iterations, and
-stops at separate authorization gates before changing local or remote Git state.
+## Concepts
 
-## Participants
-
-- A developer agent implements changes and addresses review feedback.
-- A reviewer agent evaluates the current diff and produces a Markdown review
-  artifact.
+See [Roles, runtimes, adapters, and capabilities](docs/concepts.md) for the
+canonical definitions.
 
 ## Supported scenarios
 
-- Before a development agent commits its work, a reviewer agent reviews the
+- In the [local development and review workflow](docs/workflows.md#local-development-and-review),
+  before a development agent commits its work, a reviewer agent reviews the
   diff and hands structured feedback back to the developer. The cycle repeats
   until the review is approved, after which the workflow may request permission
   to commit and open a pull request.
-- A CLI command enqueues a pull-request review from its URL.
+- The [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
+  begins from a pull-request URL and reviews one exact remote head.
 
-The local development/review cycle is the first implementation target. Remote
-pull-request enqueueing is part of the intended interface but is not implemented
-yet.
+The local cycle is partially implemented. Remote pull-request enqueueing is not
+implemented yet. The [design and message contract](docs/design.md) defines the
+shared protocol.
 
-## Practical workflow today
+## Development and review cycle
 
-Agent-orchestra does not require repos to be registered. The implemented CLI
-can install the role skills, capture an existing uncommitted diff in SQLite,
-show captured runs, and dispatch the first review through a supplied adapter.
-The user must still create the task worktree, initiate development, handle
-review remediation, and authorize lifecycle actions manually.
+Start with any local repo.
 
-### Install the role skills once
+### 1. Install the role skills
 
-From an agent-orchestra checkout, install both bundled skills for Codex and
-Claude Code:
+Install both bundled skills for Codex and Claude Code:
 
 ```shell
 mise agent-orchestra -- skills install \
-  --skill agent-orchestra-developer \
-  --skill agent-orchestra-reviewer
+  --skill agent-orchestra-developer --skill agent-orchestra-reviewer
 ```
 
 By default, the command installs the selected skills for both Codex and Claude
 Code. Use `--agent codex` or `--agent claude-code` only to target one runtime.
 
-Repeat installation after a bundled skill version changes. The installer
-upgrades an unchanged managed installation and preserves locally modified
-installations.
+Repeat installation after a skill version changes. The installer updates an
+unchanged installation but does not overwrite local edits. It uses only the
+Python standard library and installs to
+`$CODEX_HOME/skills` (or `~/.codex/skills`) and
+`$CLAUDE_CONFIG_DIR/skills` (or `~/.claude/skills`) by default. Use
+`--codex-home` or `--claude-home` to override those roots.
 
-### Start new work in any repo
+### 2. Develop the change
 
-A clean repo does not need an enqueue or registration step. Create or reuse an
-isolated linked worktree according to the repo's worktree policy, start a coding
-agent in that worktree, and give it an explicit development assignment:
+For new work, create or reuse an isolated linked worktree according to the
+repo's policy. Start a coding agent there and give it a development assignment.
 
-Invoke a skill with `$agent-orchestra-developer` or
-`$agent-orchestra-reviewer` in Codex, and `/agent-orchestra-developer` or
-`/agent-orchestra-reviewer` in Claude Code. The prompt templates below use a
-runtime-neutral placeholder for that invocation.
+Invoke `$agent-orchestra-developer` in Codex or
+`/agent-orchestra-developer` in Claude Code. The template uses a generic
+placeholder.
 
 ```text
 <invoke the agent-orchestra-developer skill>
@@ -94,10 +78,11 @@ Leave validated changes uncommitted and return a ready_for_review handoff.
 Name additional allowed actions only when they are intended. Editing does not
 authorize a commit, and a commit does not authorize a push or pull request.
 
-### Review the resulting diff
+### 3. Review the diff
 
-After the developer returns a handoff, start a separate agent invocation in the
-same worktree and assign only the reviewer role:
+After the developer returns a handoff, start a new agent in the same worktree.
+Invoke `$agent-orchestra-reviewer` in Codex or
+`/agent-orchestra-reviewer` in Claude Code:
 
 ```text
 <invoke the agent-orchestra-reviewer skill>
@@ -108,11 +93,10 @@ Do not modify the worktree or perform remote actions.
 Write the review to <absolute-review-artifact-path>.
 ```
 
-Keep the review artifact outside the target worktree when it is workflow
-evidence rather than repo documentation. For a repeat review, provide the prior
-artifact and the exact current diff scope again.
+Keep workflow review artifacts outside the target worktree. For another review,
+provide both the prior artifact and the exact current diff.
 
-### Remediate review findings
+### 4. Address review findings
 
 Return actionable feedback to a development agent rather than asking the
 reviewer to fix its own findings:
@@ -130,7 +114,7 @@ Run the repo's complete validation and leave changes uncommitted.
 Repeat the review and remediation steps until the exact diff has no actionable
 findings.
 
-### Authorize lifecycle actions separately
+### 5. Authorize each Git action
 
 After approval, give separate instructions for each intended state-changing
 operation. For example:
@@ -152,14 +136,16 @@ mergeability:
 Merge <pull-request URL> and verify the resulting default-branch commit.
 ```
 
-### Capture existing dirty work when useful
+## Capture and review existing changes
 
-`enqueue-local` records the current uncommitted diff for one repo.
-`enqueue-locals` scans immediate child repos, records dirty ones, and skips
-clean ones. Each repo-independent run ID combines its UTC creation time with a
-random suffix, for example `20260902T150612Z-a7f3c921`. The repo and worktree
-remain separate run metadata. These commands record work but do not start
-development or review:
+Use the implemented CLI path when a worktree already contains the change to
+review.
+
+### 1. Capture the diff
+
+Run `enqueue-local` to record one repo's uncommitted diff. Use
+`enqueue-locals` to scan immediate child repos, record dirty ones, and skip
+clean ones. Neither command starts development or review:
 
 ```shell
 export RUN_ID="$(mise agent-orchestra -- enqueue-local /path/to/dirty/repo)"
@@ -175,294 +161,71 @@ printf '%s\n' "$RUN_ID"
 
 `enqueue-locals` prints one line per dirty repo with the run ID followed by its
 worktree path. If the enqueue output is no longer available, run `status` and
-use the `id` from the matching repo entry in its formatted JSON output:
+use the `id` from the matching repo entry. See
+[Run status output](docs/design.md#run-status-output) for the formatted JSON
+contract and example.
 
-```json
-{
-  "schema_version": 1,
-  "runs": [
-    {
-      "id": "20260902T150612Z-a7f3c921",
-      "scenario": "local_changes",
-      "repository_path": "/path/to/repo",
-      "worktree_path": "/path/to/repo",
-      "state": "queued",
-      "base_sha": "<base-commit-sha>",
-      "head_sha": "<head-commit-sha>",
-      "diff_digest": "sha256:<working-tree-digest>",
-      "iteration": 0,
-      "remote_url": null,
-      "created_at": "2026-09-02T15:06:12Z",
-      "updated_at": "2026-09-02T15:06:12Z"
-    }
-  ]
-}
-```
+### 2. Run the review
 
-Run the first durable review step with the built-in Codex adapter:
+Start the review with the built-in Codex adapter:
 
 ```shell
 mise agent-orchestra -- run "$RUN_ID" \
   --objective "Review the queued implementation"
 ```
 
-The adapter invokes `codex exec` non-interactively in a read-only sandbox. It
-ignores personal Codex configuration for deterministic automation while retaining
-the user's authentication and installed skills. It requests a schema-constrained
-result, then writes the correlated response and Markdown artifact outside the
-target worktree. To use another adapter, add `--` and its command;
-agent-orchestra appends the request and response JSON paths.
+The adapter runs `codex exec` non-interactively in a read-only sandbox. It
+ignores personal Codex settings but keeps authentication and installed skills.
+It writes the validated response and Markdown review outside the target
+worktree. To use another adapter, add `--` and its command; agent-orchestra
+appends the request and response JSON paths.
 
 If the managed Codex default is not supported by the locally installed CLI,
 select a compatible model explicitly with `--codex-model <model>`.
 
-The worker persists the request, response, artifact, and process logs outside
-the target worktree. Approval stops at `awaiting_commit_authorization`; requested
-changes stop at `changes_requested`. No commit or remote action is performed.
-The state database and `--runs-directory` must both be outside the reviewed
-worktree so their own writes cannot change the review digest.
+Keep the state database and `--runs-directory` outside the reviewed worktree.
+The worker stores the request, response, review, and logs there without changing
+the review digest.
 
-The intended automatic orchestration described below is the target contract,
-not the current CLI behavior.
+### 3. Inspect the result
 
-## Design
+Run `status` and inspect the stored response, review, and logs. Approval stops
+at `awaiting_commit_authorization`; requested changes stop at
+`changes_requested`. Return requested changes to a developer, or authorize the
+next Git action separately after approval.
 
-Agent-orchestra uses immutable diff identities, explicit authorization gates,
-durable lifecycle states, and versioned JSON messages. See
-[Design and message contract](docs/design.md) for the architecture, lifecycle,
-message envelope, payloads, and validation rules.
-
-## Scenario: uncommitted changes in a worktree
-
-This is the primary local workflow. It covers both a worktree that already has
-uncommitted changes and a worktree in which agent-orchestra first asks a
-development agent to implement an objective.
-
-1. **Enqueue the worktree.** The user or calling process runs
-   `enqueue-local`, or runs `enqueue-locals` on a directory whose immediate
-   children are repos. The CLI resolves `HEAD`, computes a SHA-256 identity from
-   the binary tracked diff and untracked file paths and contents, creates a
-   `local_changes` run in `queued`, and returns the run ID. A clean worktree is
-   rejected. The command does not commit, stash, reset, or clean anything.
-
-2. **Prepare the run.** The orchestrator moves the run to `preparing`, reads
-   applicable repo instructions, records the existing worktree state, and
-   confirms that the worktree and changes can be preserved. It recomputes and
-   records the current digest if the worktree changed since enqueueing; the
-   review request preserves that new scope durably. A missing or ambiguous
-   worktree produces a blocked or failed result without mutation.
-
-3. **Obtain a developer handoff.** If implementation is still required, the
-   orchestrator moves the run to `developing` and sends a
-   `development_assignment` containing the objective, worktree, iteration,
-   timeout, and allowed actions. The developer imports
-   `$agent-orchestra-developer`, edits only the assigned worktree, validates the
-   result, and returns a `developer_handoff`. If the worktree was supplied with
-   completed uncommitted changes, the orchestrator skips the initial developer
-   invocation and treats those changes as the handoff.
-
-4. **Freeze the review identity.** Immediately before review, the orchestrator
-   recomputes the diff digest. It records the current base SHA, head SHA, and
-   digest, moves the run to `awaiting_review`, and increments the review
-   iteration. The digest is the approval boundary; the worktree itself is not
-   assumed to remain unchanged.
-
-5. **Send the review request.** The orchestrator sends a `review_request` with
-   the objective, worktree, iteration, allowed actions, timeout, base SHA, head
-   SHA, diff digest, and Markdown artifact path. The reviewer imports
-   `$agent-orchestra-reviewer`, confirms the current diff still matches the
-   request, and performs a read-only review. A mismatch returns `blocked`
-   instead of reviewing a different change.
-
-6. **Return and record feedback.** The reviewer returns a `review_result` with
-   `approved`, `changes_requested`, or `blocked`; the reviewed digest; summary;
-   ordered findings; validation evidence; and remaining verification gaps. It
-   also writes the Markdown artifact to the requested path. The orchestrator
-   verifies that the result names the requested run, iteration, and digest
-   before accepting it.
-
-7. **Remediate requested changes.** For `changes_requested`, the run moves to
-   `changes_requested` and then `developing`. The orchestrator sends a
-   `remediation_assignment` containing the original objective and complete
-   review artifact. The developer evaluates every finding, makes justified
-   changes, and returns a new `developer_handoff` with each finding's
-   disposition. The orchestrator computes a new digest and repeats steps 4-7.
-   Review iterations are bounded; exhausting the configured limit fails the
-   run instead of looping forever.
-
-8. **Handle blocked or failed work.** A blocked review remains unresolved until
-   its missing scope, evidence, or decision is supplied. Agent errors,
-   timeouts, or interrupted processes produce `failed` or `interrupted` with
-   captured diagnostics. A resumable run continues from its last durable
-   transition rather than restarting silently.
-
-9. **Accept approval for one digest.** For `approved`, the orchestrator records
-   the verdict and moves to `approved`. It recomputes the digest before any
-   commit action. If the worktree changed, approval is invalidated, the run
-   returns to `awaiting_review` with a new iteration, and no commit is made.
-
-10. **Request commit authorization.** The run moves to
-    `awaiting_commit_authorization`, and the orchestrator sends an
-    `authorization_request` describing the exact digest and proposed commit.
-    Denial cancels the action without discarding the worktree. Approval permits
-    only the commit; it does not permit a push or pull request.
-
-11. **Commit and request publication separately.** After a successful commit,
-    the run moves through `committed` to
-    `awaiting_publish_authorization`. A second `authorization_request` names the
-    proposed push and pull-request operation. On approval, the acting agent
-    publishes and returns an `operation_result` with the branch, commit, and
-    pull-request identity. The run becomes `published`. Denial leaves the local
-    commit intact and unpublished.
-
-12. **Finish without destructive cleanup.** Completion reports the final run
-    state and artifact locations. Worktree removal, branch deletion, merging,
-    and remote cleanup are separate actions and require their own safety checks
-    and authorization.
-
-Enqueueing, local digest capture, state storage, status inspection, skill
-installation, and one bounded durable Codex review step are implemented today.
-Developer invocation and remediation, authorization commands,
-commit/publication execution, iteration limits, and resumption remain target
-contract work.
-
-## Scenario: remote pull-request review
-
-This workflow reviews a remote PR at an exact head without changing the source
-branch. It is a target design; remote provider integration and PR enqueueing are
-not implemented yet.
-
-1. **Enqueue the PR URL.** The caller submits a GitHub or GitLab pull-request
-   URL. The orchestrator validates the provider and project identity, stores the
-   canonical URL, creates a `pull_request` run in `queued`, and returns its run
-   ID. URL parsing does not post to the provider.
-
-2. **Resolve live PR metadata.** In `preparing`, the provider adapter reads the
-   PR identifier, target branch and SHA, source branch and exact head SHA,
-   current state, and relevant repository location. Authentication or lookup
-   failures return a blocked or failed result with the provider diagnostic.
-
-3. **Create an exact-head review worktree.** The orchestrator fetches the
-   recorded remote head and creates or reuses an isolated detached review
-   worktree according to the repo's worktree rules. It verifies that the local
-   head equals the provider-reported head. It never reviews the caller's main
-   worktree or checks out the contributor branch in place.
-
-4. **Freeze the remote review scope.** The orchestrator computes the exact
-   target-to-head diff and digest, records the base SHA, head SHA, and digest,
-   moves to `awaiting_review`, and increments the iteration. The PR URL alone
-   is never treated as an immutable review target.
-
-5. **Send the review request.** The `review_request` contains the PR objective
-   and URL, detached worktree, iteration, timeout, base SHA, head SHA, diff
-   digest, and artifact path. `allowed_actions` is empty for the reviewer. The
-   reviewer may run safe read-only validation but does not edit, commit, push,
-   post a review, approve remotely, or merge. It imports
-   `$agent-orchestra-reviewer` for this role.
-
-6. **Detect concurrent PR updates.** Before accepting the result, the
-   orchestrator reads the live PR head again and recomputes the local digest. If
-   either differs from the request, the result is stale and is not published.
-   The run becomes `superseded`; the new head must be enqueued as a new run and
-   review scope.
-
-7. **Return the local review result.** For an unchanged head, the reviewer
-   returns `review_result` with the exact reviewed head and digest, verdict,
-   structured findings, validation, and Markdown artifact. The orchestrator
-   stores the result and presents it to the caller. `approved` means only that
-   the reviewed diff has no actionable findings; it is not provider approval or
-   merge authorization.
-
-8. **Publish feedback only when authorized.** By default, feedback remains a
-   local artifact. Posting a PR comment, submitting a provider review, or
-   setting an approval state requires an `authorization_request` naming the
-   exact provider action and reviewed head. If allowed, the provider adapter
-   posts the structured result and returns an `operation_result` containing the
-   remote review or comment identity. Merge is never implied.
-
-9. **Handle requested changes externally.** The reviewer never fixes the PR in
-   its detached worktree. The PR author or a separately authorized development
-   workflow addresses findings and pushes a new head. That head invalidates the
-   old review and starts another exact-head review. Feedback is carried forward
-   so the next reviewer can verify every prior finding's disposition.
-
-10. **Complete and preserve evidence.** The final result records the provider,
-    PR identity, reviewed target and head SHAs, digest, verdict, artifact path,
-    validation, and any remote-post identity. Removing the detached worktree is
-    a separate cleanup operation performed only after preservation checks.
-
-The shared state model will need a remote-review completion transition before
-this scenario is implemented: a remote review normally stops after delivering
-or posting its verdict and does not enter the local commit/publication states.
+The [workflow contracts](docs/workflows.md) describe the intended automatic
+orchestration.
 
 ## Current scope
 
-The initial foundation provides:
+The current implementation provides:
 
 - typed run, review, and finding models;
 - an explicit, validated state machine;
 - SQLite run storage with transition history and optimistic updates;
-- an interface for bounded external agent adapters;
+- an interface for agent adapters with timeouts;
 - digest capture for tracked and untracked local changes;
 - Markdown review rendering;
 - commands to initialize state, enqueue local changes from one repo or a
   directory of repos, and inspect runs;
 - a Python-native installer for Codex and Claude Code skills;
-- versioned developer and reviewer skills under `skills/`.
+- versioned developer and reviewer skills under `skills/`;
+- a built-in Codex adapter for the reviewer role and a custom reviewer-command
+  escape hatch.
 
-The role skills are:
+The supported roles are documented separately:
 
-- `agent-orchestra-developer`, which implements an assigned objective or
-  addresses findings in the supplied worktree while observing explicit action
-  gates;
-- `agent-orchestra-reviewer`, which performs a read-only review of the assigned
-  immutable diff and returns structured findings and a Markdown artifact.
+- [Developer role](docs/role-developer.md)
+- [Reviewer role](docs/role-reviewer.md)
 
-Both skills follow the vendor-neutral Agent Skills format and use the same
-versioned `SKILL.md` in OpenAI Codex and Anthropic Claude Code. Import only the
-skill relevant to an agent's assigned role so its instructions and context stay
-focused.
+Installation and invocation examples are in
+[Development and review cycle](#development-and-review-cycle).
 
-### Developer agent skill
-
-A development agent imports `agent-orchestra-developer`. From the root of an
-agent-orchestra checkout, install it for both supported agent runtimes with:
-
-```shell
-mise agent-orchestra -- skills install \
-  --skill agent-orchestra-developer
-```
-
-A development agent should invoke `$agent-orchestra-developer` for an assigned
-implementation or review-remediation run. It should not import the reviewer
-skill for that role.
-
-### Reviewer agent skill
-
-A reviewer agent imports `agent-orchestra-reviewer`. From the root of an
-agent-orchestra checkout, install it for both supported agent runtimes with:
-
-```shell
-mise agent-orchestra -- skills install \
-  --skill agent-orchestra-reviewer
-```
-
-A reviewer agent should invoke `$agent-orchestra-reviewer` for an assigned
-immutable-diff review. It should not import the developer skill because the
-reviewer role must remain read-only.
-
-The installer uses only the Python standard library. By default it installs to
-`$CODEX_HOME/skills` (or `~/.codex/skills`) for Codex and
-`$CLAUDE_CONFIG_DIR/skills` (or `~/.claude/skills`) for Claude Code. Use
-`--codex-home` or `--claude-home` to override those configuration roots. Each
-skill installation is atomic and idempotent. A managed, unchanged installation
-is upgraded when its bundled source changes; a locally modified destination is
-never overwritten.
-
-Reviews and findings are modeled and rendered but are not persisted yet.
-Concrete agent execution, worktree creation, leases, Git provider integration,
-review persistence, and authorization commands are intentionally left for
-subsequent increments.
+One local review request, result, artifact, and its process logs are persisted
+today. Developer dispatch, automated remediation, Claude Code adapters, generic
+role registration, worktree creation, leases, Git provider integration, and
+authorization commands remain subsequent increments.
 
 ## Development
 
@@ -474,35 +237,6 @@ mise run format
 mise run lint
 mise run mypy
 mise run tests
+mise run build
+git diff --check
 ```
-
-Initialize a state database and enqueue a local repo:
-
-```shell
-mise agent-orchestra -- init
-mise agent-orchestra -- enqueue-local /path/to/repo
-mise agent-orchestra -- status
-```
-
-`status` writes an indented, versioned JSON document to stdout for both list and
-single-run queries, with no formatter required. The `runs` array contains the
-complete persisted run records, including their scenario, state, repo and
-worktree paths, Git identities, diff digest, iteration, remote URL, and
-timestamps:
-
-```shell
-mise agent-orchestra -- status
-mise agent-orchestra -- status <run-id>
-```
-
-Enqueue every immediate child repo with local changes. Clean repos and repos
-that cannot be read are reported and skipped; the command fails only when a
-repo failed and none could be enqueued:
-
-```shell
-mise agent-orchestra -- enqueue-locals ~/Projects
-```
-
-State defaults to `~/.local/state/agent-orchestra/state.db`, outside reviewed
-worktrees. Use `--database PATH` to choose another location; custom state paths
-must also be outside the worktree being reviewed.

@@ -43,6 +43,64 @@ def test_update_records_new_state(tmp_path: Path) -> None:
     assert store.get(run.id).state is RunState.PREPARING
 
 
+def test_initialize_renames_legacy_awaiting_review_state(tmp_path: Path) -> None:
+    """Keep databases created before the reviewing state rename readable."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'awaiting_review' WHERE id = ?", (str(run.id),)
+        )
+        connection.execute(
+            "UPDATE transitions SET to_state = 'awaiting_review' WHERE run_id = ?",
+            (str(run.id),),
+        )
+        connection.execute(
+            'INSERT INTO transitions (run_id, from_state, to_state, occurred_at) '
+            "VALUES (?, 'awaiting_review', 'approved', ?)",
+            (str(run.id), run.updated_at.isoformat()),
+        )
+
+    store.initialize()
+
+    assert store.get(run.id).state is RunState.REVIEWING
+    with sqlite3.connect(database) as connection:
+        legacy_values = connection.execute(
+            'SELECT COUNT(*) FROM transitions '
+            "WHERE from_state = 'awaiting_review' OR to_state = 'awaiting_review'"
+        ).fetchone()
+    assert legacy_values == (0,)
+
+
+def test_read_and_update_accept_legacy_awaiting_review_state(tmp_path: Path) -> None:
+    """Use an in-progress legacy run without requiring initialization."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    run = replace(
+        Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
+        state=RunState.REVIEWING,
+        iteration=1,
+    )
+    store.add(run)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'awaiting_review' WHERE id = ?", (str(run.id),)
+        )
+
+    loaded = store.get(run.id)
+    approved = transition(loaded, RunState.APPROVED)
+    store.update(approved, expected_state=RunState.REVIEWING)
+
+    assert loaded.state is RunState.REVIEWING
+    assert store.get(run.id).state is RunState.APPROVED
+
+
 def test_update_detects_stale_state(tmp_path: Path) -> None:
     """Reject an update whose expected state is no longer current."""
 

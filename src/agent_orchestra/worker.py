@@ -204,7 +204,7 @@ def run_queued_review(
         updated_at=utc_now(),
     )
     store.update(prepared, expected_state=RunState.QUEUED)
-    reviewing = transition(prepared, RunState.AWAITING_REVIEW)
+    reviewing = transition(prepared, RunState.REVIEWING)
     store.update(reviewing, expected_state=RunState.PREPARING)
 
     messages = run_directory / 'messages'
@@ -252,19 +252,19 @@ def run_queued_review(
         )
     except subprocess.TimeoutExpired as error:
         failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.AWAITING_REVIEW)
+        store.update(failed, expected_state=RunState.REVIEWING)
         raise WorkerError(
             f'reviewer timed out after {timeout_seconds} seconds'
         ) from error
     except OSError as error:
         failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.AWAITING_REVIEW)
+        store.update(failed, expected_state=RunState.REVIEWING)
         raise WorkerError(f'cannot execute reviewer: {error}') from error
     (logs / 'reviewer.stdout.log').write_text(completed.stdout, encoding='utf-8')
     (logs / 'reviewer.stderr.log').write_text(completed.stderr, encoding='utf-8')
     if completed.returncode != 0:
         failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.AWAITING_REVIEW)
+        store.update(failed, expected_state=RunState.REVIEWING)
         raise WorkerError(f'reviewer exited with code {completed.returncode}')
 
     response_valid = False
@@ -279,7 +279,7 @@ def run_queued_review(
         response_valid = True
     except WorkerError:
         failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.AWAITING_REVIEW)
+        store.update(failed, expected_state=RunState.REVIEWING)
         raise
     finally:
         if response_path.exists():
@@ -296,7 +296,7 @@ def run_queued_review(
         reviewing,
         RunState.APPROVED if verdict == 'approved' else RunState.CHANGES_REQUESTED,
     )
-    store.update(decided, expected_state=RunState.AWAITING_REVIEW)
+    store.update(decided, expected_state=RunState.REVIEWING)
     if verdict == 'changes_requested':
         return decided
     awaiting_authorization = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)

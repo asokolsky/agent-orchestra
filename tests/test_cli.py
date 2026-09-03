@@ -3,6 +3,7 @@
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from dataclasses import fields
@@ -359,12 +360,12 @@ def test_status_lists_persisted_run(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 1,\n  "runs": [\n    {\n')
+    assert output.startswith('{\n  "schema_version": 2,\n  "runs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     assert set(document['runs'][0]) == {field.name for field in fields(Run)}
     assert document == {
-        'schema_version': 1,
+        'schema_version': 2,
         'runs': [
             {
                 'id': str(run.id),
@@ -401,8 +402,36 @@ def test_status_filters_json_document_by_run_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 1
+    assert document['schema_version'] == 2
     assert [run['id'] for run in document['runs']] == [str(first.id)]
+
+
+def test_status_reads_legacy_review_state_without_initializing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Expose the renamed state without requiring a separate init command."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'awaiting_review' WHERE id = ?", (str(run.id),)
+        )
+
+    result = main(['--database', str(database), 'status', str(run.id)])
+
+    assert result == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['schema_version'] == 2
+    assert document['runs'][0]['state'] == 'reviewing'
+    with sqlite3.connect(database) as connection:
+        stored_state = connection.execute(
+            'SELECT state FROM runs WHERE id = ?', (str(run.id),)
+        ).fetchone()
+    assert stored_state == ('awaiting_review',)
 
 
 def test_status_lists_empty_runs_as_json(
@@ -417,7 +446,7 @@ def test_status_lists_empty_runs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 1,
+        'schema_version': 2,
         'runs': [],
     }
 
@@ -475,9 +504,11 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert (run_directory / 'messages/000001-review-request.json').is_file()
     assert (run_directory / 'messages/000002-review-result.json').is_file()
     assert (run_directory / 'artifacts/review-0001.md').is_file()
-    assert (
-        json.loads(capsys.readouterr().out)['state'] == 'awaiting_commit_authorization'
-    )
+    assert json.loads(capsys.readouterr().out) == {
+        'schema_version': 2,
+        'run_id': str(run.id),
+        'state': 'awaiting_commit_authorization',
+    }
 
 
 def test_run_uses_builtin_codex_adapter_by_default(
@@ -650,7 +681,7 @@ def test_run_keeps_blocked_review_awaiting_resolution(
     )
 
     assert result == 0
-    assert RunStore(database).get(run.id).state.value == 'awaiting_review'
+    assert RunStore(database).get(run.id).state.value == 'reviewing'
 
 
 @pytest.mark.parametrize(
