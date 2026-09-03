@@ -78,11 +78,15 @@ flowchart TB
 
 7. **Remediate requested changes.** After a `changes_requested` verdict, the
    run enters the `changes_requested` state and then returns to `developing`.
-   The orchestrator sends a `remediation_assignment` containing the original
-   objective and complete review artifact. The developer evaluates every
+   The orchestrator sends a `remediation_request` containing the original
+   objective and paths to the complete canonical review result and Markdown
+   artifact. The developer evaluates every
    finding, makes justified changes, and returns a new `developer_handoff` with
    each finding's disposition. The orchestrator computes a new digest and
-   repeats steps 4-7. Review iterations are bounded; exhausting the configured
+   repeats steps 4-7. If every finding is instead rejected or blocked with a
+   rationale and the diff is unchanged, the run returns to `changes_requested`
+   with durable decision-required evidence for human resolution. Review
+   iterations are bounded; exhausting the configured
    limit fails the run instead of looping forever.
 
 8. **Handle blocked or failed work.** A blocked review remains unresolved until

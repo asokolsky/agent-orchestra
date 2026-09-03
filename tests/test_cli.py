@@ -15,6 +15,12 @@ import pytest
 from agent_orchestra.cli import DEFAULT_DATABASE, _working_tree_digest, main
 from agent_orchestra.models import Run
 from agent_orchestra.store import RunStore
+from agent_orchestra.worker import (
+    ITERATION_LIMIT,
+    NO_REMEDIATION_CHANGE,
+    WorkerError,
+    run_queued_review,
+)
 
 
 def initialize_git_repository(path: Path) -> None:
@@ -64,7 +70,7 @@ response = {{
     "message_id": str(uuid4()),
     "in_reply_to": request["message_id"],
     "run_id": request["run_id"],
-    "sequence": 2,
+    "sequence": request["sequence"] + 1,
     "iteration": request["iteration"],
     "message_type": "review_result",
     "sender": "reviewer",
@@ -86,6 +92,74 @@ response = {{
         "validation": [],
         "verification_gaps": [],
         "artifact_path": str(artifact_path),
+    }},
+}}
+response_path.write_text(json.dumps(response))
+'''
+    )
+
+
+def write_loop_reviewer(path: Path) -> None:
+    """Write a reviewer that requests one remediation and then approves."""
+
+    write_reviewer(path, 'approved')
+    content = path.read_text()
+    content = content.replace(
+        '"verdict": "approved",',
+        '"verdict": "changes_requested" if request["iteration"] == 1 else "approved",',
+    ).replace(
+        '[] if "approved" == "approved" else [{',
+        '[] if request["iteration"] > 1 else [{',
+    )
+    path.write_text(content)
+
+
+def write_developer(
+    path: Path, *, change_worktree: bool = True, disposition: str = 'addressed'
+) -> None:
+    """Write a deterministic developer that changes the diff and hands off."""
+
+    edit = (
+        '(worktree / "tracked.txt").write_text("remediated\\n")'
+        if change_worktree
+        else 'pass'
+    )
+    path.write_text(
+        f'''"""Test developer command."""
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+request_path = Path(sys.argv[1])
+response_path = Path(sys.argv[2])
+request = json.loads(request_path.read_text())
+worktree = Path(request["scope"]["worktree_path"])
+{edit}
+review = json.loads(Path(request["payload"]["review_result_path"]).read_text())
+response = {{
+    "schema_version": 1,
+    "message_id": str(uuid4()),
+    "in_reply_to": request["message_id"],
+    "run_id": request["run_id"],
+    "sequence": request["sequence"] + 1,
+    "iteration": request["iteration"],
+    "message_type": "developer_handoff",
+    "sender": "developer",
+    "recipient": "orchestrator",
+    "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    "scope": request["scope"],
+    "payload": {{
+        "status": "ready_for_review",
+        "summary": "remediated",
+        "files_changed": ["tracked.txt"],
+        "validation": [],
+        "dispositions": [
+            {{"finding_id": item["finding_id"], "disposition": "{disposition}", "rationale": "evaluated"}}
+            for item in review["payload"]["findings"]
+        ],
+        "remaining_risks": [],
     }},
 }}
 response_path.write_text(json.dumps(response))
@@ -551,7 +625,7 @@ def test_run_uses_builtin_codex_adapter_by_default(
     assert observed['reviewer_command'] == [
         sys.executable,
         '-m',
-        'agent_orchestra.codex_reviewer',
+        'agent_orchestra.adapter.codex',
     ]
 
 
@@ -564,7 +638,7 @@ def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
     assert not DEFAULT_DATABASE.is_relative_to(repository)
 
 
-def test_run_passes_explicit_codex_model_to_builtin_adapter(
+def test_run_passes_explicit_reviewer_model_to_codex_adapter(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -597,7 +671,7 @@ def test_run_passes_explicit_codex_model_to_builtin_adapter(
             str(run.id),
             '--objective',
             'Review the change.',
-            '--codex-model',
+            '--reviewer-model',
             'compatible-model',
         ]
     )
@@ -606,9 +680,59 @@ def test_run_passes_explicit_codex_model_to_builtin_adapter(
     assert observed['reviewer_command'] == [
         sys.executable,
         '-m',
-        'agent_orchestra.codex_reviewer',
+        'agent_orchestra.adapter.codex',
         '--model',
         'compatible-model',
+    ]
+
+
+def test_run_selects_claude_code_reviewer_independently(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Select Claude Code and its role-specific model without changing state."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    capsys.readouterr()
+    run = RunStore(database).list_runs()[0]
+    observed: dict[str, object] = {}
+
+    def review(**kwargs: object) -> Run:
+        """Capture the selected command without starting Claude Code."""
+
+        observed.update(kwargs)
+        return run
+
+    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'run',
+            str(run.id),
+            '--objective',
+            'Review the change.',
+            '--reviewer-agent',
+            'claude-code',
+            '--reviewer-model',
+            'sonnet',
+        ]
+    )
+
+    assert result == 0
+    assert observed['reviewer_command'] == [
+        sys.executable,
+        '-m',
+        'agent_orchestra.adapter.claude_code',
+        '--model',
+        'sonnet',
     ]
 
 
@@ -646,6 +770,157 @@ def test_run_records_requested_changes(
 
     assert result == 0
     assert RunStore(database).get(run.id).state.value == 'changes_requested'
+
+
+@pytest.mark.parametrize(
+    ('developer_runtime', 'reviewer_runtime'),
+    [
+        ('codex', 'codex'),
+        ('codex', 'claude-code'),
+        ('claude-code', 'codex'),
+        ('claude-code', 'claude-code'),
+    ],
+)
+def test_worker_remediates_and_reviews_new_digest(
+    tmp_path: Path, developer_runtime: str, reviewer_runtime: str
+) -> None:
+    """Complete the same canonical loop for every runtime combination."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    digest = _working_tree_digest(repository, 'HEAD')
+    assert digest is not None
+    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    store.add(run)
+    reviewer = tmp_path / f'{reviewer_runtime}-reviewer.py'
+    developer = tmp_path / f'{developer_runtime}-developer.py'
+    write_loop_reviewer(reviewer)
+    write_developer(developer)
+    runs_directory = tmp_path / 'runs'
+
+    result = run_queued_review(
+        store=store,
+        run=run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=runs_directory,
+        timeout_seconds=30,
+        max_iterations=2,
+        digest_worktree=_working_tree_digest,
+    )
+
+    assert result.state.value == 'awaiting_commit_authorization'
+    assert result.iteration == 2
+    assert result.diff_digest != digest
+    messages = runs_directory / run.id / 'messages'
+    assert sorted(path.name for path in messages.iterdir()) == [
+        '000001-review-request.json',
+        '000002-review-result.json',
+        '000003-remediation-request.json',
+        '000004-developer-handoff.json',
+        '000005-review-request.json',
+        '000006-review-result.json',
+    ]
+    second_request = json.loads((messages / '000005-review-request.json').read_text())
+    assert second_request['iteration'] == 2
+    assert second_request['scope']['diff_digest'] == result.diff_digest
+
+
+@pytest.mark.parametrize(
+    ('max_iterations', 'change_worktree', 'expected'),
+    [(1, True, ITERATION_LIMIT), (2, False, NO_REMEDIATION_CHANGE)],
+)
+def test_worker_stops_bounded_non_progress(
+    tmp_path: Path,
+    max_iterations: int,
+    change_worktree: bool,
+    expected: str,
+) -> None:
+    """Fail durably on iteration exhaustion or a no-change handoff."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    digest = _working_tree_digest(repository, 'HEAD')
+    assert digest is not None
+    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    store.add(run)
+    reviewer = tmp_path / 'loop-reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_developer(developer, change_worktree=change_worktree)
+
+    with pytest.raises(WorkerError, match=expected):
+        run_queued_review(
+            store=store,
+            run=run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=tmp_path / 'runs',
+            timeout_seconds=30,
+            max_iterations=max_iterations,
+            digest_worktree=_working_tree_digest,
+        )
+
+    assert store.get(run.id).state.value == 'failed'
+    failure = json.loads((tmp_path / 'runs' / run.id / 'failure.json').read_text())
+    assert failure['run_id'] == run.id
+    assert failure['state'] == 'failed'
+    assert failure['error'] == {'code': 'worker_error', 'message': expected}
+
+
+def test_worker_surfaces_developer_disagreement_for_human_decision(
+    tmp_path: Path,
+) -> None:
+    """Preserve a justified no-change disagreement without failing the run."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repository(repository)
+    (repository / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    digest = _working_tree_digest(repository, 'HEAD')
+    assert digest is not None
+    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    store.add(run)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_developer(developer, change_worktree=False, disposition='rejected')
+    runs_directory = tmp_path / 'runs'
+
+    result = run_queued_review(
+        store=store,
+        run=run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=runs_directory,
+        timeout_seconds=30,
+        max_iterations=2,
+        digest_worktree=_working_tree_digest,
+    )
+
+    assert result.state.value == 'changes_requested'
+    evidence = json.loads(
+        (runs_directory / run.id / 'decision-required.json').read_text()
+    )
+    assert evidence['reason']['code'] == 'developer_disagreement'
+    assert 'disputed every finding' in evidence['reason']['message']
+    assert not (runs_directory / run.id / 'failure.json').exists()
 
 
 def test_run_keeps_blocked_review_awaiting_resolution(

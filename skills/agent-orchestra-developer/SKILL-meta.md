@@ -10,7 +10,7 @@ tags:
 authors:
   - "asokolsky@gmail.com"
 created-at: "2026-09-02T14:31:12+0200"
-updated-at: "2026-09-02T14:31:12+0200"
+updated-at: "2026-09-03T15:10:00+0200"
 ---
 
 # Agent Orchestra Developer Meta

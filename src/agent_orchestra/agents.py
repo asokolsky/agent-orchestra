@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -19,6 +20,8 @@ class DeveloperRequest:
     iteration: int
     allowed_actions: tuple[str, ...]
     timeout_seconds: int
+    request_path: Path
+    response_path: Path
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -35,6 +38,8 @@ class ReviewerRequest:
     head_sha: str
     diff_digest: str
     artifact_path: Path
+    request_path: Path
+    response_path: Path
 
 
 type AgentRequest = DeveloperRequest | ReviewerRequest
@@ -56,3 +61,29 @@ class AgentAdapter(Protocol):
 
     def execute(self, request: AgentRequest) -> AgentResult:
         """Run one bounded agent invocation."""
+
+
+@dataclass(frozen=True, slots=True)
+class CommandAgentAdapter:
+    """Invoke a role adapter command using the common typed boundary."""
+
+    command: tuple[str, ...]
+
+    def execute(self, request: AgentRequest) -> AgentResult:
+        """Execute the configured adapter with canonical message paths."""
+
+        completed = subprocess.run(
+            [*self.command, str(request.request_path), str(request.response_path)],
+            cwd=request.worktree_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=request.timeout_seconds,
+        )
+        return AgentResult(
+            succeeded=completed.returncode == 0,
+            summary='',
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+        )
