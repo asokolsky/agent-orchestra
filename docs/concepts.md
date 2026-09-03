@@ -191,6 +191,15 @@ or result.
 Markdown is a human-readable artifact. Agent stdout and stderr are execution
 logs. Neither is parsed to reconstruct workflow state.
 
+Each external process has adapter-neutral invocation evidence. It identifies
+the role, agent vendor, optional explicit model override, runtime, iteration,
+invocation, timestamps, exit status, timeout or interruption status, and the
+separate stdout and stderr paths. A null model means the runtime selected its
+own default; it does not claim which effective model the remote service chose.
+Agent identity answers which agent was selected; runtime identity names the
+executable adapter used to invoke it. This evidence can explain execution
+without promoting process output into canonical workflow state.
+
 Adding a runtime does not add new canonical message types when it implements an
 existing role. Adding a role normally adds role-specific request and result
 payload schemas, but it must not change unrelated roles' payloads.

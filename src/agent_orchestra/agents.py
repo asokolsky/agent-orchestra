@@ -22,6 +22,8 @@ class DeveloperRequest:
     timeout_seconds: int
     request_path: Path
     response_path: Path
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -40,6 +42,8 @@ class ReviewerRequest:
     artifact_path: Path
     request_path: Path
     response_path: Path
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
 
 
 type AgentRequest = DeveloperRequest | ReviewerRequest
@@ -51,8 +55,8 @@ class AgentResult:
 
     succeeded: bool
     summary: str
-    stdout: str
-    stderr: str
+    stdout: str | None
+    stderr: str | None
     exit_code: int
 
 
@@ -72,18 +76,39 @@ class CommandAgentAdapter:
     def execute(self, request: AgentRequest) -> AgentResult:
         """Execute the configured adapter with canonical message paths."""
 
-        completed = subprocess.run(
-            [*self.command, str(request.request_path), str(request.response_path)],
-            cwd=request.worktree_path,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=request.timeout_seconds,
-        )
+        command = [*self.command, str(request.request_path), str(request.response_path)]
+        if request.stdout_path is None or request.stderr_path is None:
+            captured = subprocess.run(
+                command,
+                cwd=request.worktree_path,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=request.timeout_seconds,
+            )
+            stdout = captured.stdout
+            stderr = captured.stderr
+            exit_code = captured.returncode
+        else:
+            with (
+                request.stdout_path.open('wb') as stdout_file,
+                request.stderr_path.open('wb') as stderr_file,
+            ):
+                redirected = subprocess.run(
+                    command,
+                    cwd=request.worktree_path,
+                    check=False,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    timeout=request.timeout_seconds,
+                )
+            stdout = None
+            stderr = None
+            exit_code = redirected.returncode
         return AgentResult(
-            succeeded=completed.returncode == 0,
+            succeeded=exit_code == 0,
             summary='',
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            exit_code=completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
         )
