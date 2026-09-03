@@ -13,7 +13,7 @@ This separation lets different agent products use the same workflow. It also
 lets new roles reuse the orchestration core.
 
 ```mermaid
-flowchart LR
+flowchart TB
     caller[User or calling system] -->|objective and authorization| orchestrator[Orchestrator]
     orchestrator -->|selects| role[Role]
     orchestrator -->|selects| runtime[Runtime]
