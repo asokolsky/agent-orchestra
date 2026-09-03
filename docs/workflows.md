@@ -17,7 +17,7 @@ a worktree in which agent-orchestra first asks a developer to implement an
 objective.
 
 ```mermaid
-flowchart LR
+flowchart TB
     queued[queued] --> preparing[preparing]
     preparing -->|implementation needed| developing[developing<br/>developer]
     preparing -->|existing diff| reviewing[reviewing<br/>reviewer]
