@@ -14,6 +14,10 @@ from agent_orchestra.adapter.claude_code import (
     ClaudeCodeReviewerError,
     run_claude_code_reviewer,
 )
+from agent_orchestra.runtime_metadata import (
+    RUNTIME_METADATA_ENV,
+    read_runtime_metadata,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -153,6 +157,76 @@ def test_claude_code_reviewer_requires_structured_output(
 
     with pytest.raises(ClaudeCodeReviewerError, match='structured_output'):
         run_claude_code_reviewer(request, tmp_path / 'run/result.json')
+
+
+def test_claude_code_reviewer_reports_models_before_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retain reported provenance when Claude Code exits unsuccessfully."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'run/messages/request.json'
+    metadata = tmp_path / 'run/runtime.json'
+    _write_request(request, worktree, tmp_path / 'run/artifacts/review.md')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(metadata))
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.run_streaming_process',
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            9,
+            stdout=json.dumps(
+                {
+                    'modelUsage': {'claude-sonnet-4-6': {'inputTokens': 10}},
+                    'structured_output': _approved_result(),
+                }
+            ),
+            stderr='failed',
+        ),
+    )
+
+    with pytest.raises(ClaudeCodeReviewerError, match='failed with code 9'):
+        run_claude_code_reviewer(request, tmp_path / 'run/result.json')
+
+    assert read_runtime_metadata(metadata) == (('claude-sonnet-4-6',), 'reported')
+
+
+def test_claude_code_reviewer_reports_models_before_schema_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retain reported provenance when the structured result is invalid."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'run/messages/request.json'
+    metadata = tmp_path / 'run/runtime.json'
+    _write_request(request, worktree, tmp_path / 'run/artifacts/review.md')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(metadata))
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.run_streaming_process',
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    'modelUsage': {'claude-sonnet-4-6': {'inputTokens': 10}},
+                    'structured_output': {'verdict': 'approved'},
+                }
+            ),
+            stderr='',
+        ),
+    )
+
+    with pytest.raises(ClaudeCodeReviewerError):
+        run_claude_code_reviewer(request, tmp_path / 'run/result.json')
+
+    assert read_runtime_metadata(metadata) == (('claude-sonnet-4-6',), 'reported')
 
 
 def test_claude_code_reviewer_parses_structured_output_with_invalid_utf8(

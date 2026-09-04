@@ -51,9 +51,13 @@ pull request, post remotely, merge, or remove a worktree. Each is a separate
 capability and authorization decision. The role must never discard existing
 work with reset, restore, checkout, stash, cleaning, or an equivalent action.
 
-All edits and local validation occur inside the assigned worktree. Workflow
-messages, review artifacts, process logs, and other run evidence remain outside
-it unless the assignment explicitly requires a repo artifact.
+All edits and local validation occur inside the assigned worktree. A built-in
+developer sandbox may use outbound network access to fetch dependencies needed
+by project validation, but that technical access does not authorize remote
+lifecycle writes. Workflow messages, review artifacts, process logs, and other
+run evidence remain outside the worktree unless the assignment explicitly
+requires a repo artifact. Runtime-only evidence channels are not inherited by
+commands launched inside the developer sandbox.
 
 ## Implementation and remediation
 

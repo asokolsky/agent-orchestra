@@ -22,6 +22,10 @@ from agent_orchestra.adapter.developer import (
 from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
+from agent_orchestra.runtime_metadata import (
+    child_process_environment,
+    write_runtime_metadata,
+)
 from agent_orchestra.schemas import (
     DEVELOPER_RESULT_SCHEMA,
     REVIEW_RESULT_SCHEMA,
@@ -168,6 +172,28 @@ def _review(request: dict[str, Any], result: dict[str, Any]) -> Review:
     )
 
 
+def _effective_models(output: dict[str, Any]) -> tuple[str, ...]:
+    """Return model identities reported by Claude Code's JSON result."""
+
+    usage = output.get('modelUsage')
+    if not isinstance(usage, dict):
+        return ()
+    return tuple(model for model in usage if isinstance(model, str) and model)
+
+
+def _output_with_runtime_metadata(stdout: str) -> dict[str, Any] | None:
+    """Parse a Claude Code envelope and report any model identities it contains."""
+
+    try:
+        output = json.loads(stdout)
+    except json.JSONDecodeError, TypeError:
+        return None
+    if not isinstance(output, dict):
+        return None
+    write_runtime_metadata(_effective_models(output))
+    return output
+
+
 def run_claude_code_reviewer(
     request_path: Path, response_path: Path, *, model: str | None = None
 ) -> None:
@@ -227,21 +253,23 @@ def run_claude_code_reviewer(
         completed = run_streaming_process(
             command,
             cwd=worktree,
-            env={**os.environ, 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB': '1'},
+            env=child_process_environment(CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'),
             input=_prompt(request),
             timeout=max(1, timeout_seconds - 5),
         )
     except subprocess.TimeoutExpired as error:
         raise ClaudeCodeReviewerError(CLAUDE_CODE_TIMEOUT) from error
+    output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
         raise ClaudeCodeReviewerError(
             f'claude-code failed with code {completed.returncode}: {diagnostic}'
         )
+    if output is None:
+        raise ClaudeCodeReviewerError(MISSING_STRUCTURED_OUTPUT)
     try:
-        output = json.loads(completed.stdout)
         result = output['structured_output']
-    except (json.JSONDecodeError, KeyError, TypeError) as error:
+    except (KeyError, TypeError) as error:
         raise ClaudeCodeReviewerError(MISSING_STRUCTURED_OUTPUT) from error
     if not isinstance(result, dict):
         raise ClaudeCodeReviewerError(MISSING_STRUCTURED_OUTPUT)
@@ -319,21 +347,23 @@ def run_claude_code_developer(
         completed = run_streaming_process(
             command,
             cwd=worktree,
-            env={**os.environ, 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB': '1'},
+            env=child_process_environment(CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'),
             input=developer_prompt(request, '/agent-orchestra-developer'),
             timeout=max(1, timeout_seconds - 5),
         )
     except subprocess.TimeoutExpired as error:
         raise DeveloperAdapterError(CLAUDE_CODE_DEVELOPER_TIMEOUT) from error
+    output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
         raise DeveloperAdapterError(
             f'claude-code failed with code {completed.returncode}: {diagnostic}'
         )
+    if output is None:
+        raise DeveloperAdapterError(MISSING_STRUCTURED_OUTPUT)
     try:
-        output = json.loads(completed.stdout)
         result = output['structured_output']
-    except (json.JSONDecodeError, KeyError, TypeError) as error:
+    except (KeyError, TypeError) as error:
         raise DeveloperAdapterError(MISSING_STRUCTURED_OUTPUT) from error
     if not isinstance(result, dict):
         raise DeveloperAdapterError(MISSING_STRUCTURED_OUTPUT)

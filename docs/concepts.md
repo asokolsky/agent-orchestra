@@ -192,10 +192,12 @@ Markdown is a human-readable artifact. Agent stdout and stderr are execution
 logs. Neither is parsed to reconstruct workflow state.
 
 Each external process has adapter-neutral invocation evidence. It identifies
-the role, agent vendor, optional explicit model override, runtime, iteration,
-invocation, timestamps, exit status, timeout or interruption status, and the
-separate stdout and stderr paths. A null model means the runtime selected its
-own default; it does not claim which effective model the remote service chose.
+the role, agent vendor, optional requested model override, effective models
+reported through stable runtime metadata, runtime, iteration, invocation,
+timestamps, exit status, timeout or interruption status, and the separate
+stdout and stderr paths. Effective identity is explicitly unavailable when the
+runtime does not report it; defaults and human-formatted log headers are never
+treated as evidence. Multiple identities preserve fallback or helper-model use.
 Agent identity answers which agent was selected; runtime identity names the
 executable adapter used to invoke it. This evidence can explain execution
 without promoting process output into canonical workflow state.

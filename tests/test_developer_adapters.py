@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,7 +13,14 @@ from uuid import uuid4
 import pytest
 
 from agent_orchestra.adapter.claude_code import run_claude_code_developer
-from agent_orchestra.adapter.codex import run_codex_developer
+from agent_orchestra.adapter.codex import (
+    _developer_environment,
+    run_codex_developer,
+)
+from agent_orchestra.runtime_metadata import (
+    RUNTIME_METADATA_ENV,
+    read_runtime_metadata,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -82,6 +90,8 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
     skill = tmp_path / 'skills/agent-orchestra-developer'
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('developer instructions\n')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(tmp_path / 'outer-runtime.json'))
+    observed: dict[str, object] = {}
 
     if runtime == 'codex':
         monkeypatch.setattr(
@@ -92,9 +102,13 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
             'agent_orchestra.adapter.codex.shutil.which', lambda _: '/bin/codex'
         )
 
-        def run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        def run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
             """Write Codex structured output to its declared result path."""
 
+            observed['command'] = command
+            observed['kwargs'] = kwargs
             result_path = Path(command[command.index('--output-last-message') + 1])
             result_path.write_text(json.dumps(_result()), encoding='utf-8')
             return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
@@ -110,14 +124,23 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
             'agent_orchestra.adapter.claude_code.shutil.which',
             lambda _: '/bin/claude',
         )
-        monkeypatch.setattr(
-            'agent_orchestra.adapter.claude_code.run_streaming_process',
-            lambda command, **_kwargs: subprocess.CompletedProcess(
+
+        def run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            """Capture the isolated Claude invocation and return its result."""
+
+            observed['command'] = command
+            observed['kwargs'] = kwargs
+            return subprocess.CompletedProcess(
                 command,
                 0,
                 stdout=json.dumps({'structured_output': _result()}),
                 stderr='',
-            ),
+            )
+
+        monkeypatch.setattr(
+            'agent_orchestra.adapter.claude_code.run_streaming_process', run
         )
         invoke = run_claude_code_developer
 
@@ -128,6 +151,104 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
     assert document['message_type'] == 'developer_handoff'
     assert document['payload'] == _result()
     assert 'model' not in document
+    command = observed['command']
+    assert isinstance(command, list)
+    kwargs = observed['kwargs']
+    assert isinstance(kwargs, dict)
+    environment = kwargs['env']
+    assert isinstance(environment, dict)
+    assert RUNTIME_METADATA_ENV not in environment
+    if runtime == 'codex':
+        assert command[command.index('--sandbox') + 1] == 'workspace-write'
+        config_values = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == '--config'
+        ]
+        assert 'sandbox_workspace_write.network_access=true' in config_values
+        assert environment['MISE_TRUSTED_CONFIG_PATHS'] == str(worktree.resolve())
+        assert Path(environment['MISE_CACHE_DIR']).name == 'mise-cache'
+        assert Path(environment['MISE_DATA_DIR']).name == 'mise-data'
+        assert Path(environment['MISE_INSTALLS_DIR']).parent == Path(
+            environment['MISE_DATA_DIR']
+        )
+        assert environment['MISE_SHARED_INSTALL_DIRS']
+        assert Path(environment['MISE_STATE_DIR']).name == 'mise-state'
+        assert Path(environment['UV_CACHE_DIR']).name == 'uv-cache'
+
+
+@pytest.mark.skipif(shutil.which('mise') is None, reason='mise is not installed')
+def test_codex_developer_environment_installs_project_declared_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install and execute a missing local-plugin tool with isolated mise storage."""
+
+    mise = shutil.which('mise')
+    assert mise is not None
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    (worktree / 'mise.toml').write_text('[tools]\nagent-orchestra-fixture = "1.0.0"\n')
+    plugin = tmp_path / 'plugin'
+    plugin_bin = plugin / 'bin'
+    plugin_bin.mkdir(parents=True)
+    list_all = plugin_bin / 'list-all'
+    list_all.write_text('#!/bin/sh\nprintf "1.0.0\\n"\n')
+    list_all.chmod(0o755)
+    install = plugin_bin / 'install'
+    install.write_text(
+        '#!/bin/sh\n'
+        'set -eu\n'
+        'mkdir -p "$ASDF_INSTALL_PATH/bin"\n'
+        'printf \'#!/bin/sh\\nprintf "installed fixture\\n"\\n\' '
+        '> "$ASDF_INSTALL_PATH/bin/agent-orchestra-fixture"\n'
+        'chmod +x "$ASDF_INSTALL_PATH/bin/agent-orchestra-fixture"\n'
+    )
+    install.chmod(0o755)
+    existing_data = tmp_path / 'existing-mise-data'
+    existing_installs = existing_data / 'installs'
+    existing_installs.mkdir(parents=True)
+    existing_shared = tmp_path / 'existing-shared-installs'
+    existing_shared.mkdir()
+    monkeypatch.setenv('MISE_DATA_DIR', str(existing_data))
+    monkeypatch.delenv('MISE_INSTALLS_DIR', raising=False)
+    monkeypatch.setenv('MISE_SHARED_INSTALL_DIRS', str(existing_shared))
+    monkeypatch.setenv('MISE_CONFIG_DIR', str(tmp_path / 'mise-config'))
+    environment = _developer_environment(worktree, tmp_path / 'runtime')
+
+    assert shutil.which('agent-orchestra-fixture', path=environment['PATH']) is None
+    assert environment['MISE_SHARED_INSTALL_DIRS'].split(os.pathsep) == [
+        str(existing_installs),
+        str(existing_shared),
+    ]
+    subprocess.run(
+        [mise, 'plugins', 'link', '--force', 'agent-orchestra-fixture', str(plugin)],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [mise, 'install'],
+        cwd=worktree,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    completed = subprocess.run(
+        [mise, 'exec', '--', 'agent-orchestra-fixture'],
+        cwd=worktree,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    install_root = Path(environment['MISE_INSTALLS_DIR'])
+    assert (install_root / 'agent-orchestra-fixture/1.0.0').is_dir()
+    assert completed.stdout == 'installed fixture\n'
+    assert not any(existing_installs.iterdir())
 
 
 def test_claude_developer_confines_writes_to_primary_working_directory(
@@ -297,6 +418,48 @@ def test_developer_adapters_report_stable_execution_failures(
 
     with pytest.raises(RuntimeError, match=expected):
         invoke(request, tmp_path / 'run/response.json')
+
+
+def test_claude_developer_reports_models_before_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retain reported provenance when Claude Code development fails."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'run/messages/request.json'
+    metadata = tmp_path / 'run/runtime.json'
+    _request(request, worktree)
+    skill = tmp_path / 'skills/agent-orchestra-developer'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('developer instructions\n')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(metadata))
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.skill_destination',
+        lambda *_args: skill,
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.run_streaming_process',
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            9,
+            stdout=json.dumps(
+                {
+                    'modelUsage': {'claude-sonnet-4-6': {'inputTokens': 10}},
+                    'structured_output': _result(),
+                }
+            ),
+            stderr='failed',
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match='failed with code 9'):
+        run_claude_code_developer(request, tmp_path / 'run/response.json')
+
+    assert read_runtime_metadata(metadata) == (('claude-sonnet-4-6',), 'reported')
 
 
 def test_codex_developer_rejects_nonpositive_timeout(

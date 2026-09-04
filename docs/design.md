@@ -142,7 +142,7 @@ match its repo and worktree in the `runs` array:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "runs_directory": "/home/user/.local/state/agent-orchestra/runs",
   "runs": [
     {
@@ -549,14 +549,18 @@ human decision rather than a failed or endlessly retried run.
 
 Every attempted external process writes one versioned JSON record under the
 run's `invocations/` directory. The record is runtime-neutral and contains the
-run and invocation IDs, role, selected agent vendor, explicit model override,
-adapter runtime, iteration, start and finish timestamps, exit code, timeout and
-interruption flags, attempt number, and paths to separate stdout and stderr
-files under `logs/`.
-The model is `null` when the runtime chooses its own default; the orchestrator
-does not infer an effective remote model it cannot verify. Records and streams
-are finalized atomically. Invocation records exclude command arguments and
-environment snapshots.
+run and invocation IDs, role, selected agent vendor, requested model override,
+effective model identities and reporting status, adapter runtime, iteration,
+start and finish timestamps, exit code, timeout and interruption flags, attempt
+number, and paths to separate stdout and stderr files under `logs/`.
+Schema version 3 separates `requested_model` from the ordered
+`effective_models` collection. `effective_model_status` is `reported` only when
+stable machine-readable runtime metadata supplied at least one identity;
+otherwise it is `unavailable`. The orchestrator never guesses from a runtime
+default or parses human-formatted output. Invocation-record schemas 1 and 2
+remain readable as requested-model evidence with unavailable effective
+identity. Records and streams are finalized atomically. Invocation records
+exclude command arguments and environment snapshots.
 
 New runs also persist `execution.json` schema version 2 before their first
 agent invocation. It contains the run ID, objective, exact reviewer and

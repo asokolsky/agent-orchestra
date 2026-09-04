@@ -13,6 +13,7 @@ import pytest
 
 from agent_orchestra.adapter.claude_code import run_claude_code_reviewer
 from agent_orchestra.adapter.codex import run_codex_reviewer
+from agent_orchestra.runtime_metadata import RUNTIME_METADATA_ENV
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,6 +82,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
     skill = tmp_path / 'skills/agent-orchestra-reviewer'
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('review instructions\n')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(tmp_path / 'outer-runtime.json'))
     observed: dict[str, object] = {}
 
     if runtime == 'codex':
@@ -134,14 +136,18 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
 
     command = observed['command']
     assert isinstance(command, list)
+    kwargs = observed['kwargs']
+    assert isinstance(kwargs, dict)
     if runtime == 'codex':
         assert command[command.index('--sandbox') + 1] == 'read-only'
         assert command[command.index('--cd') + 1] == str(worktree)
+        assert 'sandbox_workspace_write.network_access=true' not in command
     else:
         assert command[command.index('--permission-mode') + 1] == 'dontAsk'
-        kwargs = observed['kwargs']
-        assert isinstance(kwargs, dict)
         assert kwargs['cwd'] == worktree
+    environment = kwargs['env']
+    assert isinstance(environment, dict)
+    assert RUNTIME_METADATA_ENV not in environment
     assert command[command.index('--model') + 1] == 'runtime-model'
     document = json.loads(response.read_text())
     assert document['payload'] == {**_result(), 'artifact_path': str(artifact)}

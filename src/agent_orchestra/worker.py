@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
@@ -85,6 +85,7 @@ RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
 RESUME_SCOPE_CHANGED_CODE = 'resume_scope_changed'
 RESUME_INTERRUPTED_CODE = 'resume_interrupted'
 RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
+RUNTIME_METADATA_RUNTIMES = frozenset({'codex', 'claude-code'})
 
 
 def _require_unchanged(actual: str | None, expected: str) -> None:
@@ -151,6 +152,30 @@ def _output_text(value: str | bytes | None) -> str:
     return value.decode(errors='replace') if isinstance(value, bytes) else value
 
 
+def _exception_runtime_metadata(
+    error: BaseException,
+) -> tuple[tuple[str, ...], Literal['reported', 'unavailable']]:
+    """Return validated provenance preserved by a failed command adapter."""
+
+    models = getattr(error, 'effective_models', ())
+    status = getattr(error, 'effective_model_status', 'unavailable')
+    if (
+        isinstance(models, tuple)
+        and all(isinstance(model, str) and model for model in models)
+        and len(models) == len(set(models))
+        and status in {'reported', 'unavailable'}
+        and (status == 'reported') == bool(models)
+    ):
+        return tuple(models), cast('Literal["reported", "unavailable"]', status)
+    return (), 'unavailable'
+
+
+def _runtime_metadata_path(identity: InvocationIdentity, path: Path) -> Path | None:
+    """Return the sidecar path only for runtimes that report provenance."""
+
+    return path if identity.runtime in RUNTIME_METADATA_RUNTIMES else None
+
+
 def _invocation_stem(sequence: int, role: str, attempt: int) -> str:
     """Return the stable evidence stem for one invocation attempt."""
 
@@ -176,6 +201,8 @@ def _record_invocation(
     invocation_id: str | None = None,
     finished: bool = True,
     attempt: int = 1,
+    effective_models: tuple[str, ...] = (),
+    effective_model_status: Literal['reported', 'unavailable'] = 'unavailable',
 ) -> str:
     """Persist separate streams and their adapter-neutral invocation record."""
 
@@ -190,12 +217,14 @@ def _record_invocation(
     write_record(
         invocations / f'{log_stem}.json',
         InvocationRecord(
-            schema_version=2,
+            schema_version=3,
             run_id=str(run.id),
             invocation_id=invocation_id,
             role=role,
             agent_vendor=identity.vendor,
-            agent_model=identity.model,
+            requested_model=identity.model,
+            effective_models=effective_models,
+            effective_model_status=effective_model_status,
             runtime=identity.runtime,
             iteration=iteration,
             started_at=started_at,
@@ -751,6 +780,7 @@ def _run_queued_review(
             _validate_review_request(request, run_directory=run_directory)
         response_path = run_directory / '.review-result.json'
         reviewer_stem = _invocation_stem(sequence, 'reviewer', reviewer_attempt)
+        reviewer_metadata_path = run_directory / f'.{reviewer_stem}.runtime.json'
         started_at = timestamp()
         invocation_id = _record_invocation(
             run=run,
@@ -786,9 +816,15 @@ def _run_queued_review(
                     response_path=response_path,
                     stdout_path=logs / f'{reviewer_stem}.stdout.log',
                     stderr_path=logs / f'{reviewer_stem}.stderr.log',
+                    runtime_metadata_path=_runtime_metadata_path(
+                        reviewer_identity, reviewer_metadata_path
+                    ),
                 )
             )
         except subprocess.TimeoutExpired as error:
+            effective_models, effective_model_status = _exception_runtime_metadata(
+                error
+            )
             _record_invocation(
                 run=run,
                 role='reviewer',
@@ -804,6 +840,8 @@ def _run_queued_review(
                 timed_out=True,
                 invocation_id=invocation_id,
                 attempt=reviewer_attempt,
+                effective_models=effective_models,
+                effective_model_status=effective_model_status,
             )
             _archive_unaccepted_response(
                 response_path,
@@ -821,7 +859,10 @@ def _run_queued_review(
                 f'reviewer timed out after {timeout_seconds} seconds',
                 code=RESUME_INTERRUPTED_CODE,
             ) from error
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as error:
+            effective_models, effective_model_status = _exception_runtime_metadata(
+                error
+            )
             _record_invocation(
                 run=run,
                 role='reviewer',
@@ -837,6 +878,8 @@ def _run_queued_review(
                 interrupted=True,
                 invocation_id=invocation_id,
                 attempt=reviewer_attempt,
+                effective_models=effective_models,
+                effective_model_status=effective_model_status,
             )
             _archive_unaccepted_response(
                 response_path,
@@ -852,6 +895,9 @@ def _run_queued_review(
             store.update(interrupted, expected_state=RunState.REVIEWING)
             raise
         except OSError as error:
+            effective_models, effective_model_status = _exception_runtime_metadata(
+                error
+            )
             _record_invocation(
                 run=run,
                 role='reviewer',
@@ -866,6 +912,8 @@ def _run_queued_review(
                 exit_code=None,
                 invocation_id=invocation_id,
                 attempt=reviewer_attempt,
+                effective_models=effective_models,
+                effective_model_status=effective_model_status,
             )
             failed = transition(reviewing, RunState.FAILED)
             store.update(failed, expected_state=RunState.REVIEWING)
@@ -887,6 +935,8 @@ def _run_queued_review(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=reviewer_attempt,
+            effective_models=completed.effective_models,
+            effective_model_status=completed.effective_model_status,
         )
         reviewer_attempt = 1
         if not completed.succeeded:
@@ -968,6 +1018,8 @@ def _run_queued_review(
         }
         _validate_remediation_request(remediation, run_directory=run_directory)
         _write_json_atomic(remediation_path, remediation)
+        developer_stem = _invocation_stem(sequence, 'developer', 1)
+        developer_metadata_path = run_directory / f'.{developer_stem}.runtime.json'
         started_at = timestamp()
         invocation_id = _record_invocation(
             run=run,
@@ -995,9 +1047,15 @@ def _run_queued_review(
                     response_path=handoff_temporary,
                     stdout_path=logs / f'{sequence:06d}-developer.stdout.log',
                     stderr_path=logs / f'{sequence:06d}-developer.stderr.log',
+                    runtime_metadata_path=_runtime_metadata_path(
+                        developer_identity, developer_metadata_path
+                    ),
                 )
             )
         except subprocess.TimeoutExpired as error:
+            effective_models, effective_model_status = _exception_runtime_metadata(
+                error
+            )
             _record_invocation(
                 run=run,
                 role='developer',
@@ -1012,6 +1070,8 @@ def _run_queued_review(
                 exit_code=None,
                 timed_out=True,
                 invocation_id=invocation_id,
+                effective_models=effective_models,
+                effective_model_status=effective_model_status,
             )
             _archive_unaccepted_response(
                 handoff_temporary,
@@ -1024,7 +1084,10 @@ def _run_queued_review(
                 f'developer timed out after {developer_timeout_seconds} seconds',
                 code=RESUME_INTERRUPTED_CODE,
             ) from error
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as error:
+            effective_models, effective_model_status = _exception_runtime_metadata(
+                error
+            )
             _record_invocation(
                 run=run,
                 role='developer',
@@ -1039,6 +1102,8 @@ def _run_queued_review(
                 exit_code=None,
                 interrupted=True,
                 invocation_id=invocation_id,
+                effective_models=effective_models,
+                effective_model_status=effective_model_status,
             )
             _archive_unaccepted_response(
                 handoff_temporary,
@@ -1049,6 +1114,9 @@ def _run_queued_review(
             store.update(interrupted, expected_state=RunState.DEVELOPING)
             raise
         except OSError as error:
+            effective_models, effective_model_status = _exception_runtime_metadata(
+                error
+            )
             _record_invocation(
                 run=run,
                 role='developer',
@@ -1062,6 +1130,8 @@ def _run_queued_review(
                 stderr=str(error),
                 exit_code=None,
                 invocation_id=invocation_id,
+                effective_models=effective_models,
+                effective_model_status=effective_model_status,
             )
             failed = transition(developing, RunState.FAILED)
             store.update(failed, expected_state=RunState.DEVELOPING)
@@ -1082,6 +1152,8 @@ def _run_queued_review(
             stderr=completed.stderr,
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
+            effective_models=completed.effective_models,
+            effective_model_status=completed.effective_model_status,
         )
         if not completed.succeeded:
             failed = transition(developing, RunState.FAILED)
@@ -1199,6 +1271,7 @@ def _resume_developer_request(
     )
     adapter = CommandAgentAdapter(tuple(developer_command))
     developer_stem = _invocation_stem(sequence, 'developer', attempt)
+    developer_metadata_path = run_directory / f'.{developer_stem}.runtime.json'
     started_at = timestamp()
     invocation_id = _record_invocation(
         run=run,
@@ -1229,9 +1302,13 @@ def _resume_developer_request(
                 response_path=response_path,
                 stdout_path=logs / f'{developer_stem}.stdout.log',
                 stderr_path=logs / f'{developer_stem}.stderr.log',
+                runtime_metadata_path=_runtime_metadata_path(
+                    developer_identity, developer_metadata_path
+                ),
             )
         )
     except subprocess.TimeoutExpired as error:
+        effective_models, effective_model_status = _exception_runtime_metadata(error)
         _record_invocation(
             run=run,
             role='developer',
@@ -1247,6 +1324,8 @@ def _resume_developer_request(
             timed_out=True,
             invocation_id=invocation_id,
             attempt=attempt,
+            effective_models=effective_models,
+            effective_model_status=effective_model_status,
         )
         _archive_unaccepted_response(
             response_path,
@@ -1259,7 +1338,8 @@ def _resume_developer_request(
             f'developer timed out after {developer_timeout_seconds} seconds',
             code=RESUME_INTERRUPTED_CODE,
         ) from error
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as error:
+        effective_models, effective_model_status = _exception_runtime_metadata(error)
         _record_invocation(
             run=run,
             role='developer',
@@ -1275,6 +1355,8 @@ def _resume_developer_request(
             interrupted=True,
             invocation_id=invocation_id,
             attempt=attempt,
+            effective_models=effective_models,
+            effective_model_status=effective_model_status,
         )
         _archive_unaccepted_response(
             response_path,
@@ -1285,6 +1367,7 @@ def _resume_developer_request(
         store.update(interrupted, expected_state=RunState.DEVELOPING)
         raise
     except OSError as error:
+        effective_models, effective_model_status = _exception_runtime_metadata(error)
         _record_invocation(
             run=run,
             role='developer',
@@ -1299,6 +1382,8 @@ def _resume_developer_request(
             exit_code=None,
             invocation_id=invocation_id,
             attempt=attempt,
+            effective_models=effective_models,
+            effective_model_status=effective_model_status,
         )
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.DEVELOPING)
@@ -1320,6 +1405,8 @@ def _resume_developer_request(
         exit_code=completed.exit_code,
         invocation_id=invocation_id,
         attempt=attempt,
+        effective_models=completed.effective_models,
+        effective_model_status=completed.effective_model_status,
     )
     if not completed.succeeded:
         failed = transition(run, RunState.FAILED)

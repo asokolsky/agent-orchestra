@@ -237,6 +237,26 @@ response_path.write_text(json.dumps(response))
     )
 
 
+def write_provenance_reviewer(path: Path) -> None:
+    """Write an approved reviewer that reports effective model provenance."""
+
+    write_reviewer(path, 'approved')
+    content = path.read_text()
+    content = content.replace('import json\n', 'import json\nimport os\n', 1)
+    content = content.replace(
+        'request_path = Path(sys.argv[1])',
+        """metadata_path = Path(os.environ["AGENT_ORCHESTRA_RUNTIME_METADATA_PATH"])
+metadata_path.write_text(json.dumps({
+    "schema_version": 1,
+    "effective_models": ["claude-primary", "claude-fallback"],
+    "status": "reported",
+}))
+request_path = Path(sys.argv[1])""",
+        1,
+    )
+    path.write_text(content)
+
+
 def write_loop_reviewer(path: Path) -> None:
     """Write a reviewer that requests one remediation and then approves."""
 
@@ -623,7 +643,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 5,
+        'schema_version': 6,
         'directory': str(projects),
         'runs': [
             {'id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -829,7 +849,7 @@ def test_status_lists_persisted_run(
     assert result == 0
     output = capsys.readouterr().out
     assert output.startswith(
-        '{\n  "schema_version": 5,\n'
+        '{\n  "schema_version": 6,\n'
         f'  "runs_directory": "{DEFAULT_RUNS_DIRECTORY.expanduser().resolve()}",\n'
         '  "runs": [\n    {\n'
     )
@@ -841,7 +861,7 @@ def test_status_lists_persisted_run(
     }
     assert set(document['runs'][0]) == expected_fields
     assert document == {
-        'schema_version': 5,
+        'schema_version': 6,
         'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [
             {
@@ -880,7 +900,7 @@ def test_status_filters_json_document_by_run_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 5
+    assert document['schema_version'] == 6
     assert [run['id'] for run in document['runs']] == [str(first.id)]
 
 
@@ -903,7 +923,7 @@ def test_status_reads_legacy_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 5
+    assert document['schema_version'] == 6
     assert document['runs'][0]['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -924,7 +944,7 @@ def test_status_lists_empty_runs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 5,
+        'schema_version': 6,
         'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [],
     }
@@ -1034,11 +1054,44 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert invocation['exit_code'] == 0
     assert invocation['timed_out'] is False
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 5,
+        'schema_version': 6,
         'run_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
     }
+
+
+def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
+    """Consume normal-exit provenance before opening the commit gate."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    write_provenance_reviewer(reviewer)
+
+    result = run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review the change.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        digest_worktree=_working_tree_digest,
+        reviewer_identity=InvocationIdentity(
+            vendor='anthropic', model='requested-model', runtime='claude-code'
+        ),
+    )
+
+    assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    run_directory = context.runs_directory / str(context.run.id)
+    invocation = json.loads(
+        (run_directory / 'invocations/000001-reviewer.json').read_text()
+    )
+    assert invocation['schema_version'] == 3
+    assert invocation['requested_model'] == 'requested-model'
+    assert invocation['effective_models'] == ['claude-primary', 'claude-fallback']
+    assert invocation['effective_model_status'] == 'reported'
+    assert not tuple(run_directory.glob('.*.runtime.json'))
 
 
 def test_run_preserves_non_utf8_reviewer_output(
@@ -1287,7 +1340,7 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 5,
+        'schema_version': 6,
         'run_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -2060,7 +2113,9 @@ def test_builtin_run_exposes_child_output_through_logs(
     streams = {entry['stream']: entry for entry in document['streams']}
     assert 'child stdout\n' in streams['stdout']['content']
     assert 'child stderr\n' in streams['stderr']['content']
-    assert streams['stdout']['agent_model'] == 'test-model'
+    assert streams['stdout']['requested_model'] == 'test-model'
+    assert streams['stdout']['effective_models'] == []
+    assert streams['stdout']['effective_model_status'] == 'unavailable'
     assert streams['stdout']['timed_out'] is timed_out
 
 

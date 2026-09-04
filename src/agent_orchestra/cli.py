@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 5
+CLI_SCHEMA_VERSION = 6
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -591,7 +591,9 @@ def _log_stream_document(
     *,
     role: str,
     vendor: str | None,
-    model: str | None,
+    requested_model: str | None,
+    effective_models: tuple[str, ...],
+    effective_model_status: str,
     runtime: str | None,
     iteration: int | None,
     attempt: int | None,
@@ -618,7 +620,9 @@ def _log_stream_document(
             'invocation_id': invocation_id,
             'role': role,
             'agent_vendor': vendor,
-            'agent_model': model,
+            'requested_model': requested_model,
+            'effective_models': list(effective_models),
+            'effective_model_status': effective_model_status,
             'runtime': runtime,
             'iteration': iteration,
             'attempt': attempt,
@@ -724,7 +728,9 @@ def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
                     document, failure = _log_stream_document(
                         role=record.role,
                         vendor=record.agent_vendor,
-                        model=record.agent_model,
+                        requested_model=record.requested_model,
+                        effective_models=record.effective_models,
+                        effective_model_status=record.effective_model_status,
                         runtime=record.runtime,
                         iteration=record.iteration,
                         attempt=record.attempt,
@@ -765,7 +771,9 @@ def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
                     document, failure = _log_stream_document(
                         role=role,
                         vendor=None,
-                        model=None,
+                        requested_model=None,
+                        effective_models=(),
+                        effective_model_status='unavailable',
                         runtime=None,
                         iteration=None,
                         attempt=None,

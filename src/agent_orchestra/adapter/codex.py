@@ -23,6 +23,7 @@ from agent_orchestra.adapter.developer import (
 from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
+from agent_orchestra.runtime_metadata import child_process_environment
 from agent_orchestra.schemas import (
     DEVELOPER_RESULT_SCHEMA,
     REVIEW_RESULT_SCHEMA,
@@ -152,6 +153,40 @@ def _require_safe_artifact_path(request_path: Path, artifact_path: Path) -> None
         raise CodexReviewerError(ARTIFACT_OUTSIDE_RUN)
 
 
+def _existing_mise_install_roots() -> tuple[str, ...]:
+    """Return existing mise install roots for read-only reuse in the sandbox."""
+
+    installs = os.environ.get('MISE_INSTALLS_DIR')
+    if installs is None:
+        data = os.environ.get('MISE_DATA_DIR')
+        if data is None:
+            xdg_data = os.environ.get('XDG_DATA_HOME')
+            data = (
+                str(Path(xdg_data).expanduser() / 'mise')
+                if xdg_data
+                else str(Path.home() / '.local/share/mise')
+            )
+        installs = str(Path(data).expanduser() / 'installs')
+    configured_shared = os.environ.get('MISE_SHARED_INSTALL_DIRS', '')
+    roots = (installs, *configured_shared.split(os.pathsep))
+    return tuple(dict.fromkeys(root for root in roots if root))
+
+
+def _developer_environment(worktree: Path, temporary: Path) -> dict[str, str]:
+    """Return writable tool state and cache locations for sandboxed validation."""
+
+    mise_data = temporary / 'mise-data'
+    return child_process_environment(
+        MISE_CACHE_DIR=str(temporary / 'mise-cache'),
+        MISE_DATA_DIR=str(mise_data),
+        MISE_INSTALLS_DIR=str(mise_data / 'installs'),
+        MISE_SHARED_INSTALL_DIRS=os.pathsep.join(_existing_mise_install_roots()),
+        MISE_STATE_DIR=str(temporary / 'mise-state'),
+        MISE_TRUSTED_CONFIG_PATHS=str(worktree.resolve()),
+        UV_CACHE_DIR=str(temporary / 'uv-cache'),
+    )
+
+
 def run_codex_reviewer(
     request_path: Path, response_path: Path, *, model: str | None = None
 ) -> None:
@@ -205,6 +240,7 @@ def run_codex_reviewer(
             command.append('-')
             completed = run_streaming_process(
                 command,
+                env=child_process_environment(),
                 input=_prompt(request),
                 timeout=max(1, timeout_seconds - 5),
             )
@@ -257,10 +293,16 @@ def run_codex_developer(
     ).is_file():
         raise DeveloperAdapterError(DEVELOPER_SKILL_MISSING)
     response_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix='.codex-develop-', dir=response_path.parent
-    ) as temporary_directory:
+    with (
+        tempfile.TemporaryDirectory(
+            prefix='.codex-develop-', dir=response_path.parent
+        ) as temporary_directory,
+        tempfile.TemporaryDirectory(
+            prefix='agent-orchestra-developer-'
+        ) as sandbox_temporary_directory,
+    ):
         temporary = Path(temporary_directory)
+        sandbox_temporary = Path(sandbox_temporary_directory)
         schema_path = temporary / 'schema.json'
         result_path = temporary / 'result.json'
         schema_path.write_text(json.dumps(DEVELOPER_RESULT_SCHEMA), encoding='utf-8')
@@ -271,6 +313,8 @@ def run_codex_developer(
             '--ignore-user-config',
             '--sandbox',
             'workspace-write',
+            '--config',
+            'sandbox_workspace_write.network_access=true',
             '--cd',
             str(worktree),
             '--output-schema',
@@ -286,6 +330,7 @@ def run_codex_developer(
         try:
             completed = run_streaming_process(
                 command,
+                env=_developer_environment(worktree, sandbox_temporary),
                 input=developer_prompt(request, '$agent-orchestra-developer'),
                 timeout=max(1, timeout_seconds - 5),
             )

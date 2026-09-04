@@ -39,7 +39,9 @@ class InvocationRecord:
     invocation_id: str
     role: Literal['developer', 'reviewer']
     agent_vendor: str
-    agent_model: str | None
+    requested_model: str | None
+    effective_models: tuple[str, ...]
+    effective_model_status: Literal['reported', 'unavailable']
     runtime: str
     iteration: int
     started_at: str
@@ -96,8 +98,6 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
     if not manifests.is_dir():
         return ()
     records: list[InvocationRecord] = []
-    required = set(InvocationRecord.__dataclass_fields__) - {'attempt'}
-    allowed = set(InvocationRecord.__dataclass_fields__)
     for path in sorted(manifests.glob('*.json')):
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise InvocationEvidenceError(INVOCATION_RECORD_ESCAPE)
@@ -107,15 +107,51 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             raise InvocationEvidenceError(
                 f'invalid invocation record {path.name}: {error}'
             ) from error
-        if (
-            not isinstance(document, dict)
-            or not required.issubset(document)
-            or not set(document).issubset(allowed)
-            or (document.get('schema_version') == 2 and 'attempt' not in document)
-        ):
+        if not isinstance(document, dict):
             raise InvocationEvidenceError(
                 f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}'
             )
+        version = document.get('schema_version')
+        if version in {1, 2}:
+            legacy_required = {
+                'schema_version',
+                'run_id',
+                'invocation_id',
+                'role',
+                'agent_vendor',
+                'agent_model',
+                'runtime',
+                'iteration',
+                'started_at',
+                'finished_at',
+                'exit_code',
+                'timed_out',
+                'interrupted',
+                'stdout_path',
+                'stderr_path',
+            }
+            legacy_allowed = legacy_required | {'attempt'}
+            if (
+                not legacy_required.issubset(document)
+                or not set(document).issubset(legacy_allowed)
+                or (version == 2 and 'attempt' not in document)
+            ):
+                raise InvocationEvidenceError(
+                    f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}'
+                )
+            requested_model = document.pop('agent_model')
+            document = {
+                **document,
+                'requested_model': requested_model,
+                'effective_models': (),
+                'effective_model_status': 'unavailable',
+            }
+        else:
+            required = set(InvocationRecord.__dataclass_fields__)
+            if set(document) != required:
+                raise InvocationEvidenceError(
+                    f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}'
+                )
         try:
             record = InvocationRecord(**document)
         except TypeError as error:
@@ -128,7 +164,16 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             and isinstance(record.invocation_id, str)
             and isinstance(record.role, str)
             and isinstance(record.agent_vendor, str)
-            and (record.agent_model is None or isinstance(record.agent_model, str))
+            and (
+                record.requested_model is None
+                or isinstance(record.requested_model, str)
+            )
+            and isinstance(record.effective_models, (list, tuple))
+            and all(
+                isinstance(model, str) and model for model in record.effective_models
+            )
+            and len(record.effective_models) == len(set(record.effective_models))
+            and record.effective_model_status in {'reported', 'unavailable'}
             and isinstance(record.runtime, str)
             and type(record.iteration) is int
             and isinstance(record.started_at, str)
@@ -142,7 +187,7 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
         )
         if not valid_types:
             raise InvocationEvidenceError(f'invalid invocation record {path.name}')
-        if record.schema_version not in {1, 2} or record.run_id != run_id:
+        if record.schema_version not in {1, 2, 3} or record.run_id != run_id:
             raise InvocationEvidenceError(
                 f'invocation record {path.name} does not match run {run_id}'
             )
@@ -151,6 +196,14 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             or record.iteration < 1
             or record.attempt < 1
             or (record.schema_version == 1 and record.attempt != 1)
+            or (
+                record.effective_model_status == 'reported'
+                and not record.effective_models
+            )
+            or (
+                record.effective_model_status == 'unavailable'
+                and bool(record.effective_models)
+            )
         ):
             raise InvocationEvidenceError(f'invalid invocation record {path.name}')
         stdout_path = _safe_file(root, record.stdout_path, description='stdout log')
@@ -158,6 +211,7 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
         records.append(
             replace(
                 record,
+                effective_models=tuple(record.effective_models),
                 stdout_path=str(stdout_path),
                 stderr_path=str(stderr_path),
             )

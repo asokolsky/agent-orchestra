@@ -36,7 +36,7 @@ Example command output for an initialized database with no runs:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": []
 }
@@ -209,7 +209,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "directory": "/Users/example/PersonalProjects",
   "runs": [
     {
@@ -233,7 +233,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `runs` | Array | Successfully enqueued changed repos. |
 | `runs[].id` | String | New opaque [run ID](design.md#run-id-format). |
@@ -287,7 +287,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": [
     {
@@ -311,7 +311,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
 | `runs_directory` | String | Resolved absolute default evidence root used by `run` and `logs` when `--runs-directory` is omitted. |
 | `runs` | Array | Zero or more complete run objects. |
 | `runs[].id` | String | Permanent opaque [run ID](design.md#run-id-format). |
@@ -404,14 +404,16 @@ Example output:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "run_id": "20260903T194500Z-a7f3c921",
   "streams": [
     {
       "invocation_id": "550e8400-e29b-41d4-a716-446655440000",
       "role": "reviewer",
       "agent_vendor": "openai",
-      "agent_model": "gpt-5.3-codex",
+      "requested_model": "gpt-5.3-codex",
+      "effective_models": [],
+      "effective_model_status": "unavailable",
       "runtime": "codex",
       "iteration": 1,
       "attempt": 1,
@@ -429,7 +431,9 @@ Example output:
       "invocation_id": "550e8400-e29b-41d4-a716-446655440000",
       "role": "reviewer",
       "agent_vendor": "openai",
-      "agent_model": "gpt-5.3-codex",
+      "requested_model": "gpt-5.3-codex",
+      "effective_models": [],
+      "effective_model_status": "unavailable",
       "runtime": "codex",
       "iteration": 1,
       "attempt": 1,
@@ -451,13 +455,15 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
 | `run_id` | String | Requested opaque [run ID](design.md#run-id-format). |
 | `streams` | Array | Selected, available stream entries. |
 | `streams[].invocation_id` | String | Invocation record ID, or a stable filename-derived ID for legacy evidence. |
 | `streams[].role` | String | `developer` or `reviewer`. |
 | `streams[].agent_vendor` | String or null | Selected agent provider; unavailable for legacy evidence. |
-| `streams[].agent_model` | String or null | Explicit CLI model override; `null` means the runtime selected its own default. |
+| `streams[].requested_model` | String or null | Explicit CLI model override; `null` means no override was requested. |
+| `streams[].effective_models` | Array of strings | Distinct model identities reported by stable runtime metadata, including fallback or helper models. |
+| `streams[].effective_model_status` | String | `reported` when the runtime supplied at least one identity; otherwise `unavailable`. |
 | `streams[].runtime` | String or null | Adapter runtime, such as `codex` or `claude-code`; unavailable for legacy evidence. |
 | `streams[].iteration` | Integer or null | Positive review iteration; unavailable for legacy evidence. |
 | `streams[].attempt` | Integer or null | Positive attempt number for this durable request; unavailable for legacy evidence. |
@@ -485,8 +491,11 @@ of replacing the earlier attempt. Selecting `--stream stderr` returns only
 matching stderr entries.
 `exit_code`, `finished_at`, and the Boolean outcome fields can be `null` when
 the process outcome is unavailable. Legacy filename-only entries set `legacy`
-to `true` and unavailable agent, runtime, iteration, timing, and outcome fields
-to `null`.
+to `true`, use `unavailable` model status with an empty effective-model list,
+and set unavailable agent, runtime, iteration, timing, and outcome fields to
+`null`. Invocation-record schemas 1 and 2 remain readable: their former
+`agent_model` value is rendered as `requested_model`, while effective identity
+is explicitly unavailable.
 
 The command is read-only and never uploads logs. It rejects evidence traversal,
 symlink escape, malformed invocation records, mismatched run IDs, and paths
@@ -552,7 +561,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -561,7 +570,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
 | `run_id` | String | Permanent opaque [run ID](design.md#run-id-format). |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -580,10 +589,13 @@ When possible, the same failure is also persisted as durable run evidence.
 
 The built-in runtime combinations are independent: Codex/Codex,
 Codex/Claude Code, Claude Code/Codex, and Claude Code/Claude Code are all
-supported. Invocation metadata records the agent vendor and any explicit model
-override separately from the adapter runtime. `agent_model` is `null` when no
-override was supplied because the orchestrator cannot verify which effective
-model the runtime or remote service selected.
+supported. Invocation metadata records the agent vendor, optional requested
+model, effective model identities, and adapter runtime separately. Claude Code
+JSON results report every model that handled the invocation, so fallback and
+helper models remain visible. The current Codex machine-readable result does
+not report effective model identity; Codex records therefore use
+`effective_model_status: "unavailable"` without guessing from defaults or
+human-formatted output. Custom commands use the same explicit unknown state.
 
 ### Custom reviewer command
 
@@ -601,7 +613,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -650,7 +662,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -661,7 +673,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

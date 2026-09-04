@@ -51,12 +51,14 @@ def add_invocation(
     write_record(
         run_directory / 'invocations' / f'{invocation_id}.json',
         InvocationRecord(
-            schema_version=1,
+            schema_version=3,
             run_id=str(run.id),
             invocation_id=invocation_id,
             role=role,  # type: ignore[arg-type]
             agent_vendor='openai',
-            agent_model='gpt-test',
+            requested_model='gpt-test',
+            effective_models=('gpt-effective',),
+            effective_model_status='reported',
             runtime=runtime,
             iteration=iteration,
             started_at='2026-09-03T10:00:00Z',
@@ -97,7 +99,7 @@ def test_logs_identifies_and_orders_separate_streams(
     captured = capsys.readouterr()
     document = json.loads(captured.out)
     assert captured.err == ''
-    assert document['schema_version'] == 5
+    assert document['schema_version'] == 6
     assert document['run_id'] == str(run.id)
     assert document['failures'] == []
     assert document['error'] is None
@@ -114,7 +116,9 @@ def test_logs_identifies_and_orders_separate_streams(
         'invocation_id': 'first',
         'role': 'reviewer',
         'agent_vendor': 'openai',
-        'agent_model': 'gpt-test',
+        'requested_model': 'gpt-test',
+        'effective_models': ['gpt-effective'],
+        'effective_model_status': 'reported',
         'runtime': 'codex',
         'iteration': 1,
         'attempt': 1,
@@ -246,11 +250,60 @@ def test_logs_reads_legacy_files_with_unknown_metadata(
     stdout = document['streams'][0]
     assert stdout['invocation_id'] == 'legacy-000001-reviewer'
     assert stdout['agent_vendor'] is None
-    assert stdout['agent_model'] is None
+    assert stdout['requested_model'] is None
+    assert stdout['effective_models'] == []
+    assert stdout['effective_model_status'] == 'unavailable'
     assert stdout['runtime'] is None
     assert stdout['iteration'] is None
     assert stdout['content'] == 'legacy output\n'
     assert stdout['legacy'] is True
+
+
+@pytest.mark.parametrize('schema_version', [1, 2])
+def test_logs_reads_legacy_invocation_model_as_requested(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    schema_version: int,
+) -> None:
+    """Map historical model overrides without inventing effective identity."""
+
+    database, run, run_directory = create_run(tmp_path)
+    add_invocation(run, run_directory, invocation_id='one')
+    manifest = run_directory / 'invocations/one.json'
+    document = json.loads(manifest.read_text())
+    document['schema_version'] = schema_version
+    document['agent_model'] = document.pop('requested_model')
+    del document['effective_models']
+    del document['effective_model_status']
+    if schema_version == 1:
+        del document['attempt']
+    manifest.write_text(json.dumps(document))
+
+    assert main(logs_arguments(database, run, run_directory)) == 0
+
+    stream = json.loads(capsys.readouterr().out)['streams'][0]
+    assert stream['requested_model'] == 'gpt-test'
+    assert stream['effective_models'] == []
+    assert stream['effective_model_status'] == 'unavailable'
+
+
+def test_logs_rejects_duplicate_effective_models(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Do not render malformed duplicate model provenance as evidence."""
+
+    database, run, run_directory = create_run(tmp_path)
+    add_invocation(run, run_directory, invocation_id='one')
+    manifest = run_directory / 'invocations/one.json'
+    document = json.loads(manifest.read_text())
+    document['effective_models'] = ['gpt-effective', 'gpt-effective']
+    manifest.write_text(json.dumps(document))
+
+    assert main(logs_arguments(database, run, run_directory)) == 2
+
+    result = json.loads(capsys.readouterr().out)
+    assert result['streams'] == []
+    assert result['error']['code'] == 'invalid_evidence'
 
 
 @pytest.mark.parametrize(
@@ -347,7 +400,7 @@ def test_logs_returns_json_when_database_is_missing(
     document = json.loads(captured.out)
     assert captured.err == ''
     assert document == {
-        'schema_version': 5,
+        'schema_version': 6,
         'run_id': 'unknown-run',
         'streams': [],
         'failures': [],

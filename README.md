@@ -213,6 +213,14 @@ Select the developer runtime and its model independently with
 `--developer-agent` and `--developer-model`. The default developer and reviewer
 are both Codex. `--timeout` bounds each review, `--developer-timeout` bounds
 each remediation, and `--max-iterations` limits review requests (default: 3).
+The Codex developer remains confined to the assigned worktree but has outbound
+network access so project tooling can fetch dependencies required by local
+validation. Its writable `mise` data, tool installations, cache, and state plus
+the `uv` cache use invocation-scoped temporary directories. Existing mise tool
+installations remain available as read-only shared roots, and the assigned
+worktree's `mise` configuration is trusted for that invocation. This access
+does not authorize commits, publication, or other remote lifecycle writes. The
+Codex reviewer remains read-only with command networking disabled.
 The Claude Code developer runs with OS-enforced filesystem sandboxing: writes
 use the runtime's primary-working-directory boundary rooted at the assigned
 worktree, user and project setting sources are excluded, unsandboxed retries
@@ -289,8 +297,9 @@ The current implementation provides:
 - a bounded remediation loop with strict messages, finding dispositions,
   digest progress checks, role-specific timeouts, resumable interruptions and
   blocked handoffs, and iteration exhaustion;
-- adapter-neutral invocation records and read-only, filterable process log
-  viewing with legacy-log support.
+- adapter-neutral invocation records separating requested and effective model
+  provenance, plus read-only, filterable process log viewing with legacy-log
+  support.
 
 The supported roles are documented separately:
 
