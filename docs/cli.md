@@ -36,7 +36,7 @@ Example command output for an initialized database with no runs:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": []
 }
@@ -117,13 +117,15 @@ SQLite exception propagates as a command failure.
 Capture the current uncommitted changes in one Git worktree:
 
 ```text
-agent-orchestra [--database DATABASE] enqueue-local [--base BASE] [REPOSITORY]
+agent-orchestra [--database DATABASE] enqueue-local [--base BASE]
+  [--supersedes RUN_ID] [REPOSITORY]
 ```
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `REPOSITORY` | Current directory | Git worktree, or any directory inside it, whose changes are captured. |
 | `--base BASE` | `HEAD` | Git revision used as the base of the captured diff. |
+| `--supersedes RUN_ID` | None | Link an exceptional replacement to a terminal `failed` or `superseded` run for the same repo and worktree. |
 
 The command resolves the selected worktree root and its primary Git registry
 entry. It stores that main location as `repository_path` and the selected
@@ -146,6 +148,10 @@ export RUN_ID="$(agent-orchestra enqueue-local)"
 # Capture a specific worktree relative to origin/main.
 export RUN_ID="$(agent-orchestra enqueue-local --base origin/main /path/to/repo)"
 
+# Replace a terminal run that cannot be resumed.
+export RUN_ID="$(agent-orchestra enqueue-local \
+  --supersedes 20260903T194500Z-a7f3c921 /path/to/repo)"
+
 # Use the returned run ID in a later command.
 printf '%s\n' "$RUN_ID"
 ```
@@ -165,6 +171,9 @@ not JSON. The command exits 2 when the path is not a usable Git worktree, the
 revision cannot be resolved, files cannot be read, or there are no local
 changes. Those expected failures write `error: MESSAGE` to stderr and nothing
 to stdout. The command does not start an agent or modify the target worktree.
+Use [`resume`](#resume) for `interrupted` or `validation_required` runs. The
+`--supersedes` escape hatch accepts only terminal `failed` or `superseded`
+runs, and only when both records identify the same repo and worktree.
 
 ## `enqueue-locals`
 
@@ -200,7 +209,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "directory": "/Users/example/PersonalProjects",
   "runs": [
     {
@@ -224,7 +233,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `runs` | Array | Successfully enqueued changed repos. |
 | `runs[].id` | String | New opaque [run ID](design.md#run-id-format). |
@@ -278,7 +287,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": [
     {
@@ -292,6 +301,7 @@ Example output:
       "diff_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "iteration": 0,
       "remote_url": null,
+      "supersedes_run_id": null,
       "created_at": "2026-09-02T15:06:12Z",
       "updated_at": "2026-09-02T15:06:12Z"
     }
@@ -301,7 +311,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
 | `runs_directory` | String | Resolved absolute default evidence root used by `run` and `logs` when `--runs-directory` is omitted. |
 | `runs` | Array | Zero or more complete run objects. |
 | `runs[].id` | String | Permanent opaque [run ID](design.md#run-id-format). |
@@ -314,6 +324,7 @@ Example output:
 | `runs[].diff_digest` | String or null | SHA-256 identity of the exact working-tree diff, normally prefixed with `sha256:`. |
 | `runs[].iteration` | Integer | Current review iteration; a newly queued run starts at `0`. |
 | `runs[].remote_url` | String or null | Associated remote URL when the scenario has one. |
+| `runs[].supersedes_run_id` | String or null | Prior terminal run replaced through `enqueue-local --supersedes`, otherwise `null`. |
 | `runs[].created_at` | String | UTC creation timestamp in RFC 3339 form. |
 | `runs[].updated_at` | String | UTC timestamp of the latest persisted update. |
 
@@ -393,7 +404,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "run_id": "20260903T194500Z-a7f3c921",
   "streams": [
     {
@@ -403,6 +414,7 @@ Example output:
       "agent_model": "gpt-5.3-codex",
       "runtime": "codex",
       "iteration": 1,
+      "attempt": 1,
       "started_at": "2026-09-03T19:45:00Z",
       "finished_at": "2026-09-03T19:46:12Z",
       "exit_code": 0,
@@ -420,6 +432,7 @@ Example output:
       "agent_model": "gpt-5.3-codex",
       "runtime": "codex",
       "iteration": 1,
+      "attempt": 1,
       "started_at": "2026-09-03T19:45:00Z",
       "finished_at": "2026-09-03T19:46:12Z",
       "exit_code": 0,
@@ -438,7 +451,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
 | `run_id` | String | Requested opaque [run ID](design.md#run-id-format). |
 | `streams` | Array | Selected, available stream entries. |
 | `streams[].invocation_id` | String | Invocation record ID, or a stable filename-derived ID for legacy evidence. |
@@ -447,6 +460,7 @@ Example output:
 | `streams[].agent_model` | String or null | Explicit CLI model override; `null` means the runtime selected its own default. |
 | `streams[].runtime` | String or null | Adapter runtime, such as `codex` or `claude-code`; unavailable for legacy evidence. |
 | `streams[].iteration` | Integer or null | Positive review iteration; unavailable for legacy evidence. |
+| `streams[].attempt` | Integer or null | Positive attempt number for this durable request; unavailable for legacy evidence. |
 | `streams[].started_at` | String or null | UTC invocation start timestamp; unavailable for legacy evidence. |
 | `streams[].finished_at` | String or null | UTC invocation finish timestamp, when known. |
 | `streams[].exit_code` | Integer or null | Process exit code, when available. |
@@ -466,7 +480,9 @@ Example output:
 | `error.message` | String | Human-readable command diagnostic. |
 
 `streams` is ordered by invocation-record filename and then stdout before
-stderr. Selecting `--stream stderr` returns only matching stderr entries.
+stderr. A resumed request increments `attempt` and writes new evidence instead
+of replacing the earlier attempt. Selecting `--stream stderr` returns only
+matching stderr entries.
 `exit_code`, `finished_at`, and the Boolean outcome fields can be `null` when
 the process outcome is unavailable. Legacy filename-only entries set `legacy`
 to `true` and unavailable agent, runtime, iteration, timing, and outcome fields
@@ -536,22 +552,25 @@ Example output:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "run_id": "20260903T194500Z-a7f3c921",
-  "state": "awaiting_commit_authorization"
+  "state": "awaiting_commit_authorization",
+  "error": null
 }
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `5`. |
 | `run_id` | String | Permanent opaque [run ID](design.md#run-id-format). |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
+| `error` | Object or null | Command-level failure, otherwise `null`. |
 
-The resulting state is commonly `awaiting_commit_authorization` after approval
-or `changes_requested` when work must stop for external remediation or a human
-decision. Agent stdout and stderr are written to external evidence files, not
-mixed into this JSON; retrieve them with [`logs`](#logs). Built-in adapters tee
+The resulting state is commonly `awaiting_commit_authorization` after approval,
+`changes_requested` when a human decision is needed, `validation_required`
+after a recoverable blocked or failed handoff, or `interrupted` after a timeout.
+Agent stdout and stderr are written to external evidence files, not mixed into
+this JSON; retrieve them with [`logs`](#logs). Built-in adapters tee
 the underlying Codex or Claude process output into those files as it arrives,
 including output produced before a timeout or nonzero exit.
 
@@ -582,9 +601,10 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "run_id": "20260903T194500Z-a7f3c921",
-  "state": "changes_requested"
+  "state": "changes_requested",
+  "error": null
 }
 ```
 
@@ -593,6 +613,72 @@ command. Built-in reviewer or developer agent/model options cannot be combined
 with this form. A custom reviewer has no configured developer adapter, so a
 `changes_requested` verdict stops for external remediation instead of starting
 the built-in loop.
+
+## `resume`
+
+Continue a recoverable run from its last durable request:
+
+```text
+agent-orchestra [--database DATABASE] resume RUN_ID
+  [--runs-directory RUNS_DIRECTORY]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `RUN_ID` | Required | Existing run in `interrupted` or `validation_required`. |
+| `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | Evidence root originally selected for `run`. |
+
+`resume` validates execution metadata, the complete canonical message chain,
+the worktree scope, and the interrupted transition before invoking an agent.
+It reuses an unanswered review or remediation request after an interruption.
+After a valid developer handoff reports `blocked` or `failed`, it creates the
+next remediation request and retries the developer. The run ID, message
+history, review iteration, and objective remain unchanged. Each retried
+invocation receives a higher attempt number and new log files.
+
+Examples:
+
+```shell
+# Continue a run shown as recoverable by status.
+agent-orchestra resume "$RUN_ID"
+
+# Use the same custom evidence root supplied to run.
+agent-orchestra resume "$RUN_ID" --runs-directory /var/tmp/orchestra/runs
+```
+
+Successful output is versioned JSON:
+
+```json
+{
+  "schema_version": 5,
+  "run_id": "20260903T194500Z-a7f3c921",
+  "state": "awaiting_commit_authorization",
+  "error": null
+}
+```
+
+An expected failure also remains JSON on stdout and exits 2:
+
+```json
+{
+  "schema_version": 5,
+  "run_id": "20260903T194500Z-a7f3c921",
+  "state": null,
+  "error": {
+    "code": "resume_scope_changed",
+    "message": "resume scope changed since the interrupted review"
+  }
+}
+```
+
+Stable error codes are `state_database_not_found`, `run_not_found`,
+`run_not_resumable`, `concurrent_update`, `resume_metadata_unsupported`,
+`resume_scope_changed`, `resume_interrupted`, `resume_execution_failed`, and
+`resume_evidence_invalid`. Legacy runs whose
+`execution.json` lacks the version 2 resume context fail closed with
+`resume_metadata_unsupported`; start an explicitly linked replacement with
+[`enqueue-local --supersedes`](#enqueue-local) only after the old run is
+terminal.
 
 ## `skills`
 

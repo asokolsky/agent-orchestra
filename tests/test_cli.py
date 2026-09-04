@@ -7,14 +7,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from agent_orchestra import cli
+from agent_orchestra import cli, worker
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
 from agent_orchestra.cli import (
     DEFAULT_DATABASE,
@@ -24,14 +24,107 @@ from agent_orchestra.cli import (
     main,
 )
 from agent_orchestra.invocations import InvocationIdentity
-from agent_orchestra.models import Run
+from agent_orchestra.models import Run, RunState
 from agent_orchestra.store import RunStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
     NO_REMEDIATION_CHANGE,
     WorkerError,
+    resume_review,
     run_queued_review,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class CliRunContext:
+    """Paths and persisted state shared by CLI run tests."""
+
+    repo: Path
+    database: Path
+    store: RunStore
+    run: Run
+    runs_directory: Path
+
+
+@pytest.fixture
+def enqueued_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> CliRunContext:
+    """Create and enqueue one changed worktree for a CLI test."""
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
+    capsys.readouterr()
+    store = RunStore(database)
+    return CliRunContext(
+        repo=repo,
+        database=database,
+        store=store,
+        run=store.list_runs()[0],
+        runs_directory=tmp_path / 'runs',
+    )
+
+
+def run_arguments(
+    context: CliRunContext,
+    *options: str,
+    reviewer: Path | None = None,
+    objective: str = 'Review the change.',
+) -> list[str]:
+    """Build arguments for one run command against a shared test context."""
+
+    arguments = [
+        '--database',
+        str(context.database),
+        'run',
+        str(context.run.id),
+        '--objective',
+        objective,
+        '--runs-directory',
+        str(context.runs_directory),
+        *options,
+    ]
+    if reviewer is not None:
+        arguments.extend(['--', sys.executable, str(reviewer)])
+    return arguments
+
+
+def resume_arguments(context: CliRunContext) -> list[str]:
+    """Build arguments for resuming the context's run."""
+
+    return [
+        '--database',
+        str(context.database),
+        'resume',
+        str(context.run.id),
+        '--runs-directory',
+        str(context.runs_directory),
+    ]
+
+
+def create_worker_run(tmp_path: Path) -> CliRunContext:
+    """Create one persisted changed run for direct worker tests."""
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    digest = _working_tree_digest(repo, 'HEAD')
+    assert digest is not None
+    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
+    store.add(run)
+    return CliRunContext(
+        repo=repo,
+        database=database,
+        store=store,
+        run=run,
+        runs_directory=tmp_path / 'runs',
+    )
 
 
 def test_version_reports_installed_distribution(
@@ -93,9 +186,10 @@ def add_linked_worktree(repo: Path, worktree: Path) -> None:
     )
 
 
-def write_reviewer(path: Path, verdict: str) -> None:
+def write_reviewer(path: Path, verdict: str, *, write_artifact: bool = True) -> None:
     """Write a deterministic reviewer command for CLI integration tests."""
 
+    artifact_write = 'artifact_path.write_text("# Review\\n")' if write_artifact else ''
     path.write_text(
         f'''"""Test reviewer command."""
 import json
@@ -108,7 +202,7 @@ request_path = Path(sys.argv[1])
 response_path = Path(sys.argv[2])
 request = json.loads(request_path.read_text())
 artifact_path = Path(request["payload"]["artifact_path"])
-artifact_path.write_text("# Review\\n")
+{artifact_write}
 response = {{
     "schema_version": 1,
     "message_id": str(uuid4()),
@@ -209,6 +303,18 @@ response = {{
 response_path.write_text(json.dumps(response))
 '''
     )
+
+
+def write_recoverable_developer(path: Path) -> None:
+    """Write a developer that blocks once and succeeds when resumed."""
+
+    write_developer(path)
+    content = path.read_text()
+    content = content.replace(
+        '"status": "ready_for_review",',
+        '"status": "blocked" if request["sequence"] == 3 else "ready_for_review",',
+    )
+    path.write_text(content)
 
 
 def write_fake_codex(path: Path, *, mode: str) -> None:
@@ -454,6 +560,43 @@ def test_enqueue_local_rejects_clean_repo(
     assert not database.exists()
 
 
+def test_enqueue_local_records_terminal_run_lineage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Link an exceptional replacement to the failed run it supersedes."""
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('first change\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
+    capsys.readouterr()
+    predecessor = RunStore(database).list_runs()[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'failed' WHERE id = ?", (predecessor.id,)
+        )
+    (repo / 'tracked.txt').write_text('replacement change\n')
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'enqueue-local',
+            str(repo),
+            '--supersedes',
+            str(predecessor.id),
+        ]
+    )
+
+    assert result == 0
+    replacement = RunStore(database).list_runs()[0]
+    assert replacement.id != predecessor.id
+    assert replacement.supersedes_run_id == predecessor.id
+    assert str(replacement.id) in capsys.readouterr().out
+
+
 def test_enqueue_locals_captures_changed_child_repositories(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -480,7 +623,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 4,
+        'schema_version': 5,
         'directory': str(projects),
         'runs': [
             {'id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -686,7 +829,7 @@ def test_status_lists_persisted_run(
     assert result == 0
     output = capsys.readouterr().out
     assert output.startswith(
-        '{\n  "schema_version": 4,\n'
+        '{\n  "schema_version": 5,\n'
         f'  "runs_directory": "{DEFAULT_RUNS_DIRECTORY.expanduser().resolve()}",\n'
         '  "runs": [\n    {\n'
     )
@@ -698,7 +841,7 @@ def test_status_lists_persisted_run(
     }
     assert set(document['runs'][0]) == expected_fields
     assert document == {
-        'schema_version': 4,
+        'schema_version': 5,
         'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [
             {
@@ -712,6 +855,7 @@ def test_status_lists_persisted_run(
                 'diff_digest': 'digest',
                 'iteration': 0,
                 'remote_url': None,
+                'supersedes_run_id': None,
                 'created_at': run.created_at.isoformat().replace('+00:00', 'Z'),
                 'updated_at': run.updated_at.isoformat().replace('+00:00', 'Z'),
             }
@@ -736,7 +880,7 @@ def test_status_filters_json_document_by_run_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 4
+    assert document['schema_version'] == 5
     assert [run['id'] for run in document['runs']] == [str(first.id)]
 
 
@@ -759,7 +903,7 @@ def test_status_reads_legacy_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 4
+    assert document['schema_version'] == 5
     assert document['runs'][0]['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -780,7 +924,7 @@ def test_status_lists_empty_runs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 4,
+        'schema_version': 5,
         'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [],
     }
@@ -834,73 +978,74 @@ def test_status_reports_unknown_run(
 
 
 def test_run_dispatches_review_and_awaits_commit_authorization(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
 ) -> None:
     """Persist a correlated approved review and stop at the commit gate."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
     write_reviewer(reviewer, 'approved')
-    runs_directory = tmp_path / 'runs'
 
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--runs-directory',
-            str(runs_directory),
-            '--',
-            sys.executable,
-            str(reviewer),
-        ]
-    )
+    result = main(run_arguments(enqueued_run, reviewer=reviewer))
 
     assert result == 0
-    assert RunStore(database).get(run.id).state.value == 'awaiting_commit_authorization'
-    run_directory = runs_directory / str(run.id)
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+    run_directory = enqueued_run.runs_directory / str(enqueued_run.run.id)
     assert (run_directory / 'messages/000001-review-request.json').is_file()
     assert (run_directory / 'messages/000002-review-result.json').is_file()
     assert (run_directory / 'artifacts/review-0001.md').is_file()
+    execution = json.loads((run_directory / 'execution.json').read_text())
+    assert execution == {
+        'schema_version': 2,
+        'run_id': str(enqueued_run.run.id),
+        'objective': 'Review the change.',
+        'reviewer': {
+            'command': [sys.executable, str(reviewer)],
+            'identity': {
+                'vendor': 'unknown',
+                'model': None,
+                'runtime': 'custom-command',
+            },
+            'timeout_seconds': 1800,
+        },
+        'developer': {
+            'command': [],
+            'identity': {
+                'vendor': 'openai',
+                'model': None,
+                'runtime': 'codex',
+            },
+            'timeout_seconds': 1800,
+        },
+        'max_review_iterations': 3,
+        'created_at': execution['created_at'],
+    }
     invocation = json.loads(
         (run_directory / 'invocations/000001-reviewer.json').read_text()
     )
-    assert invocation['run_id'] == str(run.id)
+    assert invocation['run_id'] == str(enqueued_run.run.id)
     assert invocation['role'] == 'reviewer'
     assert invocation['agent_vendor'] == 'unknown'
     assert invocation['runtime'] == 'custom-command'
     assert invocation['exit_code'] == 0
     assert invocation['timed_out'] is False
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 4,
-        'run_id': str(run.id),
+        'schema_version': 5,
+        'run_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
+        'error': None,
     }
 
 
 def test_run_preserves_non_utf8_reviewer_output(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, enqueued_run: CliRunContext
 ) -> None:
     """Archive the exact bytes written by a redirected reviewer process."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
     write_reviewer(reviewer, 'approved')
     reviewer.write_bytes(
@@ -911,26 +1056,14 @@ def test_run_preserves_non_utf8_reviewer_output(
             1,
         )
     )
-    runs_directory = tmp_path / 'runs'
-
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--runs-directory',
-            str(runs_directory),
-            '--',
-            sys.executable,
-            str(reviewer),
-        ]
-    )
+    result = main(run_arguments(enqueued_run, reviewer=reviewer))
 
     assert result == 0
-    stdout_log = runs_directory / str(run.id) / 'logs/000001-reviewer.stdout.log'
+    stdout_log = (
+        enqueued_run.runs_directory
+        / str(enqueued_run.run.id)
+        / 'logs/000001-reviewer.stdout.log'
+    )
     assert stdout_log.read_bytes() == b'caf\xe9 latin-1 byte\n'
 
 
@@ -942,17 +1075,7 @@ def test_worker_persists_interrupted_state(
 ) -> None:
     """Keep durable run state aligned with interrupted invocation evidence."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    store = RunStore(database)
-    store.initialize()
-    digest = _working_tree_digest(repo, 'HEAD')
-    assert digest is not None
-    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
-    store.add(run)
+    context = create_worker_run(tmp_path)
     reviewer = tmp_path / 'reviewer.py'
     write_loop_reviewer(reviewer)
     original_execute = CommandAgentAdapter.execute
@@ -967,76 +1090,74 @@ def test_worker_persists_interrupted_state(
         return original_execute(adapter, request)
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', interrupt_selected)
-    runs_directory = tmp_path / 'runs'
-
     with pytest.raises(KeyboardInterrupt):
         run_queued_review(
-            store=store,
-            run=run,
+            store=context.store,
+            run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=('unused-developer',),
-            runs_directory=runs_directory,
+            runs_directory=context.runs_directory,
             timeout_seconds=30,
             digest_worktree=_working_tree_digest,
         )
 
-    assert store.get(run.id).state.value == 'interrupted'
+    assert context.store.get(context.run.id).state is RunState.INTERRUPTED
     invocation_files = sorted(
-        (runs_directory / str(run.id) / 'invocations').glob('*.json')
+        (context.runs_directory / str(context.run.id) / 'invocations').glob('*.json')
     )
     invocation = json.loads(invocation_files[-1].read_text())
     assert invocation['role'] == interrupted_role
     assert invocation['interrupted'] is True
 
 
-def test_run_uses_builtin_codex_adapter_by_default(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize(
+    'case',
+    [
+        ((), 'agent_orchestra.adapter.codex', 'openai', None, 'codex'),
+        (
+            ('--reviewer-model', 'compatible-model'),
+            'agent_orchestra.adapter.codex',
+            'openai',
+            'compatible-model',
+            'codex',
+        ),
+        (
+            ('--reviewer-agent', 'claude-code', '--reviewer-model', 'sonnet'),
+            'agent_orchestra.adapter.claude_code',
+            'anthropic',
+            'sonnet',
+            'claude-code',
+        ),
+    ],
+)
+def test_run_selects_reviewer_adapter(
+    enqueued_run: CliRunContext,
     monkeypatch: pytest.MonkeyPatch,
+    case: tuple[tuple[str, ...], str, str, str | None, str],
 ) -> None:
-    """Select the packaged Codex adapter when no custom command is supplied."""
+    """Build the requested reviewer command and identity independently."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
+    options, module, vendor, model, runtime = case
     observed: dict[str, object] = {}
 
     def review(**kwargs: object) -> Run:
-        """Capture the selected command without starting Codex."""
+        """Capture the selected command without starting an agent."""
 
         observed.update(kwargs)
-        return run
+        return enqueued_run.run
 
     monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
 
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-        ]
-    )
+    assert main(run_arguments(enqueued_run, *options)) == 0
 
-    assert result == 0
-    assert observed['reviewer_command'] == [
-        sys.executable,
-        '-m',
-        'agent_orchestra.adapter.codex',
-    ]
+    expected_command = [sys.executable, '-m', module]
+    if model is not None:
+        expected_command.extend(['--model', model])
+    assert observed['reviewer_command'] == expected_command
     identity = observed['reviewer_identity']
     assert isinstance(identity, InvocationIdentity)
-    assert identity.vendor == 'openai'
-    assert identity.model is None
-    assert identity.runtime == 'codex'
+    assert identity == InvocationIdentity(vendor=vendor, model=model, runtime=runtime)
 
 
 def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
@@ -1048,138 +1169,20 @@ def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
     assert not DEFAULT_DATABASE.is_relative_to(repo)
 
 
-def test_run_passes_explicit_reviewer_model_to_codex_adapter(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Allow callers to avoid an incompatible managed Codex model default."""
-
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
-    observed: dict[str, object] = {}
-
-    def review(**kwargs: object) -> Run:
-        """Capture the selected command without starting Codex."""
-
-        observed.update(kwargs)
-        return run
-
-    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
-
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--reviewer-model',
-            'compatible-model',
-        ]
-    )
-
-    assert result == 0
-    assert observed['reviewer_command'] == [
-        sys.executable,
-        '-m',
-        'agent_orchestra.adapter.codex',
-        '--model',
-        'compatible-model',
-    ]
-
-
-def test_run_selects_claude_code_reviewer_independently(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Select Claude Code and its role-specific model without changing state."""
-
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
-    observed: dict[str, object] = {}
-
-    def review(**kwargs: object) -> Run:
-        """Capture the selected command without starting Claude Code."""
-
-        observed.update(kwargs)
-        return run
-
-    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
-
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--reviewer-agent',
-            'claude-code',
-            '--reviewer-model',
-            'sonnet',
-        ]
-    )
-
-    assert result == 0
-    assert observed['reviewer_command'] == [
-        sys.executable,
-        '-m',
-        'agent_orchestra.adapter.claude_code',
-        '--model',
-        'sonnet',
-    ]
-
-
 def test_run_records_requested_changes(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, enqueued_run: CliRunContext
 ) -> None:
     """Advance a rejected review to the remediation boundary."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
     write_reviewer(reviewer, 'changes_requested')
 
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--runs-directory',
-            str(tmp_path / 'runs'),
-            '--',
-            sys.executable,
-            str(reviewer),
-        ]
-    )
+    result = main(run_arguments(enqueued_run, reviewer=reviewer))
 
     assert result == 0
-    assert RunStore(database).get(run.id).state.value == 'changes_requested'
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state is RunState.CHANGES_REQUESTED
+    )
 
 
 @pytest.mark.parametrize(
@@ -1196,30 +1199,21 @@ def test_worker_remediates_and_reviews_new_digest(
 ) -> None:
     """Complete the same canonical loop for every runtime combination."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    store = RunStore(database)
-    store.initialize()
-    digest = _working_tree_digest(repo, 'HEAD')
+    context = create_worker_run(tmp_path)
+    digest = context.run.diff_digest
     assert digest is not None
-    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
-    store.add(run)
     reviewer = tmp_path / f'{reviewer_runtime}-reviewer.py'
     developer = tmp_path / f'{developer_runtime}-developer.py'
     write_loop_reviewer(reviewer)
     write_developer(developer)
-    runs_directory = tmp_path / 'runs'
 
     result = run_queued_review(
-        store=store,
-        run=run,
+        store=context.store,
+        run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=runs_directory,
+        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=2,
         digest_worktree=_working_tree_digest,
@@ -1228,7 +1222,7 @@ def test_worker_remediates_and_reviews_new_digest(
     assert result.state.value == 'awaiting_commit_authorization'
     assert result.iteration == 2
     assert result.diff_digest != digest
-    messages = runs_directory / run.id / 'messages'
+    messages = context.runs_directory / context.run.id / 'messages'
     assert sorted(path.name for path in messages.iterdir()) == [
         '000001-review-request.json',
         '000002-review-result.json',
@@ -1240,6 +1234,328 @@ def test_worker_remediates_and_reviews_new_digest(
     second_request = json.loads((messages / '000005-review-request.json').read_text())
     assert second_request['iteration'] == 2
     assert second_request['scope']['diff_digest'] == result.diff_digest
+
+
+def test_resume_validation_required_continues_same_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Re-run blocked validation and approve the next digest under one run ID."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+
+    blocked = run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+
+    assert blocked.id == context.run.id
+    assert blocked.state is RunState.VALIDATION_REQUIRED
+    messages = context.runs_directory / context.run.id / 'messages'
+    assert (messages / '000004-developer-handoff.json').is_file()
+    assert not (
+        context.runs_directory
+        / context.run.id
+        / 'logs/000004-rejected-developer-handoff.json'
+    ).exists()
+
+    result = main(resume_arguments(context))
+
+    assert result == 0
+    resumed = context.store.get(context.run.id)
+    assert resumed.id == context.run.id
+    assert resumed.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    assert resumed.iteration == 2
+    assert sorted(path.name for path in messages.iterdir()) == [
+        '000001-review-request.json',
+        '000002-review-result.json',
+        '000003-remediation-request.json',
+        '000004-developer-handoff.json',
+        '000005-remediation-request.json',
+        '000006-developer-handoff.json',
+        '000007-review-request.json',
+        '000008-review-result.json',
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        'schema_version': 5,
+        'run_id': str(context.run.id),
+        'state': 'awaiting_commit_authorization',
+        'error': None,
+    }
+
+    assert main(resume_arguments(context)) == 2
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated['error']['code'] == 'run_not_resumable'
+    assert len(tuple(messages.iterdir())) == 8
+
+
+def test_resume_retries_an_interrupted_validation_required_recovery(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Retry an interrupted recovery developer request under the same run."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+    blocked = run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        developer_timeout_seconds=1,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+
+    assert blocked.state is RunState.VALIDATION_REQUIRED
+    developer.write_text('"""Slow developer."""\nimport time\ntime.sleep(5)\n')
+
+    assert main(resume_arguments(context)) == 2
+    interrupted = json.loads(capsys.readouterr().out)
+    assert interrupted['error']['code'] == 'resume_interrupted'
+    assert context.store.get(context.run.id).state is RunState.INTERRUPTED
+
+    write_developer(developer)
+
+    assert main(resume_arguments(context)) == 0
+    assert (
+        context.store.get(context.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+    messages = context.runs_directory / context.run.id / 'messages'
+    assert sorted(path.name for path in messages.iterdir()) == [
+        '000001-review-request.json',
+        '000002-review-result.json',
+        '000003-remediation-request.json',
+        '000004-developer-handoff.json',
+        '000005-remediation-request.json',
+        '000006-developer-handoff.json',
+        '000007-review-request.json',
+        '000008-review-result.json',
+    ]
+    invocations = context.runs_directory / context.run.id / 'invocations'
+    retry = json.loads((invocations / '000005-developer-attempt-0002.json').read_text())
+    assert retry['attempt'] == 2
+    assert retry['timed_out'] is False
+
+
+def test_resume_archives_rejected_developer_handoff_by_attempt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Retain an attempt-qualified rejected handoff during validation recovery."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+    blocked = run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+    assert blocked.state is RunState.VALIDATION_REQUIRED
+    write_developer(developer)
+    developer.write_text(
+        developer.read_text().replace(
+            '"status": "ready_for_review",', '"status": "invalid",'
+        )
+    )
+
+    assert main(resume_arguments(context)) == 2
+
+    assert json.loads(capsys.readouterr().out)['error']['code'] == (
+        'resume_evidence_invalid'
+    )
+    rejected = (
+        context.runs_directory
+        / context.run.id
+        / 'logs/000006-rejected-developer-handoff-attempt-0001.json'
+    )
+    assert rejected.is_file()
+
+
+def test_resume_rejects_handoff_with_a_non_remediation_parent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail closed when a recoverable handoff replies to the wrong message type."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+    run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+
+    messages = context.runs_directory / context.run.id / 'messages'
+    review_result = json.loads((messages / '000002-review-result.json').read_text())
+    handoff_path = messages / '000004-developer-handoff.json'
+    handoff = json.loads(handoff_path.read_text())
+    handoff['in_reply_to'] = review_result['message_id']
+    handoff_path.write_text(json.dumps(handoff))
+
+    assert main(resume_arguments(context)) == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'resume_evidence_invalid'
+    assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
+
+
+def test_resume_rejects_handoff_linked_to_a_different_review_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject a valid-looking chain whose blocked handoff uses stale review evidence."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+    run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+
+    messages = context.runs_directory / context.run.id / 'messages'
+    first_request = json.loads((messages / '000001-review-request.json').read_text())
+    first_result = json.loads((messages / '000002-review-result.json').read_text())
+    remediation = json.loads((messages / '000003-remediation-request.json').read_text())
+    handoff = json.loads((messages / '000004-developer-handoff.json').read_text())
+
+    extra_request = dict(first_request)
+    extra_request.update(
+        {'message_id': str(uuid4()), 'sequence': 5, 'in_reply_to': None}
+    )
+    extra_result = dict(first_result)
+    extra_result.update(
+        {
+            'message_id': str(uuid4()),
+            'in_reply_to': extra_request['message_id'],
+            'sequence': 6,
+        }
+    )
+    remediation.update({'message_id': str(uuid4()), 'sequence': 7})
+    handoff.update(
+        {
+            'message_id': str(uuid4()),
+            'in_reply_to': remediation['message_id'],
+            'sequence': 8,
+        }
+    )
+
+    (messages / '000005-review-request.json').write_text(json.dumps(extra_request))
+    (messages / '000006-review-result.json').write_text(json.dumps(extra_result))
+    (messages / '000007-remediation-request.json').write_text(json.dumps(remediation))
+    (messages / '000008-developer-handoff.json').write_text(json.dumps(handoff))
+
+    assert main(resume_arguments(context)) == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'resume_evidence_invalid'
+    assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
+
+
+@pytest.mark.parametrize(
+    'tamper',
+    [
+        'initial-prior-review-path',
+        'repeat-prior-review-path',
+        'result-artifact-path',
+        'missing-result-artifact',
+    ],
+)
+def test_resume_rejects_tampered_review_exchange_payload_links(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], tamper: str
+) -> None:
+    """Fail closed when review evidence links do not describe the chain."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    reviewer.write_text(
+        reviewer.read_text().replace(
+            'artifact_path = Path(request["payload"]["artifact_path"])',
+            'artifact_path = Path(request["payload"]["artifact_path"])\n'
+            'if request["iteration"] == 2:\n'
+            '    import time\n'
+            '    time.sleep(5)',
+        )
+    )
+    write_developer(developer)
+
+    with pytest.raises(WorkerError, match='reviewer timed out'):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=context.runs_directory,
+            timeout_seconds=1,
+            max_iterations=3,
+            digest_worktree=_working_tree_digest,
+        )
+
+    messages = context.runs_directory / context.run.id / 'messages'
+    first_request_path = messages / '000001-review-request.json'
+    first_result_path = messages / '000002-review-result.json'
+    repeat_request_path = messages / '000005-review-request.json'
+    first_request = json.loads(first_request_path.read_text())
+    first_result = json.loads(first_result_path.read_text())
+    repeat_request = json.loads(repeat_request_path.read_text())
+    if tamper == 'initial-prior-review-path':
+        first_request['payload']['prior_review_path'] = str(first_result_path)
+        first_request_path.write_text(json.dumps(first_request))
+    elif tamper == 'repeat-prior-review-path':
+        repeat_request['payload']['prior_review_path'] = str(first_request_path)
+        repeat_request_path.write_text(json.dumps(repeat_request))
+    elif tamper == 'result-artifact-path':
+        first_result['payload']['artifact_path'] = str(first_request_path)
+        first_result_path.write_text(json.dumps(first_result))
+    else:
+        Path(first_result['payload']['artifact_path']).unlink()
+
+    assert main(resume_arguments(context)) == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'resume_evidence_invalid'
+    assert context.store.get(context.run.id).state is RunState.INTERRUPTED
 
 
 @pytest.mark.parametrize(
@@ -1254,17 +1570,7 @@ def test_worker_stops_bounded_non_progress(
 ) -> None:
     """Fail durably on iteration exhaustion or a no-change handoff."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    store = RunStore(database)
-    store.initialize()
-    digest = _working_tree_digest(repo, 'HEAD')
-    assert digest is not None
-    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
-    store.add(run)
+    context = create_worker_run(tmp_path)
     reviewer = tmp_path / 'loop-reviewer.py'
     developer = tmp_path / 'developer.py'
     write_loop_reviewer(reviewer)
@@ -1272,20 +1578,22 @@ def test_worker_stops_bounded_non_progress(
 
     with pytest.raises(WorkerError, match=expected):
         run_queued_review(
-            store=store,
-            run=run,
+            store=context.store,
+            run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=tmp_path / 'runs',
+            runs_directory=context.runs_directory,
             timeout_seconds=30,
             max_iterations=max_iterations,
             digest_worktree=_working_tree_digest,
         )
 
-    assert store.get(run.id).state.value == 'failed'
-    failure = json.loads((tmp_path / 'runs' / run.id / 'failure.json').read_text())
-    assert failure['run_id'] == run.id
+    assert context.store.get(context.run.id).state is RunState.FAILED
+    failure = json.loads(
+        (context.runs_directory / context.run.id / 'failure.json').read_text()
+    )
+    assert failure['run_id'] == context.run.id
     assert failure['state'] == 'failed'
     assert failure['error'] == {'code': 'worker_error', 'message': expected}
 
@@ -1295,30 +1603,19 @@ def test_worker_surfaces_developer_disagreement_for_human_decision(
 ) -> None:
     """Preserve a justified no-change disagreement without failing the run."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    store = RunStore(database)
-    store.initialize()
-    digest = _working_tree_digest(repo, 'HEAD')
-    assert digest is not None
-    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
-    store.add(run)
+    context = create_worker_run(tmp_path)
     reviewer = tmp_path / 'reviewer.py'
     developer = tmp_path / 'developer.py'
     write_loop_reviewer(reviewer)
     write_developer(developer, change_worktree=False, disposition='rejected')
-    runs_directory = tmp_path / 'runs'
 
     result = run_queued_review(
-        store=store,
-        run=run,
+        store=context.store,
+        run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=runs_directory,
+        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=2,
         digest_worktree=_working_tree_digest,
@@ -1326,128 +1623,385 @@ def test_worker_surfaces_developer_disagreement_for_human_decision(
 
     assert result.state.value == 'changes_requested'
     evidence = json.loads(
-        (runs_directory / run.id / 'decision-required.json').read_text()
+        (context.runs_directory / context.run.id / 'decision-required.json').read_text()
     )
     assert evidence['reason']['code'] == 'developer_disagreement'
     assert 'disputed every finding' in evidence['reason']['message']
-    assert not (runs_directory / run.id / 'failure.json').exists()
+    assert not (context.runs_directory / context.run.id / 'failure.json').exists()
 
 
 def test_run_keeps_blocked_review_awaiting_resolution(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, enqueued_run: CliRunContext
 ) -> None:
     """Persist a blocked review without inventing a terminal state."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
     write_reviewer(reviewer, 'blocked')
 
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--runs-directory',
-            str(tmp_path / 'runs'),
-            '--',
-            sys.executable,
-            str(reviewer),
-        ]
-    )
+    result = main(run_arguments(enqueued_run, reviewer=reviewer))
 
     assert result == 0
-    assert RunStore(database).get(run.id).state.value == 'reviewing'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
 
 
 @pytest.mark.parametrize(
     'reviewer_command', [['/missing/reviewer'], ['/usr/bin/false']]
 )
 def test_run_marks_reviewer_execution_failure(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
     reviewer_command: list[str],
 ) -> None:
     """Persist failed state for missing and nonzero reviewer commands."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
-
     result = main(
         [
             '--database',
-            str(database),
+            str(enqueued_run.database),
             'run',
-            str(run.id),
+            str(enqueued_run.run.id),
             '--objective',
             'Review the change.',
             '--runs-directory',
-            str(tmp_path / 'runs'),
+            str(enqueued_run.runs_directory),
             '--',
             *reviewer_command,
         ]
     )
 
     assert result == 2
-    assert RunStore(database).get(run.id).state.value == 'failed'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.FAILED
+    failure = json.loads(
+        (enqueued_run.runs_directory / enqueued_run.run.id / 'failure.json').read_text()
+    )
+    assert failure['error']['code'] == 'resume_execution_failed'
 
 
 def test_run_marks_reviewer_timeout(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, enqueued_run: CliRunContext
 ) -> None:
-    """Persist failed state when the bounded reviewer exceeds its timeout."""
+    """Persist interrupted state when the bounded reviewer exceeds its timeout."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'slow.py'
     reviewer.write_text('"""Slow test reviewer."""\nimport time\ntime.sleep(5)\n')
 
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--timeout',
-            '1',
-            '--runs-directory',
-            str(tmp_path / 'runs'),
-            '--',
-            sys.executable,
-            str(reviewer),
-        ]
-    )
+    result = main(run_arguments(enqueued_run, '--timeout', '1', reviewer=reviewer))
 
     assert result == 2
-    assert RunStore(database).get(run.id).state.value == 'failed'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
     invocation = json.loads(
-        (tmp_path / f'runs/{run.id}/invocations/000001-reviewer.json').read_text()
+        (
+            enqueued_run.runs_directory
+            / enqueued_run.run.id
+            / 'invocations/000001-reviewer.json'
+        ).read_text()
     )
     assert invocation['exit_code'] is None
     assert invocation['timed_out'] is True
+
+
+def test_resume_interrupted_reviewer_reuses_request(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
+) -> None:
+    """Retry an interrupted reviewer without duplicating its canonical request."""
+
+    reviewer = tmp_path / 'reviewer.py'
+    reviewer.write_text('"""Slow reviewer."""\nimport time\ntime.sleep(5)\n')
+
+    assert (
+        main(
+            run_arguments(
+                enqueued_run,
+                '--timeout',
+                '1',
+                reviewer=reviewer,
+                objective='Review.',
+            )
+        )
+        == 2
+    )
+    capsys.readouterr()
+    invocation_path = (
+        enqueued_run.runs_directory
+        / enqueued_run.run.id
+        / 'invocations/000001-reviewer.json'
+    )
+    invocation = invocation_path.read_text()
+    invocation_path.write_text('{')
+    assert main(resume_arguments(enqueued_run)) == 2
+    invalid_invocation = json.loads(capsys.readouterr().out)
+    assert invalid_invocation['error']['code'] == 'resume_evidence_invalid'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    invocation_path.write_text(invocation)
+    (enqueued_run.repo / 'tracked.txt').write_text('changed again\n')
+    assert main(resume_arguments(enqueued_run)) == 2
+    changed_scope = json.loads(capsys.readouterr().out)
+    assert changed_scope['error']['code'] == 'resume_scope_changed'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    (enqueued_run.repo / 'tracked.txt').write_text('changed\n')
+    messages = enqueued_run.runs_directory / enqueued_run.run.id / 'messages'
+    request_path = messages / '000001-review-request.json'
+    gapped_path = messages / '000003-review-request.json'
+    request_path.rename(gapped_path)
+    assert main(resume_arguments(enqueued_run)) == 2
+    invalid_chain = json.loads(capsys.readouterr().out)
+    assert invalid_chain['error']['code'] == 'resume_evidence_invalid'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    gapped_path.rename(request_path)
+    execution_path = (
+        enqueued_run.runs_directory / enqueued_run.run.id / 'execution.json'
+    )
+    execution = json.loads(execution_path.read_text())
+    execution['run_id'] = '20260904T000000Z-00000000'
+    execution_path.write_text(json.dumps(execution))
+
+    assert main(resume_arguments(enqueued_run)) == 2
+    mismatched = json.loads(capsys.readouterr().out)
+    assert mismatched['error']['code'] == 'resume_evidence_invalid'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    execution['run_id'] = enqueued_run.run.id
+    execution['schema_version'] = 1
+    execution_path.write_text(json.dumps(execution))
+
+    assert main(resume_arguments(enqueued_run)) == 2
+    unsupported = json.loads(capsys.readouterr().out)
+    assert unsupported['error']['code'] == 'resume_metadata_unsupported'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    execution['schema_version'] = 2
+    execution_path.write_text(json.dumps(execution))
+    write_reviewer(reviewer, 'approved')
+
+    assert main(resume_arguments(enqueued_run)) == 0
+
+    assert sorted(path.name for path in messages.iterdir()) == [
+        '000001-review-request.json',
+        '000002-review-result.json',
+    ]
+    invocations = enqueued_run.runs_directory / enqueued_run.run.id / 'invocations'
+    assert sorted(path.name for path in invocations.iterdir()) == [
+        '000001-reviewer-attempt-0002.json',
+        '000001-reviewer.json',
+    ]
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+
+
+def test_resume_reports_explicit_execution_failure_code(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
+) -> None:
+    """Classify a failed retry without matching its human-readable message."""
+
+    reviewer = tmp_path / 'reviewer.py'
+    reviewer.write_text('"""Slow reviewer."""\nimport time\ntime.sleep(5)\n')
+    assert main(run_arguments(enqueued_run, '--timeout', '1', reviewer=reviewer)) == 2
+    capsys.readouterr()
+    reviewer.unlink()
+
+    assert main(resume_arguments(enqueued_run)) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'resume_execution_failed'
+    failure = json.loads(
+        (enqueued_run.runs_directory / enqueued_run.run.id / 'failure.json').read_text()
+    )
+    assert failure['error']['code'] == document['error']['code']
+
+
+def test_resume_rejects_stale_artifact_from_interrupted_reviewer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
+) -> None:
+    """Require a retried reviewer to create a fresh human artifact."""
+
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'approved')
+    reviewer.write_text(
+        reviewer.read_text().replace(
+            'artifact_path.write_text("# Review\\n")',
+            'artifact_path.write_text("# Stale review\\n")\nimport time\ntime.sleep(5)',
+        )
+    )
+
+    assert main(run_arguments(enqueued_run, '--timeout', '1', reviewer=reviewer)) == 2
+    capsys.readouterr()
+    run_directory = enqueued_run.runs_directory / enqueued_run.run.id
+    artifact_path = run_directory / 'artifacts/review-0001.md'
+    archived_path = (
+        run_directory / 'logs/000002-rejected-review-artifact-attempt-0001.md'
+    )
+    assert not artifact_path.exists()
+    assert archived_path.read_text() == '# Stale review\n'
+
+    write_reviewer(reviewer, 'approved', write_artifact=False)
+    assert main(resume_arguments(enqueued_run)) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'resume_evidence_invalid'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.FAILED
+
+
+def test_resume_interrupted_developer_reuses_remediation_request(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Retry an interrupted developer without starting a replacement run."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    developer.write_text('"""Slow developer."""\nimport time\ntime.sleep(5)\n')
+
+    with pytest.raises(WorkerError, match='developer timed out'):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            developer_timeout_seconds=1,
+            max_iterations=3,
+            digest_worktree=_working_tree_digest,
+        )
+
+    assert context.store.get(context.run.id).state is RunState.INTERRUPTED
+    invocation_path = (
+        context.runs_directory / context.run.id / 'invocations/000003-developer.json'
+    )
+    invocation = invocation_path.read_text()
+    invocation_path.write_text('{')
+    assert main(resume_arguments(context)) == 2
+    invalid_invocation = json.loads(capsys.readouterr().out)
+    assert invalid_invocation['error']['code'] == 'resume_evidence_invalid'
+    assert context.store.get(context.run.id).state is RunState.INTERRUPTED
+    invocation_path.write_text(invocation)
+    write_developer(developer)
+    assert main(resume_arguments(context)) == 0
+    assert (
+        context.store.get(context.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+    messages = context.runs_directory / context.run.id / 'messages'
+    assert sorted(path.name for path in messages.iterdir()) == [
+        '000001-review-request.json',
+        '000002-review-result.json',
+        '000003-remediation-request.json',
+        '000004-developer-handoff.json',
+        '000005-review-request.json',
+        '000006-review-result.json',
+    ]
+    invocations = context.runs_directory / context.run.id / 'invocations'
+    assert (invocations / '000003-developer.json').is_file()
+    retry = json.loads((invocations / '000003-developer-attempt-0002.json').read_text())
+    assert retry['attempt'] == 2
+    assert retry['timed_out'] is False
+
+
+def test_resume_writes_recovery_request_before_activating_developer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep validation recoverable when its next request cannot be persisted."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+    blocked = run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+    assert blocked.state is RunState.VALIDATION_REQUIRED
+    original_write = worker._write_json_atomic
+
+    def fail_recovery_request(path: Path, document: dict[str, object]) -> None:
+        """Simulate failure to persist only the recovery request."""
+
+        if path.name == '000005-remediation-request.json':
+            message = 'simulated write failure'
+            raise OSError(message)
+        original_write(path, document)
+
+    monkeypatch.setattr(worker, '_write_json_atomic', fail_recovery_request)
+    assert main(resume_arguments(context)) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'resume_evidence_invalid'
+    assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
+    messages = context.runs_directory / context.run.id / 'messages'
+    assert not (messages / '000005-remediation-request.json').exists()
+
+
+def test_resume_reuses_recovery_request_after_activation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse a durable request when activation fails before process launch."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    write_loop_reviewer(reviewer)
+    write_recoverable_developer(developer)
+    blocked = run_queued_review(
+        store=context.store,
+        run=context.run,
+        objective='Review and remediate.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(sys.executable, str(developer)),
+        runs_directory=context.runs_directory,
+        timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=_working_tree_digest,
+    )
+    assert blocked.state is RunState.VALIDATION_REQUIRED
+    original_update = context.store.update
+
+    def fail_activation(run: Run, *, expected_state: RunState) -> None:
+        """Simulate failure while activating the recovery developer."""
+
+        if (
+            run.state is RunState.DEVELOPING
+            and expected_state is RunState.VALIDATION_REQUIRED
+        ):
+            message = 'simulated activation failure'
+            raise OSError(message)
+        original_update(run, expected_state=expected_state)
+
+    monkeypatch.setattr(context.store, 'update', fail_activation)
+    with pytest.raises(OSError, match='simulated activation failure'):
+        resume_review(
+            store=context.store,
+            run=blocked,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        )
+    messages = context.runs_directory / context.run.id / 'messages'
+    assert (messages / '000005-remediation-request.json').is_file()
+    assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
+
+    monkeypatch.setattr(context.store, 'update', original_update)
+    assert main(resume_arguments(context)) == 0
+    assert (
+        context.store.get(context.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
 
 
 @pytest.mark.parametrize(
@@ -1462,17 +2016,12 @@ def test_builtin_run_exposes_child_output_through_logs(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    enqueued_run: CliRunContext,
     case: tuple[str, str, int, bool],
 ) -> None:
     """Retain built-in child streams across success, error, and timeout."""
 
     mode, timeout, expected_result, timed_out = case
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    runs_directory = tmp_path / 'runs'
     fake_codex = tmp_path / 'bin/codex'
     write_fake_codex(fake_codex, mode=mode)
     current_path = os.environ.get('PATH', '')
@@ -1482,25 +2031,14 @@ def test_builtin_run_exposes_child_output_through_logs(
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('review instructions\n')
     monkeypatch.setenv('CODEX_HOME', str(codex_home))
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
-
     result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
+        run_arguments(
+            enqueued_run,
             '--reviewer-model',
             'test-model',
             '--timeout',
             timeout,
-            '--runs-directory',
-            str(runs_directory),
-        ]
+        )
     )
     capsys.readouterr()
 
@@ -1509,11 +2047,11 @@ def test_builtin_run_exposes_child_output_through_logs(
         main(
             [
                 '--database',
-                str(database),
+                str(enqueued_run.database),
                 'logs',
-                str(run.id),
+                str(enqueued_run.run.id),
                 '--runs-directory',
-                str(runs_directory),
+                str(enqueued_run.runs_directory),
             ]
         )
         == 0
@@ -1557,58 +2095,41 @@ def test_run_rejects_state_database_inside_worktree(
 
 
 def test_run_rejects_evidence_directory_inside_worktree(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str], enqueued_run: CliRunContext
 ) -> None:
     """Keep mutable review messages and artifacts outside the reviewed worktree."""
-
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
 
     result = main(
         [
             '--database',
-            str(database),
+            str(enqueued_run.database),
             'run',
-            str(run.id),
+            str(enqueued_run.run.id),
             '--objective',
             'Review the change.',
             '--runs-directory',
-            str(repo / 'runs'),
+            str(enqueued_run.repo / 'runs'),
         ]
     )
 
     assert result == 2
-    assert RunStore(database).get(run.id).state.value == 'queued'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.QUEUED
     assert 'evidence directory must be outside' in capsys.readouterr().err
 
 
 def test_run_handles_digest_failure_before_transition(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str], enqueued_run: CliRunContext
 ) -> None:
     """Report a disappeared repo without a traceback or state mutation."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
-    shutil.rmtree(repo / '.git')
+    shutil.rmtree(enqueued_run.repo / '.git')
 
     result = main(
         [
             '--database',
-            str(database),
+            str(enqueued_run.database),
             'run',
-            str(run.id),
+            str(enqueued_run.run.id),
             '--objective',
             'Review the change.',
             '--',
@@ -1617,46 +2138,24 @@ def test_run_handles_digest_failure_before_transition(
     )
 
     assert result == 2
-    assert RunStore(database).get(run.id).state.value == 'queued'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.QUEUED
     assert 'cannot compute worktree digest' in capsys.readouterr().err
 
 
 def test_run_marks_post_review_digest_failure(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, enqueued_run: CliRunContext
 ) -> None:
     """Fail durably when Git state disappears during reviewer execution."""
 
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    initialize_git_repo(repo)
-    (repo / 'tracked.txt').write_text('changed\n')
-    database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
-    capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
     write_reviewer(reviewer, 'approved')
     with reviewer.open('a') as file:
         file.write('\nimport shutil\nshutil.rmtree(Path.cwd() / ".git")\n')
 
-    result = main(
-        [
-            '--database',
-            str(database),
-            'run',
-            str(run.id),
-            '--objective',
-            'Review the change.',
-            '--runs-directory',
-            str(tmp_path / 'runs'),
-            '--',
-            sys.executable,
-            str(reviewer),
-        ]
-    )
+    result = main(run_arguments(enqueued_run, reviewer=reviewer))
 
     assert result == 2
-    assert RunStore(database).get(run.id).state.value == 'failed'
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.FAILED
 
 
 def test_skills_install_for_both_agents(

@@ -24,6 +24,12 @@ flowchart TB
     developing --> reviewing
     reviewing -->|changes_requested| changes[changes_requested]
     changes --> developing
+    developing -->|blocked or failed handoff| validation[validation_required]
+    validation -->|resume| developing
+    reviewing -->|timeout or interruption| interrupted[interrupted]
+    developing -->|timeout or interruption| interrupted
+    interrupted -->|resume unanswered request| reviewing
+    interrupted -->|resume unanswered request| developing
     reviewing -->|blocked| evidence[wait for scope or evidence]
     evidence --> reviewing
     reviewing -->|approved| approved[approved]
@@ -83,17 +89,23 @@ flowchart TB
    artifact. The developer evaluates every
    finding, makes justified changes, and returns a new `developer_handoff` with
    each finding's disposition. The orchestrator computes a new digest and
-   repeats steps 4-7. If every finding is instead rejected or blocked with a
+   repeats steps 4-7. A valid `blocked` or `failed` handoff enters
+   `validation_required`; after the external obstacle is resolved, `resume`
+   appends a correlated remediation request and retries the developer within
+   the same run. If every finding is instead rejected or blocked with a
    rationale and the diff is unchanged, the run returns to `changes_requested`
    with durable decision-required evidence for human resolution. Review
    iterations are bounded; exhausting the configured
    limit fails the run instead of looping forever.
 
 8. **Handle blocked or failed work.** A blocked review remains unresolved until
-   its missing scope, evidence, or decision is supplied. Agent errors,
-   timeouts, or interrupted processes produce the applicable `failed` or
-   `interrupted` run state with captured diagnostics. A resumable run continues
-   from its last durable transition rather than restarting silently.
+   its missing scope, evidence, or decision is supplied. Timeouts and user
+   interruptions enter `interrupted`; `resume` reuses the unanswered canonical
+   request and appends a numbered invocation attempt. Protocol-invalid
+   evidence, nonzero process exits, and other non-recoverable errors enter
+   `failed`. Resume validates the saved schema version, message chain, original
+   role configuration, and diff scope before it changes state or launches an
+   agent.
 
 9. **Accept approval for one digest.** After an `approved` verdict, the
    orchestrator records it and moves the run to the `approved` state. It
@@ -119,6 +131,12 @@ flowchart TB
     state and artifact locations. Worktree removal, branch deletion, merging,
     and remote cleanup are separate actions and require their own safety checks
     and authorization.
+
+A terminal `failed` or `superseded` run may be followed by an exceptional new
+enqueue using `--supersedes RUN_ID`. The new run records its predecessor, but
+does not copy or rewrite prior evidence. `interrupted` and
+`validation_required` runs must use `resume` instead so iterative work stays
+under one run ID.
 
 ## Remote pull-request review
 

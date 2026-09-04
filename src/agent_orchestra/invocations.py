@@ -49,6 +49,7 @@ class InvocationRecord:
     interrupted: bool
     stdout_path: str
     stderr_path: str
+    attempt: int = 1
 
 
 def timestamp() -> str:
@@ -95,7 +96,8 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
     if not manifests.is_dir():
         return ()
     records: list[InvocationRecord] = []
-    expected = set(InvocationRecord.__dataclass_fields__)
+    required = set(InvocationRecord.__dataclass_fields__) - {'attempt'}
+    allowed = set(InvocationRecord.__dataclass_fields__)
     for path in sorted(manifests.glob('*.json')):
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise InvocationEvidenceError(INVOCATION_RECORD_ESCAPE)
@@ -105,7 +107,12 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             raise InvocationEvidenceError(
                 f'invalid invocation record {path.name}: {error}'
             ) from error
-        if not isinstance(document, dict) or set(document) != expected:
+        if (
+            not isinstance(document, dict)
+            or not required.issubset(document)
+            or not set(document).issubset(allowed)
+            or (document.get('schema_version') == 2 and 'attempt' not in document)
+        ):
             raise InvocationEvidenceError(
                 f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}'
             )
@@ -131,14 +138,20 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             and type(record.interrupted) is bool
             and isinstance(record.stdout_path, str)
             and isinstance(record.stderr_path, str)
+            and type(record.attempt) is int
         )
         if not valid_types:
             raise InvocationEvidenceError(f'invalid invocation record {path.name}')
-        if record.schema_version != 1 or record.run_id != run_id:
+        if record.schema_version not in {1, 2} or record.run_id != run_id:
             raise InvocationEvidenceError(
                 f'invocation record {path.name} does not match run {run_id}'
             )
-        if record.role not in {'developer', 'reviewer'} or record.iteration < 1:
+        if (
+            record.role not in {'developer', 'reviewer'}
+            or record.iteration < 1
+            or record.attempt < 1
+            or (record.schema_version == 1 and record.attempt != 1)
+        ):
             raise InvocationEvidenceError(f'invalid invocation record {path.name}')
         stdout_path = _safe_file(root, record.stdout_path, description='stdout log')
         stderr_path = _safe_file(root, record.stderr_path, description='stderr log')

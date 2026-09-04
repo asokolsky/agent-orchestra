@@ -142,7 +142,7 @@ match its repo and worktree in the `runs` array:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "runs_directory": "/home/user/.local/state/agent-orchestra/runs",
   "runs": [
     {
@@ -156,6 +156,7 @@ match its repo and worktree in the `runs` array:
       "diff_digest": "sha256:<working-tree-digest>",
       "iteration": 0,
       "remote_url": null,
+      "supersedes_run_id": null,
       "created_at": "2026-09-02T15:06:12Z",
       "updated_at": "2026-09-02T15:06:12Z"
     }
@@ -178,12 +179,13 @@ capture. Existing run records are historical evidence and are not rewritten,
 so older local runs may contain the selected worktree in both fields.
 
 This CLI output is not a workflow message. The message contract begins below.
-CLI output schema version 4 adds `runs_directory` to successful `status`
-documents. Version 3 changes `enqueue-locals` from plain-text rows and stderr
-diagnostics to one JSON document. Version 2 renamed `awaiting_review` to
-`reviewing`. Existing databases remain readable, and initialization rewrites
-the legacy stored value. Consumers of schema version 1 should treat the two
-names as the same lifecycle state while migrating to a current schema.
+CLI output schema version 5 adds `supersedes_run_id`, resumable-run output, and
+invocation attempt numbers. Version 4 adds `runs_directory` to successful
+`status` documents. Version 3 changes `enqueue-locals` from plain-text rows and
+stderr diagnostics to one JSON document. Version 2 renamed `awaiting_review`
+to `reviewing`. Existing databases remain readable, and initialization
+rewrites the legacy stored value. Consumers of schema version 1 should treat
+the two names as the same lifecycle state while migrating to a current schema.
 
 ## Batch enqueue output
 
@@ -532,9 +534,11 @@ required exactly once for every finding ID and uses `addressed`, `rejected`, or
 `blocked`.
 
 Terminal worker failures are written atomically to `failure.json` in the run
-directory. The record contains the run ID, resulting durable state, stable
-error type and message, and timestamp. Rejected agent responses remain in
-`logs/`; neither stderr nor a rejected response is the sole failure record.
+directory. The version 1 record contains the run ID, resulting durable state,
+timestamp, and an error object with a message and machine-readable code. The
+code preserves a specific stable worker error code when one is available and
+otherwise uses `worker_error`. Rejected agent responses remain in `logs/`;
+neither stderr nor a rejected response is the sole failure record.
 If a developer rejects or blocks every accepted finding without changing the
 diff, the valid handoff is preserved and the run returns to
 `changes_requested`. A `decision-required.json` record with the stable
@@ -547,17 +551,35 @@ Every attempted external process writes one versioned JSON record under the
 run's `invocations/` directory. The record is runtime-neutral and contains the
 run and invocation IDs, role, selected agent vendor, explicit model override,
 adapter runtime, iteration, start and finish timestamps, exit code, timeout and
-interruption flags, and paths to separate stdout and stderr files under `logs/`.
+interruption flags, attempt number, and paths to separate stdout and stderr
+files under `logs/`.
 The model is `null` when the runtime chooses its own default; the orchestrator
 does not infer an effective remote model it cannot verify. Records and streams
-are finalized atomically. Command arguments and environment snapshots are
-excluded because they may contain secrets.
+are finalized atomically. Invocation records exclude command arguments and
+environment snapshots.
+
+New runs also persist `execution.json` schema version 2 before their first
+agent invocation. It contains the run ID, objective, exact reviewer and
+developer commands, declared agent identities, role-specific timeouts,
+iteration limit, and creation timestamp. These are the durable inputs used by
+`resume`; older execution schemas remain historical evidence but are not
+sufficient to restart an agent safely. A retry keeps the original request
+message and writes a new invocation record and streams with an incremented
+`attempt` value. Recovery validates existing invocation evidence before leaving
+a recoverable state, then persists the next request and pending invocation
+record before activating the role and launching its process. A durable recovery
+request whose activation failed is reused by the next resume attempt. Because
+the configured command is persisted for recovery, callers must not place secrets
+in command-line arguments. Environment snapshots remain excluded.
 
 Built-in adapters tee their underlying Codex or Claude process streams through
 the wrapper's stdout and stderr while retaining the text needed for structured
 result parsing and diagnostics. Because the worker redirects those wrapper
 streams before launch, child output is durable as it arrives and output written
-before a timeout or nonzero exit remains available.
+before a timeout or nonzero exit remains available. If a reviewer attempt is
+interrupted, any artifact it produced is moved to an attempt-qualified file in
+`logs/`; the retry must produce the canonical artifact again before its result
+can be accepted.
 
 `logs RUN_ID` is a read-only JSON view over that evidence. Its versioned
 envelope contains the selected stdout and stderr entries, independently missing
@@ -599,6 +621,7 @@ these states:
 | `queued` | The run was accepted but preparation has not started. |
 | `preparing` | The orchestrator is resolving instructions, worktree state, and the exact diff. |
 | `developing` | A developer is implementing the objective or remediating findings. |
+| `validation_required` | A valid developer handoff reported blocked or failed work; the remediation can be retried after intervention. |
 | `reviewing` | A reviewer is evaluating an immutable diff, or its result is being validated. |
 | `changes_requested` | A valid review found actionable defects and the run awaits remediation. |
 | `approved` | A valid review approved the exact recorded diff digest. |
@@ -629,7 +652,9 @@ queued
   -> preparing
      -> developing -> reviewing
      -> reviewing
-        -> changes_requested -> developing -> reviewing
+        -> changes_requested -> developing
+           -> validation_required -> developing
+           -> reviewing
         -> approved
            -> awaiting_commit_authorization
            -> committed
@@ -639,6 +664,19 @@ queued
 
 Active states may also become `failed`, `interrupted`, `cancelled`, or
 `superseded` where allowed by the workflow contract.
+
+`resume` is accepted only from `interrupted` and `validation_required`. An
+interrupted reviewer or developer repeats the unanswered durable request. A
+validation-required run creates the next correlated remediation request and
+retries the developer. Canonical messages and the run ID are retained; only
+invocation-attempt evidence is appended. Timeout and user interruption enter
+`interrupted`; malformed protocol evidence, invalid execution metadata,
+nonzero process exits, and other non-recoverable failures enter `failed`.
+
+When a failed or superseded run truly cannot continue, a caller may enqueue a
+new run with `--supersedes RUN_ID`. The new run stores that lineage link. The
+old evidence is never copied or rewritten, and recoverable runs cannot be
+replaced through this escape hatch.
 
 Approval is tied to the reviewed digest. If the diff changes after approval or
 while waiting for commit authorization, the run returns to `reviewing`

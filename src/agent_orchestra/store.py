@@ -47,6 +47,7 @@ class RunStore:
                     diff_digest TEXT,
                     iteration INTEGER NOT NULL,
                     remote_url TEXT,
+                    supersedes_run_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -60,6 +61,12 @@ class RunStore:
                 );
                 """
             )
+            columns = {
+                row['name']
+                for row in connection.execute('PRAGMA table_info(runs)').fetchall()
+            }
+            if 'supersedes_run_id' not in columns:
+                connection.execute('ALTER TABLE runs ADD COLUMN supersedes_run_id TEXT')
             connection.execute(
                 'UPDATE runs SET state = ? WHERE state = ?',
                 (RunState.REVIEWING, LEGACY_REVIEW_STATE),
@@ -81,8 +88,9 @@ class RunStore:
                 """
                 INSERT INTO runs (
                     id, scenario, repository_path, worktree_path, state, base_sha,
-                    head_sha, diff_digest, iteration, remote_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    head_sha, diff_digest, iteration, remote_url, supersedes_run_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._values(run),
             )
@@ -126,7 +134,7 @@ class RunStore:
                 UPDATE runs SET
                     scenario = ?, repository_path = ?, worktree_path = ?, state = ?,
                     base_sha = ?, head_sha = ?, diff_digest = ?, iteration = ?,
-                    remote_url = ?, updated_at = ?
+                    remote_url = ?, supersedes_run_id = ?, updated_at = ?
                 WHERE id = ? AND state IN (?, ?)
                 """,
                 (
@@ -139,6 +147,7 @@ class RunStore:
                     run.diff_digest,
                     run.iteration,
                     run.remote_url,
+                    run.supersedes_run_id,
                     run.updated_at.isoformat(),
                     str(run.id),
                     *expected_values,
@@ -156,6 +165,22 @@ class RunStore:
                 'VALUES (?, ?, ?, ?)',
                 (str(run.id), expected_state, run.state, run.updated_at.isoformat()),
             )
+
+    def interrupted_origin(self, run_id: str) -> RunState:
+        """Return the active state from which a run was interrupted."""
+
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                """
+                SELECT from_state FROM transitions
+                WHERE run_id = ? AND to_state = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (str(run_id), RunState.INTERRUPTED),
+            ).fetchone()
+        if row is None or row['from_state'] is None:
+            raise RunNotFoundError(f'interruption transition for {run_id}')
+        return RunState(row['from_state'])
 
     def _connect(self) -> sqlite3.Connection:
         """Open a configured SQLite connection."""
@@ -181,6 +206,7 @@ class RunStore:
             run.diff_digest,
             run.iteration,
             run.remote_url,
+            run.supersedes_run_id,
             run.created_at.isoformat(),
             run.updated_at.isoformat(),
         )
@@ -189,6 +215,7 @@ class RunStore:
     def _from_row(row: sqlite3.Row) -> Run:
         """Convert a database row to a domain model."""
 
+        columns = row.keys()
         return Run(
             id=row['id'],
             scenario=ScenarioType(row['scenario']),
@@ -204,6 +231,9 @@ class RunStore:
             diff_digest=row['diff_digest'],
             iteration=row['iteration'],
             remote_url=row['remote_url'],
+            supersedes_run_id=(
+                row['supersedes_run_id'] if 'supersedes_run_id' in columns else None
+            ),
             created_at=datetime.fromisoformat(row['created_at']),
             updated_at=datetime.fromisoformat(row['updated_at']),
         )

@@ -31,6 +31,7 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
         {
             RunState.REVIEWING,
             RunState.CHANGES_REQUESTED,
+            RunState.VALIDATION_REQUIRED,
             RunState.FAILED,
             RunState.INTERRUPTED,
         }
@@ -55,6 +56,7 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.AWAITING_PUBLISH_AUTHORIZATION: frozenset(
         {RunState.PUBLISHED, RunState.CANCELLED}
     ),
+    RunState.VALIDATION_REQUIRED: frozenset({RunState.DEVELOPING, RunState.CANCELLED}),
     RunState.INTERRUPTED: frozenset(
         {
             RunState.PREPARING,

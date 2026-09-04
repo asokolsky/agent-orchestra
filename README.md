@@ -254,8 +254,10 @@ set to `null`.
 
 A built-in review that requests changes dispatches the
 selected developer and repeats review after a new digest is produced. Approval
-stops at `awaiting_commit_authorization`; blocked review, non-progress, invalid
-handoff, timeout, or iteration exhaustion stops without committing. A custom
+stops at `awaiting_commit_authorization`. A timeout enters `interrupted`, and a
+valid blocked or failed developer handoff enters `validation_required`; both
+continue through [`resume`](docs/cli.md#resume). Blocked review, non-progress,
+invalid handoff, or iteration exhaustion stops without committing. A custom
 reviewer command retains the one-review compatibility path and stops at
 `changes_requested` because no custom developer command is configured.
 Worker failures are also recorded in the run's `failure.json`, so the exact
@@ -285,7 +287,8 @@ The current implementation provides:
 - built-in Codex and Claude Code adapters for developer and reviewer roles,
   selected independently, plus a custom one-review command escape hatch;
 - a bounded remediation loop with strict messages, finding dispositions,
-  digest progress checks, role-specific timeouts, and iteration exhaustion.
+  digest progress checks, role-specific timeouts, resumable interruptions and
+  blocked handoffs, and iteration exhaustion;
 - adapter-neutral invocation records and read-only, filterable process log
   viewing with legacy-log support.
 
@@ -299,8 +302,11 @@ Installation and invocation examples are in
 
 Every review and remediation request, result, artifact, invocation
 configuration, process log, and terminal failure is persisted outside the
-worktree. Initial clean-worktree development, worktree creation, leases, Git
-provider integration, and authorization commands remain subsequent increments.
+worktree. Recoverable runs continue with the same run ID through the
+[`resume` command](docs/cli.md#resume); terminal replacements can retain lineage
+through [`enqueue-local --supersedes`](docs/cli.md#enqueue-local). Initial
+clean-worktree development, worktree creation, leases, Git provider
+integration, and authorization commands remain subsequent increments.
 
 ## Development
 

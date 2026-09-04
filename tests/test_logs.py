@@ -97,7 +97,7 @@ def test_logs_identifies_and_orders_separate_streams(
     captured = capsys.readouterr()
     document = json.loads(captured.out)
     assert captured.err == ''
-    assert document['schema_version'] == 4
+    assert document['schema_version'] == 5
     assert document['run_id'] == str(run.id)
     assert document['failures'] == []
     assert document['error'] is None
@@ -117,6 +117,7 @@ def test_logs_identifies_and_orders_separate_streams(
         'agent_model': 'gpt-test',
         'runtime': 'codex',
         'iteration': 1,
+        'attempt': 1,
         'started_at': '2026-09-03T10:00:00Z',
         'finished_at': '2026-09-03T10:01:00Z',
         'exit_code': 0,
@@ -252,7 +253,9 @@ def test_logs_reads_legacy_files_with_unknown_metadata(
     assert stdout['legacy'] is True
 
 
-@pytest.mark.parametrize('escape_kind', ['mismatched-run', 'symlink'])
+@pytest.mark.parametrize(
+    'escape_kind', ['mismatched-run', 'missing-schema-2-attempt', 'symlink']
+)
 def test_logs_rejects_unsafe_invocation_evidence(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -266,6 +269,11 @@ def test_logs_rejects_unsafe_invocation_evidence(
     if escape_kind == 'mismatched-run':
         document = json.loads(manifest.read_text())
         document['run_id'] = 'another-run'
+        manifest.write_text(json.dumps(document))
+    elif escape_kind == 'missing-schema-2-attempt':
+        document = json.loads(manifest.read_text())
+        document['schema_version'] = 2
+        del document['attempt']
         manifest.write_text(json.dumps(document))
     else:
         outside = tmp_path / 'outside.log'
@@ -339,7 +347,7 @@ def test_logs_returns_json_when_database_is_missing(
     document = json.loads(captured.out)
     assert captured.err == ''
     assert document == {
-        'schema_version': 4,
+        'schema_version': 5,
         'run_id': 'unknown-run',
         'streams': [],
         'failures': [],
