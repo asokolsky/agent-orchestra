@@ -58,7 +58,7 @@ def _require_external_database(database: Path, worktree: Path) -> None:
         raise WorkerError(STATE_DATABASE_INSIDE_WORKTREE)
 
 
-def _git_bytes(repository: Path, *arguments: str) -> bytes:
+def _git_bytes(repo: Path, *arguments: str) -> bytes:
     """Run a read-only Git command and return its raw output."""
 
     git = shutil.which('git')
@@ -67,7 +67,7 @@ def _git_bytes(repository: Path, *arguments: str) -> bytes:
         raise GitCommandError(message)
     try:
         completed = subprocess.run(
-            [git, '-C', str(repository), *arguments],
+            [git, '-C', str(repo), *arguments],
             check=True,
             capture_output=True,
         )
@@ -81,20 +81,51 @@ def _git_bytes(repository: Path, *arguments: str) -> bytes:
     return completed.stdout
 
 
-def _git(repository: Path, *arguments: str) -> str:
+def _git(repo: Path, *arguments: str) -> str:
     """Run a read-only Git command and return stripped text output."""
 
-    return _git_bytes(repository, *arguments).decode(errors='replace').strip()
+    return _git_bytes(repo, *arguments).decode(errors='replace').strip()
 
 
-def _working_tree_digest(repository: Path, base_sha: str) -> str | None:
+def _git_locations(repo: Path) -> tuple[Path, Path]:
+    """Return the primary repository location and selected worktree root."""
+
+    worktree_path = Path(
+        _git(repo, 'rev-parse', '--path-format=absolute', '--show-toplevel')
+    ).resolve()
+    git_directory = Path(_git(repo, 'rev-parse', '--absolute-git-dir')).resolve()
+    common_directory = Path(
+        _git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    ).resolve()
+    output = _git_bytes(repo, 'worktree', 'list', '--porcelain', '-z')
+    records = tuple(record for record in output.split(b'\0\0') if record)
+    prefix = b'worktree '
+    listed_paths: list[Path] = []
+    for record in records:
+        first_field = record.split(b'\0', 1)[0]
+        if not first_field.startswith(prefix) or first_field == prefix:
+            message = 'invalid git worktree list output'
+            raise GitCommandError(message)
+        listed_paths.append(
+            Path(os.fsdecode(first_field.removeprefix(prefix))).resolve()
+        )
+    if not listed_paths:
+        message = 'git worktree list returned no worktrees'
+        raise GitCommandError(message)
+    if git_directory == common_directory:
+        return worktree_path, worktree_path
+    if worktree_path not in listed_paths:
+        message = 'selected worktree is missing from git worktree list'
+        raise GitCommandError(message)
+    return listed_paths[0], worktree_path
+
+
+def _working_tree_digest(repo: Path, base_sha: str) -> str | None:
     """Return a stable digest for tracked and untracked changes from a base."""
 
-    tracked_diff = _git_bytes(
-        repository, 'diff', '--binary', '--full-index', base_sha, '--'
-    )
+    tracked_diff = _git_bytes(repo, 'diff', '--binary', '--full-index', base_sha, '--')
     untracked_output = _git_bytes(
-        repository, 'ls-files', '--others', '--exclude-standard', '-z'
+        repo, 'ls-files', '--others', '--exclude-standard', '-z'
     )
     untracked_paths = sorted(path for path in untracked_output.split(b'\0') if path)
     if not tracked_diff and not untracked_paths:
@@ -104,7 +135,7 @@ def _working_tree_digest(repository: Path, base_sha: str) -> str | None:
     digest.update(b'tracked\0')
     digest.update(tracked_diff)
     for raw_path in untracked_paths:
-        path = repository / os.fsdecode(raw_path)
+        path = repo / os.fsdecode(raw_path)
         digest.update(b'untracked\0')
         digest.update(raw_path)
         digest.update(b'\0')
@@ -137,7 +168,9 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue = commands.add_parser(
         'enqueue-local', help='enqueue the current local changes'
     )
-    enqueue.add_argument('repository', nargs='?', type=Path, default=Path.cwd())
+    enqueue.add_argument(
+        'repo', metavar='repository', nargs='?', type=Path, default=Path.cwd()
+    )
     enqueue.add_argument('--base', default='HEAD')
 
     enqueue_many = commands.add_parser(
@@ -199,23 +232,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _capture_local_run(repository: Path, base: str) -> Run | None:
+def _capture_local_run(repo: Path, base: str) -> Run | None:
     """Capture a local-changes run without persisting it."""
 
-    base_sha = _git(repository, 'rev-parse', '--verify', base)
-    head_sha = _git(repository, 'rev-parse', '--verify', 'HEAD')
-    diff_digest = _working_tree_digest(repository, base_sha)
+    repo_path, worktree_path = _git_locations(repo)
+    base_sha = _git(worktree_path, 'rev-parse', '--verify', base)
+    head_sha = _git(worktree_path, 'rev-parse', '--verify', 'HEAD')
+    diff_digest = _working_tree_digest(worktree_path, base_sha)
     if diff_digest is None:
         return None
-    return Run.create_local(repository, repository, base_sha, head_sha, diff_digest)
+    return Run.create_local(repo_path, worktree_path, base_sha, head_sha, diff_digest)
 
 
 def _enqueue_local(args: argparse.Namespace, store: RunStore) -> int:
     """Enqueue local changes described by parsed CLI arguments."""
 
-    repository = args.repository.resolve()
+    repo = args.repo.resolve()
     try:
-        run = _capture_local_run(repository, args.base)
+        run = _capture_local_run(repo, args.base)
     except (GitCommandError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
@@ -262,11 +296,11 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
     runs: list[Run] = []
     clean_count = 0
     failures: list[dict[str, str]] = []
-    for repository in repositories:
+    for repo in repositories:
         try:
-            run = _capture_local_run(repository, args.base)
+            run = _capture_local_run(repo, args.base)
         except (GitCommandError, OSError) as error:
-            failures.append({'repository_path': str(repository), 'message': str(error)})
+            failures.append({'repository_path': str(repo), 'message': str(error)})
             continue
         if run is None:
             clean_count += 1
@@ -317,7 +351,7 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
             {
                 'id': str(run.id),
                 'scenario': str(run.scenario),
-                'repository_path': str(run.repository_path),
+                'repository_path': str(run.repo_path),
                 'worktree_path': str(run.worktree_path),
                 'state': str(run.state),
                 'base_sha': run.base_sha,

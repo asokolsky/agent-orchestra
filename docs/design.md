@@ -147,8 +147,8 @@ match its repo and worktree in the `runs` array:
     {
       "id": "20260902T150612Z-a7f3c921",
       "scenario": "local_changes",
-      "repository_path": "/path/to/repo",
-      "worktree_path": "/path/to/repo",
+      "repository_path": "/path/to/primary/repo",
+      "worktree_path": "/path/to/linked/worktree",
       "state": "queued",
       "base_sha": "<base-commit-sha>",
       "head_sha": "<head-commit-sha>",
@@ -161,6 +161,15 @@ match its repo and worktree in the `runs` array:
   ]
 }
 ```
+
+For newly captured local changes, `repository_path` is the primary repository
+location reported by Git. This is the primary worktree for a non-bare
+repository, including one whose Git directory is stored separately, or the
+backing bare repository path. `worktree_path` is the exact checkout whose
+changes were captured and where agents execute. The values are equal when that
+checkout is the primary worktree and normally differ for a linked-worktree
+capture. Existing run records are historical evidence and are not rewritten,
+so older local runs may contain the selected worktree in both fields.
 
 This CLI output is not a workflow message. The message contract begins below.
 CLI output schema version 3 changes `enqueue-locals` from plain-text rows and

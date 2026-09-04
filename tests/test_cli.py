@@ -39,7 +39,7 @@ def test_version_reports_installed_distribution(
     assert capsys.readouterr().out == f'agent-orchestra {version("agent-orchestra")}\n'
 
 
-def initialize_git_repository(path: Path) -> None:
+def initialize_git_repo(path: Path) -> None:
     """Create a repository with one committed file."""
 
     git = shutil.which('git')
@@ -59,6 +59,27 @@ def initialize_git_repository(path: Path) -> None:
             'commit',
             '-m',
             'initial',
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def add_linked_worktree(repo: Path, worktree: Path) -> None:
+    """Create a linked worktree on a unique test branch."""
+
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run(
+        [
+            git,
+            '-C',
+            str(repo),
+            'worktree',
+            'add',
+            '-b',
+            f'test-{uuid4().hex}',
+            str(worktree),
         ],
         check=True,
         capture_output=True,
@@ -233,14 +254,14 @@ def test_enqueue_local_captures_current_diff(
 ) -> None:
     """Persist a digest for tracked and untracked local changes."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
-    (repository / 'untracked.txt').write_text('new\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
+    (repo / 'untracked.txt').write_text('new\n')
     database = tmp_path / 'state.db'
 
-    result = main(['--database', str(database), 'enqueue-local', str(repository)])
+    result = main(['--database', str(database), 'enqueue-local', str(repo)])
 
     assert result == 0
     run = RunStore(database).list_runs()[0]
@@ -248,21 +269,147 @@ def test_enqueue_local_captures_current_diff(
     assert run.diff_digest is not None
     assert re.fullmatch(r'sha256:[0-9a-f]{64}', run.diff_digest)
     assert run.base_sha == run.head_sha
+    assert run.repo_path == repo
+    assert run.worktree_path == repo
+    assert str(run.id) in capsys.readouterr().out
+
+
+def test_enqueue_local_from_subdirectory_captures_complete_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Capture changes outside a caller-supplied worktree subdirectory."""
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    subdirectory = repo / 'nested'
+    subdirectory.mkdir()
+    (repo / 'outside.txt').write_text('new\n')
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-local', str(subdirectory)])
+
+    assert result == 0
+    run = RunStore(database).list_runs()[0]
+    assert run.repo_path == repo
+    assert run.worktree_path == repo
+    assert run.diff_digest is not None
+    assert str(run.id) in capsys.readouterr().out
+
+
+def test_enqueue_local_distinguishes_linked_worktree_from_primary_repo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Persist the primary and selected linked-worktree paths independently."""
+
+    repo = tmp_path / 'primary repository'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    worktree = tmp_path / 'linked worktree'
+    add_linked_worktree(repo, worktree)
+    (worktree / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-local', str(worktree)])
+
+    assert result == 0
+    run = RunStore(database).list_runs()[0]
+    assert run.repo_path == repo
+    assert run.worktree_path == worktree
+    assert str(run.id) in capsys.readouterr().out
+
+
+def test_enqueue_local_uses_bare_repo_backing_linked_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Use a bare main repository when it owns the selected linked worktree."""
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    initialize_git_repo(source)
+    bare_repo = tmp_path / 'bare repository.git'
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run(
+        [git, 'clone', '--bare', str(source), str(bare_repo)],
+        check=True,
+        capture_output=True,
+    )
+    worktree = tmp_path / 'bare linked worktree'
+    add_linked_worktree(bare_repo, worktree)
+    (worktree / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-local', str(worktree)])
+
+    assert result == 0
+    run = RunStore(database).list_runs()[0]
+    assert run.repo_path == bare_repo
+    assert run.worktree_path == worktree
+    assert str(run.id) in capsys.readouterr().out
+
+
+def test_enqueue_local_supports_separate_git_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Identify a primary worktree whose Git directory lives elsewhere."""
+
+    repo = tmp_path / 'separate worktree'
+    git_directory = tmp_path / 'separate metadata.git'
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run(
+        [git, 'init', f'--separate-git-dir={git_directory}', str(repo)],
+        check=True,
+        capture_output=True,
+    )
+    (repo / 'tracked.txt').write_text('initial\n')
+    subprocess.run(
+        [git, '-C', str(repo), 'add', 'tracked.txt'],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            git,
+            '-C',
+            str(repo),
+            '-c',
+            'user.name=Test User',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '-m',
+            'initial',
+        ],
+        check=True,
+        capture_output=True,
+    )
+    (repo / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-local', str(repo)])
+
+    assert result == 0
+    run = RunStore(database).list_runs()[0]
+    assert run.repo_path == repo
+    assert run.worktree_path == repo
+    assert run.repo_path != git_directory
     assert str(run.id) in capsys.readouterr().out
 
 
 def test_untracked_executable_mode_changes_working_tree_digest(tmp_path: Path) -> None:
     """Bind approval digests to executable-mode changes on untracked files."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    script = repository / 'script.sh'
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    script = repo / 'script.sh'
     script.write_text('#!/bin/sh\n')
-    before = _working_tree_digest(repository, 'HEAD')
+    before = _working_tree_digest(repo, 'HEAD')
 
     script.chmod(script.stat().st_mode | 0o100)
-    after = _working_tree_digest(repository, 'HEAD')
+    after = _working_tree_digest(repo, 'HEAD')
 
     assert before is not None
     assert after is not None
@@ -283,17 +430,17 @@ def test_enqueue_local_reports_git_failure_without_creating_state(
     assert not database.exists()
 
 
-def test_enqueue_local_rejects_clean_repository(
+def test_enqueue_local_rejects_clean_repo(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Do not enqueue an empty local-change scope."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
     database = tmp_path / 'state.db'
 
-    result = main(['--database', str(database), 'enqueue-local', str(repository)])
+    result = main(['--database', str(database), 'enqueue-local', str(repo)])
 
     assert result == 2
     assert 'no local changes' in capsys.readouterr().err
@@ -310,11 +457,11 @@ def test_enqueue_locals_captures_changed_child_repositories(
     changed_b = projects / 'changed-b'
     changed_a = projects / 'changed-a'
     clean = projects / 'clean'
-    not_a_repository = projects / 'notes'
-    for repository in (changed_b, changed_a, clean):
-        repository.mkdir()
-        initialize_git_repository(repository)
-    not_a_repository.mkdir()
+    not_a_repo = projects / 'notes'
+    for repo in (changed_b, changed_a, clean):
+        repo.mkdir()
+        initialize_git_repo(repo)
+    not_a_repo.mkdir()
     (changed_a / 'tracked.txt').write_text('changed a\n')
     (changed_b / 'untracked.txt').write_text('changed b\n')
     database = tmp_path / 'state.db'
@@ -338,6 +485,32 @@ def test_enqueue_locals_captures_changed_child_repositories(
     }
 
 
+def test_enqueue_locals_distinguishes_linked_worktree_repo(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Apply repository identity resolution to batch-enqueued worktrees."""
+
+    repo = tmp_path / 'primary'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    projects = tmp_path / 'projects'
+    projects.mkdir()
+    worktree = projects / 'linked'
+    add_linked_worktree(repo, worktree)
+    (worktree / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+
+    result = main(['--database', str(database), 'enqueue-locals', str(projects)])
+
+    assert result == 0
+    run = RunStore(database).list_runs()[0]
+    assert run.repo_path == repo
+    assert run.worktree_path == worktree
+    assert json.loads(capsys.readouterr().out)['runs'] == [
+        {'id': str(run.id), 'worktree_path': str(worktree)}
+    ]
+
+
 def test_enqueue_locals_accepts_tilde_directory(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -346,17 +519,17 @@ def test_enqueue_locals_accepts_tilde_directory(
     """Expand a leading tilde in the projects directory argument."""
 
     projects = tmp_path / 'Projects'
-    repository = projects / 'repo'
-    repository.mkdir(parents=True)
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = projects / 'repo'
+    repo.mkdir(parents=True)
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     monkeypatch.setenv('HOME', str(tmp_path))
     database = tmp_path / 'state.db'
 
     result = main(['--database', str(database), 'enqueue-locals', '~/Projects'])
 
     assert result == 0
-    assert RunStore(database).list_runs()[0].worktree_path == repository
+    assert RunStore(database).list_runs()[0].worktree_path == repo
     assert json.loads(capsys.readouterr().out)['summary']['enqueued'] == 1
 
 
@@ -366,9 +539,9 @@ def test_enqueue_locals_with_no_changed_repositories_does_not_create_state(
     """Succeed without state when no child repository has local changes."""
 
     projects = tmp_path / 'projects'
-    repository = projects / 'clean'
-    repository.mkdir(parents=True)
-    initialize_git_repository(repository)
+    repo = projects / 'clean'
+    repo.mkdir(parents=True)
+    initialize_git_repo(repo)
     database = tmp_path / 'state.db'
 
     result = main(['--database', str(database), 'enqueue-locals', str(projects)])
@@ -382,7 +555,7 @@ def test_enqueue_locals_with_no_changed_repositories_does_not_create_state(
     }
 
 
-def test_enqueue_locals_continues_after_repository_failure(
+def test_enqueue_locals_continues_after_repo_failure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Enqueue valid changes despite an unreadable sibling repository."""
@@ -392,7 +565,7 @@ def test_enqueue_locals_continues_after_repository_failure(
     fresh = projects / 'fresh'
     changed.mkdir(parents=True)
     fresh.mkdir()
-    initialize_git_repository(changed)
+    initialize_git_repo(changed)
     (changed / 'tracked.txt').write_text('changed\n')
     git = shutil.which('git')
     assert git is not None
@@ -411,7 +584,7 @@ def test_enqueue_locals_continues_after_repository_failure(
     assert document['failures'][0]['message']
 
 
-def test_enqueue_locals_fails_when_every_repository_fails(
+def test_enqueue_locals_fails_when_every_repo_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Return nonzero when no repository can be enqueued and one fails."""
@@ -508,7 +681,11 @@ def test_status_lists_persisted_run(
     assert output.startswith('{\n  "schema_version": 3,\n  "runs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
-    assert set(document['runs'][0]) == {field.name for field in fields(Run)}
+    expected_fields = {
+        'repository_path' if field.name == 'repo_path' else field.name
+        for field in fields(Run)
+    }
+    assert set(document['runs'][0]) == expected_fields
     assert document == {
         'schema_version': 3,
         'runs': [
@@ -615,12 +792,12 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
 ) -> None:
     """Persist a correlated approved review and stop at the commit gate."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
@@ -670,12 +847,12 @@ def test_run_preserves_non_utf8_reviewer_output(
 ) -> None:
     """Archive the exact bytes written by a redirected reviewer process."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
@@ -719,16 +896,16 @@ def test_worker_persists_interrupted_state(
 ) -> None:
     """Keep durable run state aligned with interrupted invocation evidence."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
     store = RunStore(database)
     store.initialize()
-    digest = _working_tree_digest(repository, 'HEAD')
+    digest = _working_tree_digest(repo, 'HEAD')
     assert digest is not None
-    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
     store.add(run)
     reviewer = tmp_path / 'reviewer.py'
     write_loop_reviewer(reviewer)
@@ -774,12 +951,12 @@ def test_run_uses_builtin_codex_adapter_by_default(
 ) -> None:
     """Select the packaged Codex adapter when no custom command is supplied."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     observed: dict[str, object] = {}
@@ -819,10 +996,10 @@ def test_run_uses_builtin_codex_adapter_by_default(
 def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
     """Keep default orchestration state outside a typical reviewed repo."""
 
-    repository = Path.home() / 'Projects/repo'
+    repo = Path.home() / 'Projects/repo'
 
     assert Path.home() / '.local/state/agent-orchestra/state.db' == DEFAULT_DATABASE
-    assert not DEFAULT_DATABASE.is_relative_to(repository)
+    assert not DEFAULT_DATABASE.is_relative_to(repo)
 
 
 def test_run_passes_explicit_reviewer_model_to_codex_adapter(
@@ -832,12 +1009,12 @@ def test_run_passes_explicit_reviewer_model_to_codex_adapter(
 ) -> None:
     """Allow callers to avoid an incompatible managed Codex model default."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     observed: dict[str, object] = {}
@@ -880,12 +1057,12 @@ def test_run_selects_claude_code_reviewer_independently(
 ) -> None:
     """Select Claude Code and its role-specific model without changing state."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     observed: dict[str, object] = {}
@@ -928,12 +1105,12 @@ def test_run_records_requested_changes(
 ) -> None:
     """Advance a rejected review to the remediation boundary."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
@@ -973,16 +1150,16 @@ def test_worker_remediates_and_reviews_new_digest(
 ) -> None:
     """Complete the same canonical loop for every runtime combination."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
     store = RunStore(database)
     store.initialize()
-    digest = _working_tree_digest(repository, 'HEAD')
+    digest = _working_tree_digest(repo, 'HEAD')
     assert digest is not None
-    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
     store.add(run)
     reviewer = tmp_path / f'{reviewer_runtime}-reviewer.py'
     developer = tmp_path / f'{developer_runtime}-developer.py'
@@ -1031,16 +1208,16 @@ def test_worker_stops_bounded_non_progress(
 ) -> None:
     """Fail durably on iteration exhaustion or a no-change handoff."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
     store = RunStore(database)
     store.initialize()
-    digest = _working_tree_digest(repository, 'HEAD')
+    digest = _working_tree_digest(repo, 'HEAD')
     assert digest is not None
-    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
     store.add(run)
     reviewer = tmp_path / 'loop-reviewer.py'
     developer = tmp_path / 'developer.py'
@@ -1072,16 +1249,16 @@ def test_worker_surfaces_developer_disagreement_for_human_decision(
 ) -> None:
     """Preserve a justified no-change disagreement without failing the run."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
     store = RunStore(database)
     store.initialize()
-    digest = _working_tree_digest(repository, 'HEAD')
+    digest = _working_tree_digest(repo, 'HEAD')
     assert digest is not None
-    run = Run.create_local(repository, repository, 'HEAD', 'HEAD', digest)
+    run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
     store.add(run)
     reviewer = tmp_path / 'reviewer.py'
     developer = tmp_path / 'developer.py'
@@ -1115,12 +1292,12 @@ def test_run_keeps_blocked_review_awaiting_resolution(
 ) -> None:
     """Persist a blocked review without inventing a terminal state."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
@@ -1156,12 +1333,12 @@ def test_run_marks_reviewer_execution_failure(
 ) -> None:
     """Persist failed state for missing and nonzero reviewer commands."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
 
@@ -1189,12 +1366,12 @@ def test_run_marks_reviewer_timeout(
 ) -> None:
     """Persist failed state when the bounded reviewer exceeds its timeout."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'slow.py'
@@ -1244,10 +1421,10 @@ def test_builtin_run_exposes_child_output_through_logs(
     """Retain built-in child streams across success, error, and timeout."""
 
     mode, timeout, expected_result, timed_out = case
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
     runs_directory = tmp_path / 'runs'
     fake_codex = tmp_path / 'bin/codex'
@@ -1259,7 +1436,7 @@ def test_builtin_run_exposes_child_output_through_logs(
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('review instructions\n')
     monkeypatch.setenv('CODEX_HOME', str(codex_home))
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
 
@@ -1308,12 +1485,12 @@ def test_run_rejects_state_database_inside_worktree(
 ) -> None:
     """Keep mutable orchestration state outside the reviewed worktree."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
-    database = repository / '.agent-orchestra/state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
+    database = repo / '.agent-orchestra/state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
 
@@ -1338,12 +1515,12 @@ def test_run_rejects_evidence_directory_inside_worktree(
 ) -> None:
     """Keep mutable review messages and artifacts outside the reviewed worktree."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
 
@@ -1356,7 +1533,7 @@ def test_run_rejects_evidence_directory_inside_worktree(
             '--objective',
             'Review the change.',
             '--runs-directory',
-            str(repository / 'runs'),
+            str(repo / 'runs'),
         ]
     )
 
@@ -1370,15 +1547,15 @@ def test_run_handles_digest_failure_before_transition(
 ) -> None:
     """Report a disappeared repo without a traceback or state mutation."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
-    shutil.rmtree(repository / '.git')
+    shutil.rmtree(repo / '.git')
 
     result = main(
         [
@@ -1403,12 +1580,12 @@ def test_run_marks_post_review_digest_failure(
 ) -> None:
     """Fail durably when Git state disappears during reviewer execution."""
 
-    repository = tmp_path / 'repo'
-    repository.mkdir()
-    initialize_git_repository(repository)
-    (repository / 'tracked.txt').write_text('changed\n')
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    assert main(['--database', str(database), 'enqueue-local', str(repository)]) == 0
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
     run = RunStore(database).list_runs()[0]
     reviewer = tmp_path / 'reviewer.py'
