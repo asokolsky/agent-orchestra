@@ -97,7 +97,7 @@ def test_logs_identifies_and_orders_separate_streams(
     captured = capsys.readouterr()
     document = json.loads(captured.out)
     assert captured.err == ''
-    assert document['schema_version'] == 3
+    assert document['schema_version'] == 4
     assert document['run_id'] == str(run.id)
     assert document['failures'] == []
     assert document['error'] is None
@@ -339,7 +339,7 @@ def test_logs_returns_json_when_database_is_missing(
     document = json.loads(captured.out)
     assert captured.err == ''
     assert document == {
-        'schema_version': 3,
+        'schema_version': 4,
         'run_id': 'unknown-run',
         'streams': [],
         'failures': [],

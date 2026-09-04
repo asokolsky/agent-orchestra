@@ -14,8 +14,15 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra import cli
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
-from agent_orchestra.cli import DEFAULT_DATABASE, _working_tree_digest, main
+from agent_orchestra.cli import (
+    DEFAULT_DATABASE,
+    DEFAULT_RUNS_DIRECTORY,
+    _working_tree_digest,
+    build_parser,
+    main,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run
 from agent_orchestra.store import RunStore
@@ -473,7 +480,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 3,
+        'schema_version': 4,
         'directory': str(projects),
         'runs': [
             {'id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -678,7 +685,11 @@ def test_status_lists_persisted_run(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 3,\n  "runs": [\n    {\n')
+    assert output.startswith(
+        '{\n  "schema_version": 4,\n'
+        f'  "runs_directory": "{DEFAULT_RUNS_DIRECTORY.expanduser().resolve()}",\n'
+        '  "runs": [\n    {\n'
+    )
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
@@ -687,7 +698,8 @@ def test_status_lists_persisted_run(
     }
     assert set(document['runs'][0]) == expected_fields
     assert document == {
-        'schema_version': 3,
+        'schema_version': 4,
+        'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [
             {
                 'id': str(run.id),
@@ -724,7 +736,7 @@ def test_status_filters_json_document_by_run_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 3
+    assert document['schema_version'] == 4
     assert [run['id'] for run in document['runs']] == [str(first.id)]
 
 
@@ -747,7 +759,7 @@ def test_status_reads_legacy_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 3
+    assert document['schema_version'] == 4
     assert document['runs'][0]['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -768,9 +780,43 @@ def test_status_lists_empty_runs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 3,
+        'schema_version': 4,
+        'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [],
     }
+
+
+def test_status_reports_resolved_default_runs_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report the canonical evidence root when its configured ancestor is a symlink."""
+
+    database = tmp_path / 'state.db'
+    RunStore(database).initialize()
+    actual_parent = tmp_path / 'actual'
+    actual_parent.mkdir()
+    linked_parent = tmp_path / 'linked'
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    monkeypatch.setattr(cli, 'DEFAULT_RUNS_DIRECTORY', linked_parent / 'runs')
+
+    result = main(['--database', str(database), 'status'])
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)['runs_directory'] == str(
+        (actual_parent / 'runs').resolve()
+    )
+
+
+def test_run_and_logs_share_default_runs_directory() -> None:
+    """Keep both evidence consumers aligned with the status contract."""
+
+    parser = build_parser()
+
+    run_args = parser.parse_args(['run', 'run-id', '--objective', 'Review.'])
+    logs_args = parser.parse_args(['logs', 'run-id'])
+
+    assert run_args.runs_directory == DEFAULT_RUNS_DIRECTORY
+    assert logs_args.runs_directory == DEFAULT_RUNS_DIRECTORY
 
 
 def test_status_reports_unknown_run(
@@ -836,7 +882,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert invocation['exit_code'] == 0
     assert invocation['timed_out'] is False
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 3,
+        'schema_version': 4,
         'run_id': str(run.id),
         'state': 'awaiting_commit_authorization',
     }

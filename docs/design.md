@@ -142,7 +142,8 @@ match its repo and worktree in the `runs` array:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "runs_directory": "/home/user/.local/state/agent-orchestra/runs",
   "runs": [
     {
       "id": "20260902T150612Z-a7f3c921",
@@ -162,6 +163,11 @@ match its repo and worktree in the `runs` array:
 }
 ```
 
+`runs_directory` is the resolved absolute default evidence root used by `run`
+and `logs` when no command-specific override is supplied. A custom
+`--runs-directory` is not persisted in the run record and therefore is not
+reported by `status`.
+
 For newly captured local changes, `repository_path` is the primary repository
 location reported by Git. This is the primary worktree for a non-bare
 repository, including one whose Git directory is stored separately, or the
@@ -172,11 +178,12 @@ capture. Existing run records are historical evidence and are not rewritten,
 so older local runs may contain the selected worktree in both fields.
 
 This CLI output is not a workflow message. The message contract begins below.
-CLI output schema version 3 changes `enqueue-locals` from plain-text rows and
-stderr diagnostics to one JSON document. Version 2 renamed `awaiting_review` to
-`reviewing`. Existing databases remain readable, and initialization rewrites the
-legacy stored value. Consumers of schema version 1 should treat the two names as
-the same lifecycle state while migrating to a current schema.
+CLI output schema version 4 adds `runs_directory` to successful `status`
+documents. Version 3 changes `enqueue-locals` from plain-text rows and stderr
+diagnostics to one JSON document. Version 2 renamed `awaiting_review` to
+`reviewing`. Existing databases remain readable, and initialization rewrites
+the legacy stored value. Consumers of schema version 1 should treat the two
+names as the same lifecycle state while migrating to a current schema.
 
 ## Batch enqueue output
 

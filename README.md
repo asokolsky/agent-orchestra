@@ -175,7 +175,8 @@ Select a run from its `runs` array. If the enqueue output is no longer
 available, run [`status`](docs/cli.md#status) and use the `id` from the matching
 repo entry. See the [batch CLI output contract](docs/cli.md#enqueue-locals) and
 [Run status output](docs/design.md#run-status-output) for recovery through
-[`status`](docs/cli.md#status).
+[`status`](docs/cli.md#status). Its `runs_directory` field identifies the
+default evidence root used by `run` and `logs`.
 
 ### 2. Run the review
 
