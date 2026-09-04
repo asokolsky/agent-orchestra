@@ -73,6 +73,7 @@ class RunState(StrEnum):
     COMMITTED = 'committed'
     AWAITING_PUBLISH_AUTHORIZATION = 'awaiting_publish_authorization'
     PUBLISHED = 'published'
+    VALIDATION_REQUIRED = 'validation_required'
     FAILED = 'failed'
     CANCELLED = 'cancelled'
     INTERRUPTED = 'interrupted'
@@ -138,6 +139,7 @@ class Run:
     diff_digest: str | None = None
     iteration: int = 0
     remote_url: str | None = None
+    supersedes_run_id: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -149,6 +151,8 @@ class Run:
         base_sha: str,
         head_sha: str,
         diff_digest: str,
+        *,
+        supersedes_run_id: str | None = None,
     ) -> Run:
         """Create a queued run for local changes."""
 
@@ -162,6 +166,7 @@ class Run:
             base_sha=base_sha,
             head_sha=head_sha,
             diff_digest=diff_digest,
+            supersedes_run_id=supersedes_run_id,
             created_at=created_at,
             updated_at=created_at,
         )

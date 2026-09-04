@@ -20,21 +20,21 @@ from agent_orchestra.invocations import (
     legacy_log_groups,
     read_records,
 )
-from agent_orchestra.models import Run
+from agent_orchestra.models import Run, RunState
 from agent_orchestra.skill_install import (
     AgentTarget,
     SkillInstallError,
     install_skills,
 )
-from agent_orchestra.store import RunNotFoundError, RunStore
-from agent_orchestra.worker import WorkerError, run_queued_review
+from agent_orchestra.store import ConcurrentUpdateError, RunNotFoundError, RunStore
+from agent_orchestra.worker import WorkerError, resume_review, run_queued_review
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 4
+CLI_SCHEMA_VERSION = 5
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -173,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
         'repo', metavar='repository', nargs='?', type=Path, default=Path.cwd()
     )
     enqueue.add_argument('--base', default='HEAD')
+    enqueue.add_argument('--supersedes', metavar='RUN_ID')
 
     enqueue_many = commands.add_parser(
         'enqueue-locals',
@@ -218,6 +219,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(reviewer_command=())
 
+    resume = commands.add_parser('resume', help='resume one recoverable run')
+    resume.add_argument('run_id')
+    resume.add_argument(
+        '--runs-directory',
+        type=Path,
+        default=DEFAULT_RUNS_DIRECTORY,
+    )
+
     skills = commands.add_parser('skills', help='manage bundled agent skills')
     skill_commands = skills.add_subparsers(dest='skill_command', required=True)
     install = skill_commands.add_parser(
@@ -245,7 +254,9 @@ def _capture_local_run(repo: Path, base: str) -> Run | None:
     return Run.create_local(repo_path, worktree_path, base_sha, head_sha, diff_digest)
 
 
-def _enqueue_local(args: argparse.Namespace, store: RunStore) -> int:
+def _enqueue_local(  # noqa: PLR0911
+    args: argparse.Namespace, store: RunStore
+) -> int:
     """Enqueue local changes described by parsed CLI arguments."""
 
     repo = args.repo.resolve()
@@ -257,6 +268,38 @@ def _enqueue_local(args: argparse.Namespace, store: RunStore) -> int:
     if run is None:
         print('error: no local changes to enqueue', file=sys.stderr)
         return 2
+    if args.supersedes is not None:
+        if not args.database.is_file():
+            print(f'error: run not found: {args.supersedes}', file=sys.stderr)
+            return 2
+        try:
+            predecessor = store.get(args.supersedes)
+        except RunNotFoundError as error:
+            print(f'error: run not found: {error}', file=sys.stderr)
+            return 2
+        if predecessor.state not in {RunState.FAILED, RunState.SUPERSEDED}:
+            print(
+                f'error: run {predecessor.id} is {predecessor.state}; resume '
+                'recoverable runs instead',
+                file=sys.stderr,
+            )
+            return 2
+        if (
+            predecessor.repo_path != run.repo_path
+            or predecessor.worktree_path != run.worktree_path
+        ):
+            print(
+                'error: superseded run belongs to a different worktree', file=sys.stderr
+            )
+            return 2
+        run = Run.create_local(
+            run.repo_path,
+            run.worktree_path,
+            run.base_sha,
+            run.head_sha,
+            run.diff_digest or '',
+            supersedes_run_id=str(predecessor.id),
+        )
     store.initialize()
     store.add(run)
     print(run.id)
@@ -286,7 +329,7 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
         )
         return 2
 
-    repositories = sorted(
+    repos = sorted(
         (
             child.resolve()
             for child in directory.iterdir()
@@ -297,7 +340,7 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
     runs: list[Run] = []
     clean_count = 0
     failures: list[dict[str, str]] = []
-    for repo in repositories:
+    for repo in repos:
         try:
             run = _capture_local_run(repo, args.base)
         except (GitCommandError, OSError) as error:
@@ -361,6 +404,7 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
                 'diff_digest': run.diff_digest,
                 'iteration': run.iteration,
                 'remote_url': run.remote_url,
+                'supersedes_run_id': run.supersedes_run_id,
                 'created_at': run.created_at.astimezone(UTC)
                 .isoformat()
                 .replace('+00:00', 'Z'),
@@ -463,10 +507,83 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
                 'schema_version': CLI_SCHEMA_VERSION,
                 'run_id': str(result.id),
                 'state': result.state,
+                'error': None,
             },
             indent=2,
         )
     )
+    return 0
+
+
+def _write_resume_document(
+    run_id: str,
+    *,
+    state: RunState | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Write one versioned resume result to standard output."""
+
+    print(
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'run_id': run_id,
+                'state': state,
+                'error': (
+                    {'code': error_code, 'message': error_message}
+                    if error_code is not None
+                    else None
+                ),
+            },
+            indent=2,
+        )
+    )
+
+
+def _resume(args: argparse.Namespace, store: RunStore) -> int:
+    """Resume a recoverable run using its durable execution context."""
+
+    if not args.database.is_file():
+        _write_resume_document(
+            args.run_id,
+            error_code='state_database_not_found',
+            error_message=f'state database not found: {args.database}',
+        )
+        return 2
+    try:
+        run = store.get(args.run_id)
+        _require_external_database(args.database, run.worktree_path)
+        result = resume_review(
+            store=store,
+            run=run,
+            runs_directory=args.runs_directory,
+            digest_worktree=_working_tree_digest,
+        )
+    except RunNotFoundError as error:
+        _write_resume_document(
+            args.run_id,
+            error_code='run_not_found',
+            error_message=f'run not found: {error}',
+        )
+        return 2
+    except ConcurrentUpdateError as error:
+        _write_resume_document(
+            args.run_id,
+            error_code='concurrent_update',
+            error_message=f'run changed concurrently: {error}',
+        )
+        return 2
+    except (OSError, WorkerError) as error:
+        message = str(error)
+        code = error.code if isinstance(error, WorkerError) else None
+        _write_resume_document(
+            args.run_id,
+            error_code=code or 'resume_evidence_invalid',
+            error_message=message,
+        )
+        return 2
+    _write_resume_document(str(result.id), state=result.state)
     return 0
 
 
@@ -477,6 +594,7 @@ def _log_stream_document(
     model: str | None,
     runtime: str | None,
     iteration: int | None,
+    attempt: int | None,
     invocation_id: str,
     stream: str,
     path: Path,
@@ -503,6 +621,7 @@ def _log_stream_document(
             'agent_model': model,
             'runtime': runtime,
             'iteration': iteration,
+            'attempt': attempt,
             'started_at': started_at,
             'finished_at': finished_at,
             'exit_code': exit_code,
@@ -608,6 +727,7 @@ def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
                         model=record.agent_model,
                         runtime=record.runtime,
                         iteration=record.iteration,
+                        attempt=record.attempt,
                         invocation_id=record.invocation_id,
                         stream=stream,
                         path=path,
@@ -648,6 +768,7 @@ def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
                         model=None,
                         runtime=None,
                         iteration=None,
+                        attempt=None,
                         invocation_id=f'legacy-{sequence}-{role}',
                         stream=stream,
                         path=path,
@@ -737,6 +858,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _logs(args, store)
     if args.command == 'run':
         return _run(args, store)
+    if args.command == 'resume':
+        return _resume(args, store)
     if args.command == 'skills' and args.skill_command == 'install':
         return _install_skills(args)
 

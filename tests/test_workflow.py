@@ -44,6 +44,20 @@ def test_developer_can_address_requested_changes() -> None:
     assert run.iteration == 2
 
 
+def test_validation_required_returns_only_to_development() -> None:
+    """Prevent a validation gap from skipping directly into review."""
+
+    run = transition(make_run(), RunState.PREPARING)
+    run = transition(run, RunState.DEVELOPING)
+    run = transition(run, RunState.VALIDATION_REQUIRED)
+
+    with pytest.raises(InvalidTransitionError):
+        transition(run, RunState.REVIEWING)
+
+    assert transition(run, RunState.DEVELOPING).state is RunState.DEVELOPING
+    assert transition(run, RunState.CANCELLED).state is RunState.CANCELLED
+
+
 def test_approval_does_not_skip_authorization_gate() -> None:
     """Reject a direct transition from approval to committed state."""
 

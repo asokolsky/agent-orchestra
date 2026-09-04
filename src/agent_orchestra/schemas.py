@@ -39,6 +39,46 @@ class StrictSchema(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
 
 
+class InvocationIdentityRecordSchema(StrictSchema):
+    """Persist the selected identity for one execution role."""
+
+    vendor: str
+    model: str | None
+    runtime: str
+
+
+class ExecutionRoleSchema(StrictSchema):
+    """Persist one role's executable configuration."""
+
+    command: list[str]
+    identity: InvocationIdentityRecordSchema
+    timeout_seconds: int = Field(gt=0)
+
+
+class ExecutionRecordSchema(StrictSchema):
+    """Strict execution context required to resume a run safely."""
+
+    schema_version: Literal[2]
+    run_id: str
+    objective: str = Field(min_length=1)
+    reviewer: ExecutionRoleSchema
+    developer: ExecutionRoleSchema
+    max_review_iterations: int = Field(gt=0)
+    created_at: str
+
+    @field_validator('created_at')
+    @classmethod
+    def validate_utc_timestamp(cls, value: str) -> str:
+        """Require an offset-aware UTC ISO timestamp."""
+
+        timestamp = datetime.fromisoformat(value)
+        if timestamp.tzinfo is None or timestamp.utcoffset() != UTC.utcoffset(
+            timestamp
+        ):
+            raise ValueError(TIMESTAMP_NOT_UTC)
+        return value
+
+
 class ReviewFindingSchema(StrictSchema):
     """Canonical structured finding returned by a reviewer."""
 
