@@ -219,6 +219,13 @@ Each message is stored as one file rather than mixed into process output:
         └── review-0001.md
 ```
 
+The tree illustrates the target end-to-end lifecycle. The six-digit filename
+prefix is the message's `sequence`. The current review-only implementation does
+not emit the initial development pair, so its first review request and result
+are `000001-review-request.json` and `000002-review-result.json`. Later
+remediation and review messages continue the same monotonically increasing
+sequence.
+
 The runs directory is outside the target worktree, so writing workflow evidence
 cannot change the diff under review.
 
@@ -247,7 +254,7 @@ Every message uses the same top-level envelope:
   "in_reply_to": null,
   "run_id": "20260902T130000Z-a7f3c921",
   "sequence": 1,
-  "iteration": 0,
+  "iteration": 1,
   "message_type": "development_assignment",
   "sender": "orchestrator",
   "recipient": "developer",
@@ -271,7 +278,7 @@ Envelope fields have these meanings:
 | `in_reply_to` | Request `message_id` answered by this message, or `null` for an initiating message. |
 | `run_id` | Persistent repo-independent UTC timestamp and random identifier. |
 | `sequence` | Monotonically increasing message number within the run. |
-| `iteration` | Review iteration; zero before the first review request. |
+| `iteration` | Positive workflow iteration. It is `1` for the initial development exchange and first review, then increases for each repeat review. |
 | `message_type` | One of the message types defined below. |
 | `sender` / `recipient` | `orchestrator`, `developer`, `reviewer`, `user`, or `provider_adapter`. |
 | `created_at` | UTC RFC 3339 timestamp. |
@@ -298,6 +305,186 @@ The flow, purpose, and payload for each message type are explicit:
 | `authorization_request` | Orchestrator to user | Request one commit or remote action. | `action`, `action_parameters`, `reason`, `expires_at` |
 | `authorization_decision` | User to orchestrator | Allow or deny the requested action. | `approved`, `action`, `decided_by`, `reason` |
 | `operation_result` | Developer or provider adapter to orchestrator | Report an authorized operation's outcome. | `action`, `status`, `identifiers`, `summary`, `errors` |
+
+### Development assignment example
+
+The target initial-development flow begins with a
+`development_assignment`. The current local-review implementation does not yet
+emit this message; it starts with the review request shown below.
+
+```json
+{
+  "schema_version": 1,
+  "message_id": "a95ee61d-cff8-4698-9764-e3f58b89042d",
+  "in_reply_to": null,
+  "run_id": "20260904T140000Z-3b5d8e21",
+  "sequence": 1,
+  "iteration": 1,
+  "message_type": "development_assignment",
+  "sender": "orchestrator",
+  "recipient": "developer",
+  "created_at": "2026-09-04T14:00:00.123456Z",
+  "scope": {
+    "worktree_path": "/Users/example/Projects/example-worktree",
+    "base_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "head_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "diff_digest": "sha256:60e068bb54036e30667689b3471e47346a7dd782fcd1104147da8b467ce3798a"
+  },
+  "payload": {
+    "objective": "Add the resolved default evidence root to successful status output.",
+    "allowed_actions": [
+      "edit_worktree"
+    ],
+    "timeout_seconds": 1800
+  }
+}
+```
+
+`in_reply_to` is `null` because this assignment initiates the development
+exchange. `iteration` is `1`, the first positive workflow iteration required by
+the canonical envelope, even though review has not started. The capability list
+permits worktree edits only; it does not authorize a commit or remote action.
+
+### Developer handoff example
+
+The developer answers the assignment with a correlated `developer_handoff`:
+
+```json
+{
+  "schema_version": 1,
+  "message_id": "3671ceff-5e48-4d56-a790-fe7bd795248a",
+  "in_reply_to": "a95ee61d-cff8-4698-9764-e3f58b89042d",
+  "run_id": "20260904T140000Z-3b5d8e21",
+  "sequence": 2,
+  "iteration": 1,
+  "message_type": "developer_handoff",
+  "sender": "developer",
+  "recipient": "orchestrator",
+  "created_at": "2026-09-04T14:08:30.654321Z",
+  "scope": {
+    "worktree_path": "/Users/example/Projects/example-worktree",
+    "base_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "head_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "diff_digest": "sha256:60e068bb54036e30667689b3471e47346a7dd782fcd1104147da8b467ce3798a"
+  },
+  "payload": {
+    "status": "ready_for_review",
+    "summary": "Status now reports the resolved default evidence root.",
+    "files_changed": [
+      "docs/cli.md",
+      "src/agent_orchestra/cli.py",
+      "tests/test_cli.py"
+    ],
+    "validation": [
+      {
+        "command": "mise run tests",
+        "outcome": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "outcome": "passed"
+      }
+    ],
+    "dispositions": [],
+    "remaining_risks": []
+  }
+}
+```
+
+The handoff's `in_reply_to` identifies the assignment. Its `run_id`,
+`iteration`, and assigned `scope` remain correlated with that request. An
+initial-development handoff has no prior review findings, so `dispositions` is
+empty. A remediation handoff instead includes exactly one disposition for every
+finding in the accepted review result.
+
+### Review request example
+
+The orchestrator persists the first review request as
+`messages/000001-review-request.json` before starting the reviewer:
+
+```json
+{
+  "schema_version": 1,
+  "message_id": "c0361bbe-23bb-43bf-9165-3dfa61de0d74",
+  "in_reply_to": null,
+  "run_id": "20260904T154448Z-59feda56",
+  "sequence": 1,
+  "iteration": 1,
+  "message_type": "review_request",
+  "sender": "orchestrator",
+  "recipient": "reviewer",
+  "created_at": "2026-09-04T15:44:59.123456Z",
+  "scope": {
+    "worktree_path": "/Users/example/Projects/example-worktree",
+    "base_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "head_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "diff_digest": "sha256:f7a13788f3fab6b87f3d61ea63b57431a2e8b47dc6b004792027fb1196f33f87"
+  },
+  "payload": {
+    "objective": "Review the exact current diff for correctness and contract compatibility.",
+    "allowed_actions": [],
+    "timeout_seconds": 1800,
+    "artifact_path": "/Users/example/.local/state/agent-orchestra/runs/20260904T154448Z-59feda56/artifacts/review-0001.md",
+    "prior_review_path": null
+  }
+}
+```
+
+`in_reply_to` is `null` because the request initiates this exchange.
+`allowed_actions` is empty because review is read-only. On a repeat review,
+`prior_review_path` identifies the preceding accepted review-result message.
+
+### Review result example
+
+After validating the reviewer response, the orchestrator persists the complete
+result as `messages/000002-review-result.json`:
+
+```json
+{
+  "schema_version": 1,
+  "message_id": "56fd1536-5ffb-45ef-b8c7-64002c5a5b34",
+  "in_reply_to": "c0361bbe-23bb-43bf-9165-3dfa61de0d74",
+  "run_id": "20260904T154448Z-59feda56",
+  "sequence": 2,
+  "iteration": 1,
+  "message_type": "review_result",
+  "sender": "reviewer",
+  "recipient": "orchestrator",
+  "created_at": "2026-09-04T15:46:12.654321Z",
+  "scope": {
+    "worktree_path": "/Users/example/Projects/example-worktree",
+    "base_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "head_sha": "565a4fc6598b1fc53053b0f952f7f4cbc369630b",
+    "diff_digest": "sha256:f7a13788f3fab6b87f3d61ea63b57431a2e8b47dc6b004792027fb1196f33f87"
+  },
+  "payload": {
+    "verdict": "changes_requested",
+    "summary": "The diff is established, but one contract defect must be corrected.",
+    "findings": [
+      {
+        "finding_id": "F-001",
+        "severity": "medium",
+        "title": "CLI schema version was not advanced",
+        "path": "src/agent_orchestra/cli.py",
+        "line": 37,
+        "explanation": "A required output field was added without changing the strict CLI schema version.",
+        "acceptance_criterion": "Advance the CLI schema version and update every affected test and documented example."
+      }
+    ],
+    "validation": [
+      "Inspected the complete tracked and untracked diff.",
+      "Ran git diff --check successfully."
+    ],
+    "verification_gaps": [],
+    "artifact_path": "/Users/example/.local/state/agent-orchestra/runs/20260904T154448Z-59feda56/artifacts/review-0001.md"
+  }
+}
+```
+
+The result's `in_reply_to` matches the request's `message_id`; its `run_id`,
+`iteration`, and complete `scope` match the request exactly. A
+`changes_requested` result contains at least one finding. An `approved` result
+uses an empty `findings` array.
 
 `allowed_actions` is an array of exact capabilities such as `edit_worktree` or
 `commit`. It is not an open-ended permission string. Commit, push, pull-request
