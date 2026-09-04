@@ -36,7 +36,8 @@ Example command output for an initialized database with no runs:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": []
 }
 ```
@@ -199,7 +200,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "directory": "/Users/example/PersonalProjects",
   "runs": [
     {
@@ -223,7 +224,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `3`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `runs` | Array | Successfully enqueued changed repos. |
 | `runs[].id` | String | New opaque [run ID](design.md#run-id-format). |
@@ -277,7 +278,8 @@ Example output:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": [
     {
       "id": "20260902T150612Z-a7f3c921",
@@ -299,7 +301,8 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `3`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
+| `runs_directory` | String | Resolved absolute default evidence root used by `run` and `logs` when `--runs-directory` is omitted. |
 | `runs` | Array | Zero or more complete run objects. |
 | `runs[].id` | String | Permanent opaque [run ID](design.md#run-id-format). |
 | `runs[].scenario` | String | Workflow entry point: currently `local_changes` or `pull_request`. |
@@ -318,6 +321,10 @@ This output is CLI state, not a canonical workflow message. Consumers must
 check `schema_version`, treat run IDs as opaque strings, and tolerate multiple
 items when no ID is supplied. The same contract is summarized in
 [Run status output](design.md#run-status-output).
+
+`runs_directory` reports the current default. It does not identify a custom
+evidence root previously supplied to `run` with `--runs-directory` because that
+override is not stored in the run record.
 
 `status` is read-only and does not initialize or migrate state. A missing
 database returns `state database not found: PATH`; an unknown run returns
@@ -386,7 +393,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "run_id": "20260903T194500Z-a7f3c921",
   "streams": [
     {
@@ -431,7 +438,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `3`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
 | `run_id` | String | Requested opaque [run ID](design.md#run-id-format). |
 | `streams` | Array | Selected, available stream entries. |
 | `streams[].invocation_id` | String | Invocation record ID, or a stable filename-derived ID for legacy evidence. |
@@ -529,7 +536,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization"
 }
@@ -537,7 +544,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `3`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `4`. |
 | `run_id` | String | Permanent opaque [run ID](design.md#run-id-format). |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 
@@ -575,7 +582,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested"
 }

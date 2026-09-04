@@ -33,7 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
-CLI_SCHEMA_VERSION = 3
+DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
+CLI_SCHEMA_VERSION = 4
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -193,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument(
         '--runs-directory',
         type=Path,
-        default=Path('~/.local/state/agent-orchestra/runs'),
+        default=DEFAULT_RUNS_DIRECTORY,
     )
 
     run = commands.add_parser('run', help='run a bounded review-remediation loop')
@@ -213,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         '--runs-directory',
         type=Path,
-        default=Path('~/.local/state/agent-orchestra/runs'),
+        default=DEFAULT_RUNS_DIRECTORY,
     )
     run.set_defaults(reviewer_command=())
 
@@ -347,6 +348,7 @@ def _status(args: argparse.Namespace, store: RunStore) -> int:
         return 2
     document = {
         'schema_version': CLI_SCHEMA_VERSION,
+        'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [
             {
                 'id': str(run.id),
