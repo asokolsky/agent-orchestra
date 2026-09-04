@@ -197,40 +197,50 @@ def test_claude_developer_confines_writes_to_primary_working_directory(
 
 
 @pytest.mark.skipif(shutil.which('claude') is None, reason='claude is not installed')
-def test_claude_cli_accepts_isolated_empty_mcp_configuration() -> None:
-    """Validate critical isolation flags against the installed Claude CLI."""
+def test_claude_cli_accepts_isolation_options() -> None:
+    """Validate isolation options through a non-interactive Claude session."""
 
     executable = shutil.which('claude')
     assert executable is not None
-    completed = subprocess.run(
-        [
-            executable,
-            '--mcp-config',
-            '{"mcpServers":{}}',
-            '--strict-mcp-config',
-            '--setting-sources',
-            '',
-            '--settings',
-            json.dumps(
-                {
-                    'sandbox': {
-                        'enabled': True,
-                        'failIfUnavailable': True,
-                        'allowUnsandboxedCommands': False,
-                    }
-                }
-            ),
-            'mcp',
-            'list',
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
 
-    assert completed.returncode == 0, completed.stderr
-    assert 'No MCP servers configured' in completed.stdout
+    def invoke(mcp_configuration: str) -> subprocess.CompletedProcess[str]:
+        """Start a session for configuration validation."""
+
+        return subprocess.run(
+            [
+                executable,
+                '--print',
+                '--no-session-persistence',
+                '--setting-sources',
+                '',
+                '--settings',
+                json.dumps(
+                    {
+                        'sandbox': {
+                            'enabled': True,
+                            'failIfUnavailable': True,
+                            'allowUnsandboxedCommands': False,
+                        }
+                    }
+                ),
+                '--strict-mcp-config',
+                '--mcp-config',
+                mcp_configuration,
+            ],
+            check=False,
+            capture_output=True,
+            input='Reply with OK.',
+            text=True,
+            timeout=30,
+        )
+
+    valid = invoke('{"mcpServers":{}}')
+    valid_output = valid.stdout + valid.stderr
+    assert 'Invalid MCP configuration' not in valid_output
+
+    invalid = invoke('{}')
+    invalid_output = invalid.stdout + invalid.stderr
+    assert 'Invalid MCP configuration' in invalid_output
 
 
 @pytest.mark.parametrize('runtime', ['codex', 'claude-code'])

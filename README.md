@@ -20,6 +20,14 @@ See [Roles, runtimes, adapters, and capabilities](docs/concepts.md) for the
 canonical definitions. See the [CLI reference](docs/cli.md) for every command,
 option, default, output, and exit behavior.
 
+## Toolchain
+
+The project targets Python 3.14 and requires Git 2.36 or newer for
+NUL-delimited worktree metadata. `mise` installs `uv` and provides the routine
+project tasks. `uv` manages the virtual environment and dependencies, runs the
+Python tools, and builds the source and wheel distributions. Ruff provides
+formatting and linting, mypy checks types, and pytest runs the test suite.
+
 ## Supported scenarios
 
 - In the [local development and review workflow](docs/workflows.md#local-development-and-review),
@@ -295,10 +303,12 @@ provider integration, and authorization commands remain subsequent increments.
 
 ## Development
 
-The project uses Python 3.14, uv, Ruff, mypy, pytest, and mise.
+Install the toolchain, synchronize the development dependencies, and run the
+standard gates:
 
 ```shell
-uv sync
+mise install
+uv sync --group dev
 mise run format
 mise run lint
 mise run mypy

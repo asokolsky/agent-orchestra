@@ -131,7 +131,7 @@ class RunStore:
                 """,
                 (
                     run.scenario,
-                    str(run.repository_path),
+                    str(run.repo_path),
                     str(run.worktree_path),
                     run.state,
                     run.base_sha,
@@ -173,7 +173,7 @@ class RunStore:
         return (
             str(run.id),
             run.scenario,
-            str(run.repository_path),
+            str(run.repo_path),
             str(run.worktree_path),
             run.state,
             run.base_sha,
@@ -192,7 +192,7 @@ class RunStore:
         return Run(
             id=row['id'],
             scenario=ScenarioType(row['scenario']),
-            repository_path=Path(row['repository_path']),
+            repo_path=Path(row['repository_path']),
             worktree_path=Path(row['worktree_path']),
             state=(
                 RunState.REVIEWING

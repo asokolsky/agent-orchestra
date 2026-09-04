@@ -130,7 +130,7 @@ class Run:
 
     id: str
     scenario: ScenarioType
-    repository_path: Path
+    repo_path: Path
     worktree_path: Path
     state: RunState
     base_sha: str
@@ -144,7 +144,7 @@ class Run:
     @classmethod
     def create_local(
         cls,
-        repository_path: Path,
+        repo_path: Path,
         worktree_path: Path,
         base_sha: str,
         head_sha: str,
@@ -156,7 +156,7 @@ class Run:
         return cls(
             id=create_run_id(created_at),
             scenario=ScenarioType.LOCAL_CHANGES,
-            repository_path=repository_path.resolve(),
+            repo_path=repo_path.resolve(),
             worktree_path=worktree_path.resolve(),
             state=RunState.QUEUED,
             base_sha=base_sha,

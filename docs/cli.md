@@ -88,13 +88,20 @@ agent-orchestra [--database DATABASE] enqueue-local [--base BASE] [REPOSITORY]
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `REPOSITORY` | Current directory | Git worktree whose changes are captured. |
+| `REPOSITORY` | Current directory | Git worktree, or any directory inside it, whose changes are captured. |
 | `--base BASE` | `HEAD` | Git revision used as the base of the captured diff. |
 
-The command resolves the base and current `HEAD`, then hashes the binary tracked
-diff plus sorted untracked file paths, executable bits, symlink targets, and
-contents. Ignored files are excluded. A successful enqueue prints only the new
-[run ID](design.md#run-id-format), making command substitution safe:
+The command resolves the selected worktree root and its primary Git registry
+entry. It stores that main location as `repository_path` and the selected
+checkout as `worktree_path`. These paths are equal when the selected checkout is
+the primary worktree. A linked worktree backed by a bare repository uses that
+bare path. A non-bare primary worktree retains its worktree path as
+`repository_path` when its Git directory is stored separately. The command then
+resolves the base and current `HEAD` at the worktree root and captures the
+complete worktree even when `REPOSITORY` names a subdirectory. It hashes the
+binary tracked diff plus sorted untracked file paths, executable bits, symlink
+targets, and contents. Ignored files are excluded. A successful enqueue prints
+only the new [run ID](design.md#run-id-format), making command substitution safe:
 
 ```text
 20260903T194500Z-a7f3c921
@@ -238,8 +245,8 @@ versioned JSON:
 | `runs` | Array | Zero or more complete run objects. |
 | `runs[].id` | String | Permanent opaque [run ID](design.md#run-id-format). |
 | `runs[].scenario` | String | Workflow entry point: currently `local_changes` or `pull_request`. |
-| `runs[].repository_path` | String | Absolute path identifying the repo. |
-| `runs[].worktree_path` | String | Absolute path to the run's assigned worktree. |
+| `runs[].repository_path` | String | Absolute primary repository location reported by Git: the primary worktree for a non-bare repository, including one with a separate Git directory, or the backing bare repository path. Historical local runs may contain their selected worktree here. |
+| `runs[].worktree_path` | String | Absolute path to the exact worktree captured for and assigned to the run. |
 | `runs[].state` | String | Current durable [lifecycle state](design.md#lifecycle). |
 | `runs[].base_sha` | String | Git commit used as the diff base. |
 | `runs[].head_sha` | String | Captured Git `HEAD` commit. It may equal `base_sha` for uncommitted local changes. |
