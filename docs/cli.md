@@ -22,6 +22,25 @@ agent-orchestra COMMAND [OPTIONS]
 Both forms accept the same arguments. Examples below use the installed entry
 point for brevity.
 
+Examples:
+
+```shell
+# Run from a source checkout.
+mise agent-orchestra -- status
+
+# Run an installed entry point.
+agent-orchestra status
+```
+
+Example command output for an initialized database with no runs:
+
+```json
+{
+  "schema_version": 3,
+  "runs": []
+}
+```
+
 ## Global options
 
 ```text
@@ -37,13 +56,20 @@ agent-orchestra [-h] [--version] [--database DATABASE] COMMAND
 Mutable state must remain outside any target worktree. Commands that read an
 existing run do not initialize a missing database.
 
-Show the version from the repo through mise:
+Examples:
 
 ```shell
+# Show global help.
+agent-orchestra --help
+
+# Show the version from the repo through mise.
 mise agent-orchestra -- --version
+
+# Query a non-default state database. Global options precede the command.
+agent-orchestra --database /var/tmp/orchestra/state.db status
 ```
 
-For version `0.1.0`, the command prints:
+Example output from `--version` for version `0.1.0`:
 
 ```text
 agent-orchestra 0.1.0
@@ -63,15 +89,22 @@ agent-orchestra [--database DATABASE] init
 
 The command is idempotent. It creates missing tables and applies supported
 state-name migrations. On success it writes one plain-text line to stdout and
-exits 0:
+exits 0.
 
-```text
-initialized /home/user/.local/state/agent-orchestra/state.db
-```
+Examples:
 
 ```shell
+# Initialize the default database.
 agent-orchestra init
+
+# Initialize an explicitly selected database.
 agent-orchestra --database /var/tmp/orchestra/state.db init
+```
+
+Example output from the second command:
+
+```text
+initialized /var/tmp/orchestra/state.db
 ```
 
 The displayed path is the selected `--database` value. Initialization does not
@@ -101,16 +134,30 @@ resolves the base and current `HEAD` at the worktree root and captures the
 complete worktree even when `REPOSITORY` names a subdirectory. It hashes the
 binary tracked diff plus sorted untracked file paths, executable bits, symlink
 targets, and contents. Ignored files are excluded. A successful enqueue prints
-only the new [run ID](design.md#run-id-format), making command substitution safe:
+only the new [run ID](design.md#run-id-format), making command substitution safe.
+
+Examples:
+
+```shell
+# Capture the current worktree relative to HEAD.
+export RUN_ID="$(agent-orchestra enqueue-local)"
+
+# Capture a specific worktree relative to origin/main.
+export RUN_ID="$(agent-orchestra enqueue-local --base origin/main /path/to/repo)"
+
+# Use the returned run ID in a later command.
+printf '%s\n' "$RUN_ID"
+```
+
+Example output from `printf`:
 
 ```text
 20260903T194500Z-a7f3c921
 ```
 
-```shell
-export RUN_ID="$(agent-orchestra enqueue-local /path/to/repo)"
-printf '%s\n' "$RUN_ID"
-```
+`enqueue-local` writes that value to stdout. Command substitution stores it in
+`RUN_ID`; `printf` displays the stored value. Subsequent `status`, `logs`, and
+`run` examples consume the same variable.
 
 Success writes the run ID to stdout and exits 0. The identifier is plain text,
 not JSON. The command exits 2 when the path is not a usable Git worktree, the
@@ -135,11 +182,20 @@ An immediate child qualifies when it is a directory containing either a `.git`
 directory or a `.git` file, so linked worktrees are supported. Repos are sorted
 by basename. Clean repos and non-repos are skipped.
 
-The command writes one versioned JSON document to stdout:
+The command writes one versioned JSON document to stdout.
+
+Examples:
 
 ```shell
+# Enqueue changed immediate children and retain the complete result.
 agent-orchestra enqueue-locals ~/PersonalProjects
+
+# Select all created run IDs for further processing.
+agent-orchestra enqueue-locals ~/PersonalProjects \
+  | jq -r '.runs[].id'
 ```
+
+Example output from the first command:
 
 ```json
 {
@@ -217,6 +273,8 @@ one, it returns every run from newest to oldest. A database containing no runs
 returns an empty `runs` array. Successful output is deterministic, indented,
 versioned JSON:
 
+Example output:
+
 ```json
 {
   "schema_version": 3,
@@ -267,9 +325,17 @@ database returns `state database not found: PATH`; an unknown run returns
 and write nothing to stdout. Successful queries write only the JSON document to
 stdout and exit 0.
 
+Examples:
+
 ```shell
+# List every stored run from newest to oldest.
 agent-orchestra status
+
+# Query one run.
 agent-orchestra status "$RUN_ID"
+
+# Extract the durable state for one run.
+agent-orchestra status "$RUN_ID" | jq -r '.runs[0].state'
 ```
 
 ## `logs`
@@ -294,16 +360,29 @@ is a separate entry containing its invocation identity, role, agent, runtime,
 iteration, timing, process outcome, resolved path, and complete content. Empty
 streams are included with an empty `content` string.
 
+Examples:
+
 ```shell
+# Show every available stream for the run.
 agent-orchestra logs "$RUN_ID"
+
+# Show reviewer stderr from iteration 2.
 agent-orchestra logs "$RUN_ID" \
   --iteration 2 --role reviewer --stream stderr
+
+# Select one Claude Code invocation.
 agent-orchestra logs "$RUN_ID" \
   --runtime claude-code --invocation INVOCATION_ID
+
+# Print only the content of matching log streams.
+agent-orchestra logs "$RUN_ID" --role reviewer \
+  | jq -r '.streams[].content'
 ```
 
 For example, a successful reviewer invocation with stdout and an empty stderr
 stream returns:
+
+Example output:
 
 ```json
 {
@@ -426,21 +505,27 @@ The command verifies the current diff digest before review, after every
 read-only review, and after remediation. Approval stops at
 `awaiting_commit_authorization`; this command never commits or publishes work.
 
+Examples:
+
 ```shell
+# Use the default Codex developer and reviewer adapters.
 agent-orchestra run "$RUN_ID" \
   --objective "Review the queued implementation"
 
+# Select adapters, models, and the iteration bound explicitly.
 agent-orchestra run "$RUN_ID" \
   --objective "Review and remediate the queued implementation" \
   --developer-agent claude-code \
   --developer-model sonnet \
   --reviewer-agent codex \
-  --reviewer-model MODEL \
+  --reviewer-model gpt-5.6 \
   --max-iterations 4
 ```
 
 When orchestration completes without a command-level failure, `run` writes one
 versioned JSON document to stdout:
+
+Example output:
 
 ```json
 {
@@ -478,10 +563,22 @@ model the runtime or remote service selected.
 
 Append `-- COMMAND [ARGUMENT ...]` to replace the built-in reviewer adapter:
 
+Example:
+
 ```shell
 agent-orchestra run "$RUN_ID" \
   --objective "Review the queued implementation" \
   -- /absolute/path/to/reviewer --flag
+```
+
+Example output when the custom reviewer requests changes:
+
+```json
+{
+  "schema_version": 3,
+  "run_id": "20260903T194500Z-a7f3c921",
+  "state": "changes_requested"
+}
 ```
 
 Agent Orchestra appends the review request and response JSON paths to the custom
@@ -500,6 +597,26 @@ agent-orchestra skills SUBCOMMAND
 
 The only current subcommand is `install`.
 
+Example:
+
+```shell
+# List the available skills subcommands.
+agent-orchestra skills --help
+```
+
+Example output:
+
+```text
+usage: agent-orchestra skills [-h] {install} ...
+
+positional arguments:
+  {install}
+    install   install skills for supported local agent runtimes
+
+options:
+  -h, --help  show this help message and exit
+```
+
 ### `skills install`
 
 Install one or more bundled skills for supported local agent runtimes:
@@ -516,11 +633,15 @@ agent-orchestra skills install --skill SKILL [--skill SKILL ...] [OPTIONS]
 | `--codex-home CODEX_HOME` | `$CODEX_HOME`, otherwise `~/.codex` | Override the Codex configuration root. |
 | `--claude-home CLAUDE_HOME` | `$CLAUDE_CONFIG_DIR`, otherwise `~/.claude` | Override the Claude Code configuration root. |
 
+Examples:
+
 ```shell
+# Install both bundled skills for Codex and Claude Code.
 agent-orchestra skills install \
   --skill agent-orchestra-developer \
   --skill agent-orchestra-reviewer
 
+# Install only the reviewer skill into an alternate Codex home.
 agent-orchestra skills install \
   --agent codex \
   --skill agent-orchestra-reviewer \
@@ -534,6 +655,8 @@ Node.js, npm, or `npx`.
 
 Each requested skill-target pair produces one plain-text stdout line in
 deterministic target order and then skill request order:
+
+Example output from the first command:
 
 ```text
 installed agent-orchestra-developer for codex: /home/user/.codex/skills/agent-orchestra-developer
@@ -555,6 +678,23 @@ destination is changed.
 |---|---|
 | `0` | The command completed successfully. A workflow may still be waiting for review, remediation, or authorization; inspect its returned state. |
 | `2` | Arguments, local state, Git state, evidence, runtime execution, or protocol validation prevented completion. The command-specific sections state whether the diagnostic is JSON on stdout or plain text on stderr. |
+
+Example:
+
+```shell
+if agent-orchestra status "$RUN_ID" >run-status.json; then
+  jq -r '.runs[0].state' run-status.json
+else
+  status=$?
+  printf 'status command failed with exit code %s\n' "$status" >&2
+fi
+```
+
+Example output when the run is queued:
+
+```text
+queued
+```
 
 Argument parsing may use argparse's standard nonzero exit behavior for invalid
 syntax. Commands never treat a successful process exit alone as authorization
