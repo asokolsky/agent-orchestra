@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import os
 import subprocess
 from typing import TYPE_CHECKING, Any
 
@@ -117,6 +118,37 @@ def test_fetch_reports_unconfigured_self_managed_gitlab_host(
 
     with pytest.raises(IssueSourceError, match='gitlab_host_not_configured'):
         fetch_issue('https://gitlab.example.test/acme/widgets/-/issues/7')
+
+
+@pytest.mark.parametrize(
+    ('diagnostic', 'expected_code'),
+    [
+        ('gh: authentication required (HTTP 401)', 'provider_authentication_required'),
+        ('gh: Not Found (HTTP 404)', 'issue_not_found'),
+        ('gh: Forbidden (HTTP 403)', 'issue_inaccessible'),
+        ('provider failed; see the login URL in docs', 'issue_lookup_failed'),
+    ],
+)
+def test_fetch_classifies_fake_github_cli_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostic: str,
+    expected_code: str,
+) -> None:
+    """Pin stable failure codes at the provider-process boundary."""
+
+    executable = tmp_path / 'gh'
+    executable.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "{diagnostic}" >&2\nexit 1\n',
+        encoding='utf-8',
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv('PATH', f'{tmp_path}{os.pathsep}{os.environ.get("PATH", "")}')
+
+    with pytest.raises(IssueSourceError) as raised:
+        fetch_issue('https://github.com/acme/widgets/issues/12')
+
+    assert raised.value.code == expected_code
 
 
 def _completed(document: dict[str, Any]) -> subprocess.CompletedProcess[str]:

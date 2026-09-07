@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
@@ -206,12 +207,22 @@ def _run(command: Sequence[str]) -> dict[str, Any]:
         diagnostic = completed.stderr.strip() or 'issue lookup failed'
         lowered = diagnostic.lower()
         code = (
-            'provider_authentication_required'
-            if any(token in lowered for token in ('401', 'authenticate', 'login'))
-            else 'issue_not_found'
-            if '404' in lowered or 'not found' in lowered
+            'issue_not_found'
+            if re.search(r'\b404\b', lowered) or 'not found' in lowered
             else 'issue_inaccessible'
-            if '403' in lowered or 'forbidden' in lowered
+            if re.search(r'\b403\b', lowered) or 'forbidden' in lowered
+            else 'provider_authentication_required'
+            if re.search(r'\b401\b', lowered)
+            or any(
+                phrase in lowered
+                for phrase in (
+                    'authentication required',
+                    'not authenticated',
+                    'not logged in',
+                    'gh auth login',
+                    'glab auth login',
+                )
+            )
             else 'issue_lookup_failed'
         )
         _fail(code, diagnostic=diagnostic)
