@@ -30,17 +30,26 @@ formatting and linting, mypy checks types, and pytest runs the test suite.
 
 ## Supported scenarios
 
-- In the [local development and review workflow](docs/workflows.md#local-development-and-review),
-  before a development agent commits its work, a reviewer agent reviews the
-  diff and hands structured feedback back to the developer. The cycle repeats
-  until the review is approved, after which the workflow may request permission
-  to commit and open a pull request.
-- The [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
-  begins from a pull-request URL and reviews one exact remote head.
+- The implemented [local development and review workflow](docs/workflows.md#local-development-and-review)
+  captures an existing uncommitted diff as a job, dispatches an independent
+  reviewer, sends structured findings to a developer for remediation, and
+  repeats review against each new diff digest. Codex and Claude Code can be
+  selected independently for either role. Interrupted and validation-required
+  jobs can resume from durable task and attempt evidence. Approval stops at the
+  commit-authorization boundary; committing and publishing remain separate
+  user-authorized actions.
+- The issue-refinement workflow reviews a newly filed issue before development
+  begins. A reviewer checks that its problem statement, scope, constraints,
+  risks, and acceptance criteria are clear and testable, then communicates
+  actionable feedback to the author. The issue can be revised and reviewed
+  again until it is ready for implementation. This is currently a collaborative
+  review workflow rather than an automated CLI job.
+- The designed [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
+  starts from a pull-request URL and reviews one exact remote head. Remote
+  pull-request enqueueing and provider-side review actions are not implemented.
 
-The local cycle is partially implemented. Remote pull-request enqueueing is not
-implemented yet. The [design and message contract](docs/design.md) defines the
-shared protocol.
+The [design and message contract](docs/design.md) defines the shared protocol
+and the [CLI reference](docs/cli.md) documents the implemented commands.
 
 ## Development and review cycle
 
