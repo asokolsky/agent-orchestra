@@ -20,6 +20,7 @@ from agent_orchestra.invocations import (
     TaskStatus,
     derive_task_status,
     read_records,
+    recover_completed_invocation_evidence,
     recovery_action,
     transition_attempt,
     validate_attempt_record,
@@ -569,3 +570,68 @@ def test_persisted_milestones_are_immutable(
     changed = replace(running, **cast('Any', {field: changed_value}))
     with pytest.raises(InvocationEvidenceError, match='immutable once set'):
         write_record(path, changed)
+
+
+def test_completed_recovery_preserves_original_stream_digest(tmp_path: Path) -> None:
+    """Never bless changed completed evidence while filling missing entries."""
+
+    run = tmp_path / 'run'
+    logs = run / 'logs'
+    invocations = run / 'invocations'
+    logs.mkdir(parents=True)
+    invocations.mkdir()
+    stdout = logs / '000001-reviewer.stdout.log'
+    stderr = logs / '000001-reviewer.stderr.log'
+    stdout.write_text('original')
+    stderr.write_text('stderr')
+    pending = replace(
+        pending_attempt(), stdout_path=str(stdout), stderr_path=str(stderr)
+    )
+    running = transition_attempt(pending, AttemptStatus.RUNNING)
+    completed = transition_attempt(
+        running,
+        AttemptStatus.COMPLETED,
+        conclusion=AttemptConclusion.FAILED,
+        finished_at='2026-09-07T10:01:00Z',
+    )
+    manifest = invocations / '000001-reviewer.json'
+    for record in (pending, running, completed):
+        write_record(manifest, record, evidence_root=tmp_path, job_id='run')
+    recover_completed_invocation_evidence(run, 'run')
+    before = json.loads((run / '.integrity.json').read_text())
+    stdout.write_text('changed')
+
+    recover_completed_invocation_evidence(run, 'run')
+
+    after = json.loads((run / '.integrity.json').read_text())
+    assert after == before
+
+
+def test_completed_recovery_rejects_miscorrelated_stream_name(tmp_path: Path) -> None:
+    """Reject a valid record that assigns another contained file as a stream."""
+
+    run = tmp_path / 'run'
+    logs = run / 'logs'
+    invocations = run / 'invocations'
+    logs.mkdir(parents=True)
+    invocations.mkdir()
+    wrong = run / 'execution.json'
+    wrong.write_text('{}')
+    stderr = logs / '000001-reviewer.stderr.log'
+    stderr.write_text('stderr')
+    pending = replace(
+        pending_attempt(), stdout_path=str(wrong), stderr_path=str(stderr)
+    )
+    running = transition_attempt(pending, AttemptStatus.RUNNING)
+    completed = transition_attempt(
+        running,
+        AttemptStatus.COMPLETED,
+        conclusion=AttemptConclusion.FAILED,
+        finished_at='2026-09-07T10:01:00Z',
+    )
+    manifest = invocations / '000001-reviewer.json'
+    for record in (pending, running, completed):
+        write_record(manifest, record)
+
+    with pytest.raises(InvocationEvidenceError, match='evidence filenames'):
+        recover_completed_invocation_evidence(run, 'run')

@@ -1122,6 +1122,17 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert invocation['runtime'] == 'custom-command'
     assert invocation['exit_code'] == 0
     assert invocation['timed_out'] is False
+    integrity = json.loads((run_directory / '.integrity.json').read_text())
+    indexed_paths = {entry['path'] for entry in integrity['entries']}
+    assert {
+        'execution.json',
+        'messages/000001-review-request.json',
+        'messages/000002-review-result.json',
+        'artifacts/review-0001.md',
+        'invocations/000001-reviewer.json',
+        'logs/000001-reviewer.stdout.log',
+        'logs/000001-reviewer.stderr.log',
+    } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 9,
         'job_id': str(enqueued_run.run.id),
@@ -1999,7 +2010,9 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
     add_execution_counter(reviewer, counter)
     original_write_record = write_record
 
-    def fail_validation_record(path: Path, record: InvocationRecord) -> None:
+    def fail_validation_record(
+        path: Path, record: InvocationRecord, **kwargs: Any
+    ) -> None:
         """Simulate a crash before the reviewer validation milestone is durable."""
 
         if (
@@ -2009,7 +2022,7 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
         ):
             message = 'simulated validation milestone failure'
             raise OSError(message)
-        original_write_record(path, record)
+        original_write_record(path, record, **kwargs)
 
     monkeypatch.setattr(worker, 'write_record', fail_validation_record)
     with pytest.raises(OSError, match='simulated validation milestone failure'):
@@ -2407,7 +2420,9 @@ def test_resume_revalidates_developer_response_without_relaunching(
     add_execution_counter(developer, counter)
     original_write_record = write_record
 
-    def fail_validation_record(path: Path, record: InvocationRecord) -> None:
+    def fail_validation_record(
+        path: Path, record: InvocationRecord, **kwargs: Any
+    ) -> None:
         """Simulate a crash before the developer validation milestone is durable."""
 
         if (
@@ -2417,7 +2432,7 @@ def test_resume_revalidates_developer_response_without_relaunching(
         ):
             message = 'simulated developer validation milestone failure'
             raise OSError(message)
-        original_write_record(path, record)
+        original_write_record(path, record, **kwargs)
 
     monkeypatch.setattr(worker, 'write_record', fail_validation_record)
     with pytest.raises(

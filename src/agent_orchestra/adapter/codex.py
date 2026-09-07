@@ -32,6 +32,7 @@ from agent_orchestra.adapter.issue_reviewer import (
     issue_review_prompt,
 )
 from agent_orchestra.adapter.process import run_streaming_process
+from agent_orchestra.evidence import finalize_evidence_write
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
@@ -83,7 +84,13 @@ def _read_object(path: Path) -> dict[str, Any]:
     return document
 
 
-def _write_text_atomic(path: Path, content: str) -> None:
+def _write_text_atomic(
+    path: Path,
+    content: str,
+    *,
+    job_directory: Path | None = None,
+    evidence_type: str | None = None,
+) -> None:
     """Write UTF-8 text atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +100,16 @@ def _write_text_atomic(path: Path, content: str) -> None:
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        temporary.replace(path)
+        if job_directory is None:
+            temporary.replace(path)
+        else:
+            finalize_evidence_write(
+                job_directory.parent,
+                job_directory.name,
+                temporary,
+                path,
+                evidence_type or path.stem,
+            )
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -279,7 +295,12 @@ def _execute_codex_reviewer(
         result = _read_object(result_path)
 
     _validate_result(result)
-    _write_text_atomic(artifact_path, render_review(_review(request, result)))
+    _write_text_atomic(
+        artifact_path,
+        render_review(_review(request, result)),
+        job_directory=request_path.parent.parent,
+        evidence_type='review_artifact',
+    )
     response = {
         'schema_version': 1,
         'message_id': str(uuid4()),

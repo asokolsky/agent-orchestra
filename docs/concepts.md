@@ -207,6 +207,12 @@ or result.
 Markdown is a human-readable artifact. Agent stdout and stderr are execution
 logs. Neither is parsed to reconstruct workflow state.
 
+Finalized external evidence is correlated through a per-job integrity index.
+The index records job-relative paths, types, sizes, byte digests, and
+finalization times; it supplements rather than replaces canonical JSON or
+SQLite state. Process streams become final only after their invocation process
+has completed.
+
 Each external process has adapter-neutral attempt evidence. It identifies
 the role, agent vendor, optional requested model override, effective models
 reported through stable runtime metadata, runtime, iteration, attempt,

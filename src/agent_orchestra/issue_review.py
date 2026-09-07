@@ -18,12 +18,20 @@ from agent_orchestra.adapter.base import IssueReviewExecution
 from agent_orchestra.adapter.claude_code import ClaudeCodeIssueReviewerAdapter
 from agent_orchestra.adapter.codex import CodexIssueReviewerAdapter
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.evidence import (
+    EvidencePathError,
+    finalize_evidence_write,
+    record_finalized_evidence,
+    recover_evidence_index,
+    resolve_evidence_path,
+)
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
     InvocationEvidenceError,
     InvocationRecord,
     read_records,
+    recover_completed_invocation_evidence,
     timestamp,
     transition_attempt,
     write_record,
@@ -57,7 +65,7 @@ def _reject(message: str) -> Never:
     raise IssueReviewError(message)
 
 
-def _write_json(path: Path, document: dict[str, Any]) -> None:
+def _write_json(job_directory: Path, path: Path, document: dict[str, Any]) -> None:
     """Write a JSON object atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -68,12 +76,16 @@ def _write_json(path: Path, document: dict[str, Any]) -> None:
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        temporary.replace(path)
+        finalize_evidence_write(
+            job_directory.parent, job_directory.name, temporary, path, path.stem
+        )
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _write_text(path: Path, content: str) -> None:
+def _write_text(
+    job_directory: Path, path: Path, content: str, *, finalized: bool = False
+) -> None:
     """Write UTF-8 text atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,25 +95,47 @@ def _write_text(path: Path, content: str) -> None:
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        temporary.replace(path)
+        if finalized:
+            finalize_evidence_write(
+                job_directory.parent,
+                job_directory.name,
+                temporary,
+                path,
+                path.parent.name,
+            )
+        else:
+            temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _evidence_path(root: Path, *parts: str) -> Path:
-    """Return a contained evidence path with no symlinked path component."""
+def _evidence_path(job_directory: Path, *parts: str) -> Path:
+    """Resolve one path through the shared job evidence boundary."""
 
-    candidate = root.joinpath(*parts)
-    current = root
-    for part in candidate.relative_to(root).parts:
-        current /= part
-        if current.is_symlink():
-            message = f'evidence path contains a symlink: {current}'
-            raise IssueReviewError(message)
-    if not candidate.resolve().is_relative_to(root):
-        message = 'evidence path escapes the runs directory'
-        raise IssueReviewError(message)
-    return candidate
+    try:
+        return resolve_evidence_path(job_directory.parent, job_directory.name, *parts)
+    except EvidencePathError as error:
+        raise IssueReviewError(str(error)) from error
+
+
+def _job_directory(root: Path, job_id: str) -> Path:
+    """Resolve one issue job while preserving its public error surface."""
+
+    try:
+        return resolve_evidence_path(root, job_id)
+    except EvidencePathError as error:
+        raise IssueReviewError(str(error)) from error
+
+
+def _record_finalized_path(job_directory: Path, path: Path, evidence_type: str) -> None:
+    """Record a finalized issue-review artifact in its owning job index."""
+
+    record_finalized_evidence(
+        job_directory.parent,
+        job_directory.name,
+        path,
+        evidence_type,
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -223,8 +257,8 @@ def _start_invocation(
     stem = f'{iteration:06d}-issue-reviewer-attempt-{attempt:04d}'
     stdout_path = _evidence_path(job_directory, 'logs', f'{stem}.stdout.log')
     stderr_path = _evidence_path(job_directory, 'logs', f'{stem}.stderr.log')
-    _write_text(stdout_path, '')
-    _write_text(stderr_path, '')
+    _write_text(job_directory, stdout_path, '')
+    _write_text(job_directory, stderr_path, '')
     task_id = f'{job.id}:{iteration:06d}-issue_reviewer'
     pending = InvocationRecord(
         schema_version=4,
@@ -256,13 +290,24 @@ def _start_invocation(
         conclusion=None,
     )
     record_path = _evidence_path(job_directory, 'invocations', f'{stem}.json')
-    write_record(record_path, pending)
+    write_record(
+        record_path,
+        pending,
+        evidence_root=job_directory.parent,
+        job_id=job_directory.name,
+    )
     running = transition_attempt(pending, AttemptStatus.RUNNING)
-    write_record(record_path, running)
+    write_record(
+        record_path,
+        running,
+        evidence_root=job_directory.parent,
+        job_id=job_directory.name,
+    )
     return record_path, running
 
 
 def _finish_invocation(
+    job_directory: Path,
     record_path: Path,
     record: InvocationRecord,
     *,
@@ -288,8 +333,8 @@ def _finish_invocation(
     )
     if error is not None and not stderr:
         stderr = f'{type(error).__name__}: {error}\n'
-    _write_text(Path(record.stdout_path), stdout)
-    _write_text(Path(record.stderr_path), stderr)
+    _write_text(job_directory, Path(record.stdout_path), stdout)
+    _write_text(job_directory, Path(record.stderr_path), stderr)
     conclusion = (
         AttemptConclusion.TIMED_OUT
         if reviewer_error is not None and reviewer_error.timed_out
@@ -323,7 +368,14 @@ def _finish_invocation(
             else 'unavailable'
         ),
     )
-    write_record(record_path, completed)
+    write_record(
+        record_path,
+        completed,
+        evidence_root=job_directory.parent,
+        job_id=job_directory.name,
+    )
+    _record_finalized_path(job_directory, Path(record.stdout_path), 'process_stdout')
+    _record_finalized_path(job_directory, Path(record.stderr_path), 'process_stderr')
 
 
 def run_issue_review(
@@ -340,10 +392,9 @@ def run_issue_review(
     """Run one review bound to the latest immutable issue revision."""
 
     root = runs_directory.expanduser().resolve()
-    job_directory = _evidence_path(root, job.id)
-    if job_directory.is_symlink() or not job_directory.resolve().is_relative_to(root):
-        message = 'job directory escapes the runs directory'
-        raise IssueReviewError(message)
+    job_directory = _job_directory(root, job.id)
+    recover_evidence_index(root, job.id)
+    recover_completed_invocation_evidence(job_directory, job.id)
     captured_path = _evidence_path(job_directory, 'issue.json')
     captured = _read_json(captured_path)
     try:
@@ -438,18 +489,19 @@ def run_issue_review(
         message = 'issue has not changed since the previous review'
         raise IssueReviewError(message)
     iteration = job.iteration if retry else job.iteration + 1
-    iteration_directory = _evidence_path(
-        job_directory, 'iterations', f'{iteration:06d}'
+    source_path = _evidence_path(
+        job_directory, 'iterations', f'{iteration:06d}', 'issue.json'
     )
-    source_path = _evidence_path(iteration_directory, 'issue.json')
     if retry:
         existing_source = IssueSourceSchema.model_validate(_read_json(source_path))
         if existing_source.source_digest != current.digest:
             message = 'stored issue snapshot does not match the retry source'
             raise IssueReviewError(message)
     else:
-        write_snapshot(source_path, current)
-    request_path = _evidence_path(iteration_directory, 'request.json')
+        write_snapshot(root, job.id, source_path, current)
+    request_path = _evidence_path(
+        job_directory, 'iterations', f'{iteration:06d}', 'request.json'
+    )
     if retry:
         request = IssueReviewRequestSchema.model_validate(
             _read_json(request_path)
@@ -477,15 +529,20 @@ def run_issue_review(
                 'prior_review': prior,
             }
         ).model_dump(mode='json')
-    result_path = _evidence_path(iteration_directory, 'result.json')
+    result_path = _evidence_path(
+        job_directory, 'iterations', f'{iteration:06d}', 'result.json'
+    )
     if result_path.exists() or result_path.is_symlink():
         message = 'issue review result path already exists'
         raise IssueReviewError(message)
     candidate_path = _evidence_path(
-        iteration_directory, f'.candidate-result-{uuid4()}.json'
+        job_directory,
+        'iterations',
+        f'{iteration:06d}',
+        f'.candidate-result-{uuid4()}.json',
     )
     if not retry:
-        _write_json(request_path, request)
+        _write_json(job_directory, request_path, request)
     reviewing = replace(
         job,
         state=RunState.REVIEWING,
@@ -539,12 +596,16 @@ def run_issue_review(
             _reject(message)
         result_document = result.model_dump(mode='json')
         _write_text(
-            _evidence_path(iteration_directory, 'feedback.md'),
+            job_directory,
+            _evidence_path(
+                job_directory, 'iterations', f'{iteration:06d}', 'feedback.md'
+            ),
             _render_feedback(result_document),
+            finalized=True,
         )
-        _finish_invocation(record_path, invocation, execution=execution)
+        _finish_invocation(job_directory, record_path, invocation, execution=execution)
         invocation_finished = True
-        _write_json(result_path, result_document)
+        _write_json(job_directory, result_path, result_document)
     except (
         IssueReviewError,
         IssueReviewerError,
@@ -559,7 +620,11 @@ def run_issue_review(
             and not invocation_finished
         ):
             _finish_invocation(
-                record_path, invocation, execution=execution, error=error
+                job_directory,
+                record_path,
+                invocation,
+                execution=execution,
+                error=error,
             )
         failed = replace(reviewing, state=RunState.FAILED, updated_at=datetime.now(UTC))
         store.update_issue(failed, RunState.REVIEWING)
@@ -593,7 +658,7 @@ def resume_issue_review(
         message = f'issue-review job is not resumable from {job.state}'
         raise IssueReviewError(message)
     root = runs_directory.expanduser().resolve()
-    job_directory = _evidence_path(root, job.id)
+    job_directory = _job_directory(root, job.id)
     request_path = _evidence_path(
         job_directory, 'iterations', f'{job.iteration:06d}', 'request.json'
     )
@@ -644,7 +709,7 @@ def _publish_issue_feedback_locked(
     if existing is not None:
         return existing
     root = runs_directory.expanduser().resolve()
-    job_directory = _evidence_path(root, job.id)
+    job_directory = _job_directory(root, job.id)
     feedback_path = _evidence_path(
         job_directory, 'iterations', f'{job.iteration:06d}', 'feedback.md'
     )
@@ -689,8 +754,9 @@ def publish_issue_feedback(
     """Serialize and publish accepted feedback once for an issue iteration."""
 
     root = runs_directory.expanduser().resolve()
+    job_directory = _job_directory(root, job.id)
     lock_path = _evidence_path(
-        root, job.id, 'iterations', f'{job.iteration:06d}', '.publish.lock'
+        job_directory, 'iterations', f'{job.iteration:06d}', '.publish.lock'
     )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     if lock_path.is_symlink():

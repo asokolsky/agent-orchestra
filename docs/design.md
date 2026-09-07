@@ -89,6 +89,33 @@ the current scope digest when one is available and otherwise keep it null. The
 store exposes transition history in persistent row order through a read-only
 API that neither initializes nor changes the database.
 
+## Evidence paths and integrity
+
+All paths beneath the configured runs directory are resolved through one
+job-scoped resolver. It rejects absolute or multi-component path segments,
+traversal, mismatched job identifiers, and symlinks in any existing component.
+The separate workflow check that keeps the runs directory outside the reviewed
+worktree remains authoritative at that boundary.
+
+Each job maintains a versioned `.integrity.json` index under its job directory.
+Once an atomic evidence write is renamed into place, the writer hashes the
+regular file without following a final symlink and atomically replaces the
+index while holding the job's integrity lock. Entries are keyed by job-relative
+path and contain the job ID, evidence type, byte size, SHA-256 digest, and UTC
+finalization time. Rewriting a mutable evidence location replaces its prior
+entry; the index and its lock are internal metadata and do not index themselves.
+Before the evidence rename, the same locked protocol durably writes a pending
+transaction. A later writer or resumed job reconciles that transaction, so an
+exit between the evidence and index renames cannot permanently strand finalized
+evidence without an entry. Existing indexes are validated strictly for schema,
+job identity, required fields, unique contained paths, and scalar field types
+before they may be updated.
+
+Process streams remain live while their child runs. Their entries are recorded
+only when the corresponding invocation reaches `completed`. Integrity paths
+are job-relative so a future date shard above the job directory does not alter
+their identity.
+
 ## Synchronization and collision avoidance
 
 Agents do not maintain inboxes or wait on a shared message queue. The current

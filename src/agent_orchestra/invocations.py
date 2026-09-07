@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Literal, Never
 from uuid import uuid4
 
+from agent_orchestra.evidence import (
+    EvidencePathError,
+    finalize_evidence_write,
+    record_finalized_evidence,
+    resolve_evidence_path,
+)
 from agent_orchestra.models import RunState
 
 INVOCATION_DIRECTORY_ESCAPE = 'invocation directory escapes the run directory'
@@ -387,7 +393,13 @@ def timestamp() -> str:
     return datetime.now(UTC).isoformat().replace('+00:00', 'Z')
 
 
-def write_record(path: Path, record: InvocationRecord) -> None:
+def write_record(
+    path: Path,
+    record: InvocationRecord,
+    *,
+    evidence_root: Path | None = None,
+    job_id: str | None = None,
+) -> None:
     """Write an invocation record atomically."""
 
     validate_attempt_record(record)
@@ -458,7 +470,21 @@ def write_record(path: Path, record: InvocationRecord) -> None:
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        if new_record:
+        if evidence_root is not None and job_id is not None:
+            try:
+                finalize_evidence_write(
+                    evidence_root,
+                    job_id,
+                    temporary,
+                    path,
+                    'invocation_record',
+                    exclusive=new_record,
+                )
+            except EvidencePathError as error:
+                if new_record and str(error) == 'finalized evidence already exists':
+                    _fail('attempt record already exists', error)
+                _fail(str(error), error)
+        elif new_record:
             try:
                 os.link(temporary, path)
             except FileExistsError as error:
@@ -475,25 +501,32 @@ def _safe_file(root: Path, value: str, *, description: str) -> Path:
     candidate = Path(value)
     if not candidate.is_absolute():
         candidate = root / candidate
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(root) or candidate.is_symlink():
+    try:
+        relative = candidate.relative_to(root)
+        resolved = resolve_evidence_path(root.parent, root.name, *relative.parts)
+    except EvidencePathError, ValueError:
         _fail(f'{description} escapes the run directory')
-    return resolved
+    return resolved.resolve()
 
 
 def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ...]:
     """Read validated invocation records in deterministic order."""
 
     root = run_directory.resolve()
-    manifests = root / 'invocations'
-    if manifests.is_symlink():
+    try:
+        manifests = resolve_evidence_path(root.parent, root.name, 'invocations')
+    except EvidencePathError:
         _fail(INVOCATION_DIRECTORY_ESCAPE)
     if not manifests.is_dir():
         return ()
     records: list[InvocationRecord] = []
     seen_attempts: set[tuple[str, int]] = set()
-    for path in sorted(manifests.glob('*.json')):
-        if path.is_symlink() or not path.resolve().is_relative_to(root):
+    for candidate_path in sorted(manifests.glob('*.json')):
+        try:
+            path = resolve_evidence_path(
+                root.parent, root.name, 'invocations', candidate_path.name
+            )
+        except EvidencePathError:
             _fail(INVOCATION_RECORD_ESCAPE)
         try:
             document = json.loads(path.read_text(encoding='utf-8'))
@@ -546,3 +579,61 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             )
         )
     return tuple(records)
+
+
+def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> None:
+    """Add only missing index entries from fully validated completed attempts."""
+
+    records = read_records(run_directory, run_id)
+    for record in records:
+        if record.status != 'completed':
+            continue
+        task_stem = record.task_id.rsplit(':', 1)[-1]
+        if record.role == 'issue_reviewer':
+            stem = f'{record.iteration:06d}-issue-reviewer-attempt-{record.attempt:04d}'
+        else:
+            stem = (
+                task_stem
+                if record.attempt == 1
+                else f'{task_stem}-attempt-{record.attempt:04d}'
+            )
+        manifest = resolve_evidence_path(
+            run_directory.parent, run_id, 'invocations', f'{stem}.json'
+        )
+        expected_streams = (
+            (
+                resolve_evidence_path(
+                    run_directory.parent, run_id, 'logs', f'{stem}.stdout.log'
+                ),
+                Path(record.stdout_path),
+                'process_stdout',
+            ),
+            (
+                resolve_evidence_path(
+                    run_directory.parent, run_id, 'logs', f'{stem}.stderr.log'
+                ),
+                Path(record.stderr_path),
+                'process_stderr',
+            ),
+        )
+        if not manifest.is_file() or any(
+            declared != expected for expected, declared, _kind in expected_streams
+        ):
+            _fail(f'invocation record does not match evidence filenames: {stem}')
+        record_finalized_evidence(
+            run_directory.parent,
+            run_id,
+            manifest,
+            'invocation_record',
+            replace_existing=False,
+        )
+        for expected, _declared, kind in expected_streams:
+            if not expected.is_file():
+                _fail(f'completed invocation stream is missing: {expected.name}')
+            record_finalized_evidence(
+                run_directory.parent,
+                run_id,
+                expected,
+                kind,
+                replace_existing=False,
+            )
