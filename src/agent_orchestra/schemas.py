@@ -114,6 +114,87 @@ class ReviewResultSchema(StrictSchema):
         return self
 
 
+class IssueReviewFindingSchema(StrictSchema):
+    """One actionable finding about issue prose or metadata."""
+
+    finding_id: str = Field(min_length=1)
+    dimension: Literal[
+        'problem_clarity',
+        'scope',
+        'constraints',
+        'dependencies',
+        'risks',
+        'acceptance_criteria',
+        'testability',
+        'implementation_readiness',
+    ]
+    severity: Literal['critical', 'high', 'medium', 'low']
+    title: str = Field(min_length=1)
+    section: str | None
+    explanation: str = Field(min_length=1)
+    suggested_change: str = Field(min_length=1)
+
+
+class IssueReviewResultSchema(StrictSchema):
+    """Canonical result shared by issue-review runtime adapters."""
+
+    schema_version: Literal[1]
+    source_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    verdict: Literal['ready', 'changes_requested', 'blocked']
+    summary: str = Field(min_length=1)
+    findings: list[IssueReviewFindingSchema]
+    validation: list[str]
+    verification_gaps: list[str]
+
+    @model_validator(mode='after')
+    def validate_verdict_and_findings(self) -> IssueReviewResultSchema:
+        """Enforce readiness consistency and unique finding identifiers."""
+
+        if self.verdict == 'ready' and self.findings:
+            message = 'ready issue review cannot contain findings'
+            raise ValueError(message)
+        if self.verdict == 'changes_requested' and not self.findings:
+            message = 'changes_requested issue review requires findings'
+            raise ValueError(message)
+        identifiers = [finding.finding_id for finding in self.findings]
+        if len(identifiers) != len(set(identifiers)):
+            message = 'issue review finding IDs must be unique'
+            raise ValueError(message)
+        return self
+
+
+class IssueSourceSchema(StrictSchema):
+    """Canonical provider-neutral issue snapshot."""
+
+    schema_version: Literal[1]
+    provider: Literal['github', 'gitlab']
+    host: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    namespace: str = Field(min_length=1)
+    project: str = Field(min_length=1)
+    issue_number: int = Field(gt=0)
+    title: str
+    body: str
+    author: str = Field(min_length=1)
+    labels: list[str]
+    state: str = Field(min_length=1)
+    created_at: str
+    updated_at: str
+    source_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+
+
+class IssueReviewRequestSchema(StrictSchema):
+    """Versioned vendor-neutral request for reviewing one issue snapshot."""
+
+    schema_version: Literal[1]
+    job_id: str = Field(min_length=1)
+    iteration: int = Field(gt=0)
+    objective: str = Field(min_length=1)
+    allowed_actions: list[Literal['read_issue_snapshot', 'write_review_evidence']]
+    source: IssueSourceSchema
+    prior_review: IssueReviewResultSchema | None
+
+
 class ValidationOutcomeSchema(StrictSchema):
     """One local validation command and its reported outcome."""
 
@@ -250,6 +331,7 @@ class DeveloperHandoffMessageSchema(MessageIdentitySchema):
 
 REVIEW_RESULT_SCHEMA = ReviewResultSchema.model_json_schema()
 REVIEW_RESULT_SCHEMA['$defs']['ReviewFindingSchema']['required'].sort()
+ISSUE_REVIEW_RESULT_SCHEMA = IssueReviewResultSchema.model_json_schema()
 DEVELOPER_RESULT_SCHEMA = DeveloperResultSchema.model_json_schema()
 
 
@@ -293,6 +375,16 @@ def validate_review_result(result: dict[str, Any]) -> None:
         ReviewResultSchema.model_validate(result)
     except ValidationError as error:
         raise SchemaValidationError(_review_error_message(error)) from error
+
+
+def validate_issue_review_result(result: dict[str, Any]) -> IssueReviewResultSchema:
+    """Validate and return one canonical issue-review result."""
+
+    try:
+        return IssueReviewResultSchema.model_validate(result)
+    except ValidationError as error:
+        message = 'issue review result does not match the canonical schema'
+        raise SchemaValidationError(message) from error
 
 
 def validate_developer_result(result: dict[str, Any]) -> DeveloperResultSchema:

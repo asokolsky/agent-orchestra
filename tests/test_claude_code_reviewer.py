@@ -11,13 +11,22 @@ from uuid import uuid4
 import pytest
 
 from agent_orchestra.adapter.claude_code import (
+    ClaudeCodeReviewerAdapter,
     ClaudeCodeReviewerError,
-    run_claude_code_reviewer,
 )
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
     read_runtime_metadata,
 )
+
+
+def run_claude_code_reviewer(
+    request: Path, response: Path, *, model: str | None = None
+) -> None:
+    """Invoke the concrete Claude Code reviewer adapter."""
+
+    ClaudeCodeReviewerAdapter(model).execute(request, response)
+
 
 if TYPE_CHECKING:
     from pathlib import Path

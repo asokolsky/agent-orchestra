@@ -1,6 +1,6 @@
-# Reviewer role
+# Source-code reviewer role
 
-The `reviewer` role evaluates one exact diff and returns a verdict with
+The `reviewer` protocol role is the source-code reviewer. It evaluates one exact diff and returns a verdict with
 structured findings. It is read-only and never fixes the change it reviews.
 
 This contract is vendor-neutral. Codex and Claude Code execute it through their
@@ -84,3 +84,7 @@ The versioned message fields and lifecycle transitions are defined in
 runtimes, adapters, and capabilities is defined in [Concepts](concepts.md).
 The executable procedure is the canonical
 [`agent-orchestra-reviewer` skill](../skills/agent-orchestra-reviewer/SKILL.md).
+
+Issue-readiness review uses a separate [issue reviewer](role-issue-reviewer.md)
+role and contract. Its feedback is addressed by the
+[issue creator](role-issue-creator.md), not by the source-code developer.

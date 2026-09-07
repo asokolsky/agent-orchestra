@@ -11,9 +11,26 @@ from uuid import uuid4
 
 import pytest
 
-from agent_orchestra.adapter.claude_code import run_claude_code_reviewer
-from agent_orchestra.adapter.codex import run_codex_reviewer
+from agent_orchestra.adapter.claude_code import ClaudeCodeReviewerAdapter
+from agent_orchestra.adapter.codex import CodexReviewerAdapter
 from agent_orchestra.runtime_metadata import RUNTIME_METADATA_ENV
+
+
+def run_codex_reviewer(
+    request: Path, response: Path, *, model: str | None = None
+) -> None:
+    """Invoke the concrete Codex adapter for shared contract tests."""
+
+    CodexReviewerAdapter(model).execute(request, response)
+
+
+def run_claude_code_reviewer(
+    request: Path, response: Path, *, model: str | None = None
+) -> None:
+    """Invoke the concrete Claude Code adapter for shared contract tests."""
+
+    ClaudeCodeReviewerAdapter(model).execute(request, response)
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable

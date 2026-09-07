@@ -1,19 +1,20 @@
 # Workflow contracts
 
 This document defines the supported orchestration scenarios. It uses the
-[role model](concepts.md), [developer](role-developer.md) and
-[reviewer](role-reviewer.md) contracts, and
+[role model](concepts.md), [source-code developer](role-developer.md) and
+[source-code reviewer](role-reviewer.md) contracts, and
 [message and lifecycle contract](design.md).
 
-The local development and review workflow is partially implemented. The remote
-pull-request workflow remains a target design. See
+The local development and review and issue-refinement workflows are
+implemented. Issue feedback uses a separate authorized publication command;
+the remote pull-request workflow remains a target design. See
 [Current scope](../README.md#current-scope) for the exact implementation
 boundary.
 
 ## Local development and review
 
 This workflow covers both a worktree that already has uncommitted changes and
-a worktree in which agent-orchestra first asks a developer to implement an
+a worktree in which agent-orchestra first asks a source-code developer to implement an
 objective.
 
 ```mermaid
@@ -53,7 +54,7 @@ flowchart TB
    enqueueing; the review request preserves that new scope durably. A missing
    or ambiguous worktree produces a blocked or failed result without mutation.
 
-3. **Obtain a developer handoff.** If implementation is still required, the
+3. **Obtain a source-code developer handoff.** If implementation is still required, the
    orchestrator moves the job to the `developing` state and sends a
    `development_assignment` containing the objective, worktree, iteration,
    timeout, and allowed actions. The developer edits only the assigned
@@ -62,7 +63,7 @@ flowchart TB
    skips the initial developer attempt and treats those changes as the
    handoff.
 
-4. **Freeze the review identity.** Immediately before review, the orchestrator
+4. **Freeze the source-code review identity.** Immediately before review, the orchestrator
    recomputes the diff digest. It records the current base SHA, head SHA, and
    digest, moves the job to the `reviewing` state, and increments the
    review iteration. The digest is the approval boundary; the worktree itself
@@ -70,12 +71,12 @@ flowchart TB
 
 5. **Send the review request.** The orchestrator sends a `review_request` with
    the objective, worktree, iteration, allowed actions, timeout, base SHA, head
-   SHA, diff digest, and Markdown artifact path. The reviewer confirms that the
+   SHA, diff digest, and Markdown artifact path. The source-code reviewer confirms that the
    current diff still matches the request and performs a read-only review. A
    mismatch returns a `blocked` verdict instead of reviewing a different
    change.
 
-6. **Return and record feedback.** The reviewer returns a `review_result` with
+6. **Return and record feedback.** The source-code reviewer returns a `review_result` with
    an `approved`, `changes_requested`, or `blocked` verdict; the reviewed
    digest; summary; ordered findings; validation evidence; and remaining
    verification gaps. It also writes the Markdown artifact to the requested
@@ -137,6 +138,46 @@ enqueue using `--supersedes JOB_ID`. The new job records its predecessor, but
 does not copy or rewrite prior evidence. `interrupted` and
 `validation_required` jobs must use `resume` instead so iterative work stays
 under one job ID.
+
+## Issue refinement
+
+This workflow reviews issue prose without requiring a local repo or Git diff.
+The [issue reviewer](role-issue-reviewer.md) produces readiness findings; the
+[issue creator](role-issue-creator.md) responds by revising the issue prose.
+Neither responsibility is the source-code reviewer or source-code developer
+used by the local-development workflow. Agent Orchestra currently dispatches
+the issue reviewer; a person or external system performs the issue-creator
+work.
+
+1. **Capture the issue.** `enqueue-issue ISSUE_URL` accepts canonical GitHub
+   and GitLab URLs. GitLab URLs may contain nested namespaces and may target a
+   self-managed host configured for `glab`. The provider CLI performs the
+   authenticated read, including for accessible private projects.
+2. **Normalize and freeze the source.** The orchestrator stores provider, host,
+   namespace, project, issue number or IID, canonical URL, title, body, labels,
+   state, author, timestamps, and a SHA-256 digest of the review-relevant
+   normalized fields outside any target repo.
+3. **Start a read-only review.** `review-issue JOB_ID` re-fetches the issue and
+   rejects the review if the initially captured revision changed. It writes a
+   versioned issue-review request, increments the iteration, and dispatches
+   either the Codex or Claude Code implementation of the same abstract adapter.
+4. **Evaluate readiness.** The issue reviewer evaluates problem clarity, scope,
+   constraints, dependencies, risks, acceptance criteria, testability, and
+   implementation readiness. Findings identify an issue section or field, not
+   a fabricated source path or line.
+5. **Accept only a current result.** The result echoes the source digest. The
+   orchestrator re-fetches the issue after execution and rejects the result if
+   either the digest or provider update timestamp changed.
+6. **Persist feedback.** Canonical JSON and rendered Markdown are stored under
+   the iteration evidence directory. `ready` moves the job to `approved`,
+   `changes_requested` waits for an issue-creator revision, and `blocked` fails closed.
+7. **Review a revision.** Running `review-issue` again requires a changed source
+   digest. The next request includes the prior result for disposition and
+   preserves every earlier iteration.
+
+`post-issue-feedback JOB_ID --authorize` re-fetches the issue, rejects a stale
+revision, and posts the accepted Markdown as a GitHub comment or GitLab note. A
+hidden marker and persisted provider response identity make retries idempotent.
 
 ## Remote pull-request review
 

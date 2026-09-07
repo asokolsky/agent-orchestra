@@ -1,6 +1,7 @@
-# Developer role
+# Source-code developer role
 
-The `developer` role implements an objective or fixes review findings in one
+The `developer` protocol role is the source-code developer. It implements an
+objective or fixes source-code review findings in one
 assigned worktree. It may use only the capabilities listed in its request and
 returns a structured handoff for review.
 

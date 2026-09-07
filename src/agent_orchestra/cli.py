@@ -14,6 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.invocations import (
     InvocationEvidenceError,
     InvocationIdentity,
@@ -21,7 +22,15 @@ from agent_orchestra.invocations import (
     derive_task_status,
     read_records,
 )
-from agent_orchestra.models import Run, RunState
+from agent_orchestra.issue_review import (
+    IssueReviewError,
+    publish_issue_feedback,
+    resume_issue_review,
+    run_issue_review,
+)
+from agent_orchestra.issue_sources import IssueSourceError, fetch_issue, write_snapshot
+from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
+from agent_orchestra.schemas import SchemaValidationError
 from agent_orchestra.skill_install import (
     AgentTarget,
     SkillInstallError,
@@ -35,7 +44,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 8
+CLI_SCHEMA_VERSION = 9
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
@@ -183,6 +192,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enqueue_many.add_argument('directory', type=Path)
     enqueue_many.add_argument('--base', default='HEAD')
+
+    enqueue_issue = commands.add_parser(
+        'enqueue-issue', help='capture one GitHub or GitLab issue for review'
+    )
+    enqueue_issue.add_argument('issue_url')
+    enqueue_issue.add_argument(
+        '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
+    )
+
+    review_issue = commands.add_parser(
+        'review-issue', help='review a captured issue for implementation readiness'
+    )
+    review_issue.add_argument('job_id')
+    review_issue.add_argument(
+        '--objective', default='Review this issue for implementation readiness.'
+    )
+    review_issue.add_argument('--timeout', type=int, default=1800)
+    review_issue.add_argument(
+        '--reviewer-agent', choices=('codex', 'claude-code'), default='codex'
+    )
+    review_issue.add_argument('--reviewer-model')
+    review_issue.add_argument(
+        '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
+    )
+    review_issue.set_defaults(reviewer_command=())
+
+    publish_feedback = commands.add_parser(
+        'post-issue-feedback', help='publish reviewed feedback to an issue provider'
+    )
+    publish_feedback.add_argument('job_id')
+    publish_feedback.add_argument(
+        '--authorize', action='store_true', help='authorize this provider write'
+    )
+    publish_feedback.add_argument(
+        '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
+    )
 
     commands.add_parser('jobs', help='list stored jobs')
 
@@ -378,6 +423,110 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
     return 2 if not runs and failures else 0
 
 
+def _enqueue_issue(args: argparse.Namespace, store: RunStore) -> int:
+    """Capture one immutable provider issue revision as a queued job."""
+
+    try:
+        snapshot = fetch_issue(args.issue_url)
+        job = IssueJob.create(
+            provider=snapshot.locator.provider,
+            host=snapshot.locator.host,
+            remote_url=snapshot.locator.url,
+            namespace=snapshot.locator.namespace,
+            project=snapshot.locator.project,
+            issue_number=snapshot.locator.number,
+            title=snapshot.title,
+            author=snapshot.author,
+            source_updated_at=snapshot.updated_at,
+            source_digest=snapshot.digest,
+        )
+        root = args.runs_directory.expanduser().resolve()
+        job_directory = root / job.id
+        if job_directory.is_symlink() or not job_directory.resolve().is_relative_to(
+            root
+        ):
+            _fail_issue_job_directory()
+        write_snapshot(job_directory / 'issue.json', snapshot)
+        store.initialize()
+        store.add_issue(job)
+    except (IssueSourceError, OSError) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return 2
+    print(job.id)
+    return 0
+
+
+def _review_issue(args: argparse.Namespace, store: RunStore) -> int:
+    """Run one read-only issue-readiness review."""
+
+    if args.timeout <= 0:
+        print('error: timeout must be positive', file=sys.stderr)
+        return 2
+    try:
+        job = store.get_issue(args.job_id)
+        finished = run_issue_review(
+            job,
+            store,
+            args.runs_directory,
+            objective=args.objective,
+            agent=args.reviewer_agent,
+            model=args.reviewer_model,
+            timeout=args.timeout,
+            command=tuple(args.reviewer_command),
+        )
+    except (
+        RunNotFoundError,
+        IssueReviewError,
+        IssueReviewerError,
+        SchemaValidationError,
+        InvocationEvidenceError,
+        OSError,
+    ) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return 2
+    print(json.dumps(_issue_job_summary(finished), indent=2))
+    return 0
+
+
+def _post_issue_feedback(args: argparse.Namespace, store: RunStore) -> int:
+    """Publish one reviewed feedback artifact after explicit authorization."""
+
+    if not args.authorize:
+        print('error: --authorize is required for provider writes', file=sys.stderr)
+        return 2
+    try:
+        job = store.get_issue(args.job_id)
+        action = publish_issue_feedback(job, store, args.runs_directory)
+    except (RunNotFoundError, IssueReviewError) as error:
+        print(f'error: {error}', file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'job_id': action.job_id,
+                'iteration': action.iteration,
+                'action': action.action,
+                'provider_id': action.provider_id,
+                'remote_url': action.remote_url,
+                'created_at': action.created_at.astimezone(UTC)
+                .isoformat()
+                .replace('+00:00', 'Z'),
+                'error': None,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _fail_issue_job_directory() -> None:
+    """Raise the stable issue-job evidence containment error."""
+
+    message = 'job directory escapes the runs directory'
+    raise IssueSourceError(message)
+
+
 def _job_summary(run: Run) -> dict[str, object]:
     """Return one job using the public job vocabulary."""
 
@@ -395,6 +544,46 @@ def _job_summary(run: Run) -> dict[str, object]:
         'supersedes_job_id': run.supersedes_run_id,
         'created_at': run.created_at.astimezone(UTC).isoformat().replace('+00:00', 'Z'),
         'updated_at': run.updated_at.astimezone(UTC).isoformat().replace('+00:00', 'Z'),
+    }
+
+
+def _provider_action_summary(action: ProviderAction) -> dict[str, object]:
+    """Return one durable provider action using public field names."""
+
+    return {
+        'iteration': action.iteration,
+        'action': action.action,
+        'provider_id': action.provider_id,
+        'remote_url': action.remote_url,
+        'created_at': action.created_at.astimezone(UTC)
+        .isoformat()
+        .replace('+00:00', 'Z'),
+    }
+
+
+def _issue_job_summary(
+    job: IssueJob, actions: tuple[ProviderAction, ...] = ()
+) -> dict[str, object]:
+    """Return one issue-review job using the public job vocabulary."""
+
+    return {
+        'job_id': job.id,
+        'scenario': 'issue_review',
+        'state': str(job.state),
+        'provider': job.provider,
+        'host': job.host,
+        'remote_url': job.remote_url,
+        'namespace': job.namespace,
+        'project': job.project,
+        'issue_number': job.issue_number,
+        'title': job.title,
+        'author': job.author,
+        'source_updated_at': job.source_updated_at,
+        'source_digest': job.source_digest,
+        'iteration': job.iteration,
+        'provider_actions': [_provider_action_summary(action) for action in actions],
+        'created_at': job.created_at.astimezone(UTC).isoformat().replace('+00:00', 'Z'),
+        'updated_at': job.updated_at.astimezone(UTC).isoformat().replace('+00:00', 'Z'),
     }
 
 
@@ -535,11 +724,17 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
             f'state database not found: {args.database}',
         )
         return 2
+    summaries = [*map(_job_summary, store.list_runs())]
+    summaries.extend(
+        _issue_job_summary(job, store.list_issue_actions(job.id))
+        for job in store.list_issues()
+    )
+    summaries.sort(key=lambda item: str(item['created_at']), reverse=True)
     print(
         json.dumps(
             {
                 'schema_version': CLI_SCHEMA_VERSION,
-                'jobs': [_job_summary(run) for run in store.list_runs()],
+                'jobs': summaries,
                 'error': None,
             },
             indent=2,
@@ -553,7 +748,7 @@ def _selected_job(
     store: RunStore,
     *,
     include_stream_content: bool,
-) -> tuple[Run, list[dict[str, object]]] | None:
+) -> tuple[Run | IssueJob, list[dict[str, object]]] | None:
     """Resolve one job and its task history, reporting stable query errors."""
 
     if not args.database.is_file():
@@ -564,7 +759,10 @@ def _selected_job(
         )
         return None
     try:
-        run = store.get(args.job_id)
+        try:
+            run: Run | IssueJob = store.get(args.job_id)
+        except RunNotFoundError:
+            run = store.get_issue(args.job_id)
         tasks = _job_tasks(
             str(run.id),
             args.runs_directory,
@@ -582,11 +780,54 @@ def _selected_job(
 def _job(args: argparse.Namespace, store: RunStore) -> int:
     """Show one job and all currently non-terminal tasks."""
 
+    if args.database.is_file():
+        try:
+            issue = store.get_issue(args.job_id)
+        except RunNotFoundError:
+            pass
+        else:
+            document = _issue_job_summary(issue, store.list_issue_actions(issue.id))
+            try:
+                tasks = _job_tasks(
+                    issue.id,
+                    args.runs_directory,
+                    include_stream_content=False,
+                )
+            except (InvocationEvidenceError, OSError) as error:
+                _write_job_error('invalid_evidence', str(error), job_id=args.job_id)
+                return 2
+            document['current'] = [
+                {
+                    'task_id': task['task_id'],
+                    'role': task['role'],
+                    'attempt': task['attempt'],
+                    'status': task['status'],
+                    'conclusion': task['conclusion'],
+                }
+                for task in tasks
+                if task['status'] in {'pending', 'running'}
+            ]
+            print(
+                json.dumps(
+                    {
+                        'schema_version': CLI_SCHEMA_VERSION,
+                        'job': document,
+                        'error': None,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
     selected = _selected_job(args, store, include_stream_content=False)
     if selected is None:
         return 2
     run, tasks = selected
-    document = _job_summary(run)
+    document = (
+        _job_summary(run)
+        if isinstance(run, Run)
+        else _issue_job_summary(run, store.list_issue_actions(run.id))
+    )
     document['current'] = [
         {
             'task_id': task['task_id'],
@@ -619,6 +860,14 @@ def _tasks(args: argparse.Namespace, store: RunStore) -> int:
             {
                 'schema_version': CLI_SCHEMA_VERSION,
                 'job_id': str(run.id),
+                'provider_actions': (
+                    []
+                    if isinstance(run, Run)
+                    else [
+                        _provider_action_summary(action)
+                        for action in store.list_issue_actions(run.id)
+                    ]
+                ),
                 'tasks': tasks,
                 'error': None,
             },
@@ -794,15 +1043,26 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
             error_message=f'state database not found: {args.database}',
         )
         return 2
+    result: Run | IssueJob
     try:
-        run = store.get(args.job_id)
-        _require_external_database(args.database, run.worktree_path)
-        result = resume_review(
-            store=store,
-            run=run,
-            runs_directory=args.runs_directory,
-            digest_worktree=_working_tree_digest,
-        )
+        try:
+            run = store.get(args.job_id)
+        except RunNotFoundError:
+            issue = store.get_issue(args.job_id)
+            result = resume_issue_review(
+                issue,
+                store,
+                args.runs_directory,
+                timeout=1800,
+            )
+        else:
+            _require_external_database(args.database, run.worktree_path)
+            result = resume_review(
+                store=store,
+                run=run,
+                runs_directory=args.runs_directory,
+                digest_worktree=_working_tree_digest,
+            )
     except RunNotFoundError as error:
         _write_resume_document(
             args.job_id,
@@ -817,7 +1077,7 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
             error_message=f'job changed concurrently: {error}',
         )
         return 2
-    except (OSError, WorkerError) as error:
+    except (IssueReviewError, InvocationEvidenceError, OSError, WorkerError) as error:
         message = str(error)
         code = error.code if isinstance(error, WorkerError) else None
         if code is not None:
@@ -863,12 +1123,15 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
 
     arguments = list(argv) if argv is not None else sys.argv[1:]
     reviewer_command: list[str] = []
-    if 'run' in arguments and '--' in arguments:
+    command_name = next(
+        (name for name in ('run', 'review-issue') if name in arguments), None
+    )
+    if command_name is not None and '--' in arguments:
         separator = arguments.index('--')
         reviewer_command = arguments[separator + 1 :]
         arguments = arguments[:separator]
     args = build_parser().parse_args(arguments)
-    if args.command == 'run':
+    if args.command in {'run', 'review-issue'}:
         args.reviewer_command = reviewer_command
     store = RunStore(args.database)
 
@@ -880,6 +1143,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _enqueue_local(args, store)
     if args.command == 'enqueue-locals':
         return _enqueue_locals(args, store)
+    if args.command == 'enqueue-issue':
+        return _enqueue_issue(args, store)
+    if args.command == 'review-issue':
+        return _review_issue(args, store)
+    if args.command == 'post-issue-feedback':
+        return _post_issue_feedback(args, store)
     if args.command == 'jobs':
         return _jobs(args, store)
     if args.command == 'job':

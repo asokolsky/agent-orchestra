@@ -337,7 +337,7 @@ def test_validation_milestone_cannot_precede_response() -> None:
         )
 
 
-@pytest.mark.parametrize('role', ['developer', 'reviewer'])
+@pytest.mark.parametrize('role', ['developer', 'reviewer', 'issue_reviewer'])
 @pytest.mark.parametrize(
     ('origin', 'conclusion', 'response', 'validation'),
     [
@@ -363,7 +363,7 @@ def test_all_terminal_transitions_for_both_roles(
     response: str | None,
     validation: str | None,
 ) -> None:
-    """Accept every documented terminal edge for developer and reviewer attempts."""
+    """Accept every documented terminal edge for all agent-role attempts."""
 
     task_id = f'run:000001-{role}'
     record = replace(
