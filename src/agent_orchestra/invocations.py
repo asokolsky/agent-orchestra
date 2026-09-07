@@ -316,7 +316,10 @@ def validate_attempt_record(record: InvocationRecord) -> None:
         _fail('succeeded attempt requires response validation')
     if record.conclusion == 'succeeded' and record.exit_code not in {None, 0}:
         _fail('succeeded attempt cannot have nonzero exit_code')
-    if record.conclusion in {'timed_out', 'cancelled', 'interrupted'} and validation:
+    if (
+        record.conclusion in {'timed_out', 'cancelled', 'interrupted'}
+        and validation is not None
+    ):
         _fail(f'{record.conclusion} attempt cannot start validation')
     if record.timed_out != (record.conclusion == 'timed_out'):
         _fail('timed_out contradicts attempt conclusion')
@@ -330,7 +333,7 @@ def derive_task_status(records: tuple[InvocationRecord, ...]) -> TaskStatus:
     if not records:
         return TaskStatus.PENDING
     task_ids = {record.task_id for record in records}
-    if None in task_ids or len(task_ids) != 1:
+    if len(task_ids) != 1:
         _fail('task status requires one schema 4 task')
     attempts = [record.attempt for record in records]
     if len(attempts) != len(set(attempts)):

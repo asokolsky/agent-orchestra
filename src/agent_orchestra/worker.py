@@ -2295,24 +2295,18 @@ def _resume_active_attempt(
         )
     if action is RecoveryAction.NONE:
         return run
-    if action is RecoveryAction.APPLY_CONCLUSION:
-        resume_validation = (
-            _resume_reviewer_validation
-            if role == 'reviewer'
-            else _resume_developer_validation
-        )
-    elif action in {
+    if action not in {
+        RecoveryAction.APPLY_CONCLUSION,
         RecoveryAction.PERSIST_RESPONSE_AND_VALIDATE,
         RecoveryAction.VALIDATE_RESPONSE,
     }:
-        resume_validation = (
-            _resume_reviewer_validation
-            if role == 'reviewer'
-            else _resume_developer_validation
-        )
-    else:
         message = f'unsupported recovery action {action}'
         raise WorkerError(message)
+    resume_validation = (
+        _resume_reviewer_validation
+        if role == 'reviewer'
+        else _resume_developer_validation
+    )
     return resume_validation(
         store=store,
         run=run,
