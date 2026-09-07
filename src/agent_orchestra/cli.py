@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING
 from agent_orchestra.invocations import (
     InvocationEvidenceError,
     InvocationIdentity,
-    legacy_log_groups,
+    InvocationRecord,
+    derive_task_status,
     read_records,
 )
 from agent_orchestra.models import Run, RunState
@@ -34,9 +35,10 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 7
+CLI_SCHEMA_VERSION = 8
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
+PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
 
 
 def _distribution_version() -> str:
@@ -173,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
         'repo', metavar='repository', nargs='?', type=Path, default=Path.cwd()
     )
     enqueue.add_argument('--base', default='HEAD')
-    enqueue.add_argument('--supersedes', metavar='RUN_ID')
+    enqueue.add_argument('--supersedes', metavar='JOB_ID')
 
     enqueue_many = commands.add_parser(
         'enqueue-locals',
@@ -182,24 +184,22 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue_many.add_argument('directory', type=Path)
     enqueue_many.add_argument('--base', default='HEAD')
 
-    status = commands.add_parser('status', help='show one run or list all runs')
-    status.add_argument('run_id', nargs='?')
+    commands.add_parser('jobs', help='list stored jobs')
 
-    logs = commands.add_parser('logs', help='show process logs for one run')
-    logs.add_argument('run_id')
-    logs.add_argument('--iteration', type=int)
-    logs.add_argument('--role', choices=('developer', 'reviewer'))
-    logs.add_argument('--invocation')
-    logs.add_argument('--runtime')
-    logs.add_argument('--stream', choices=('stdout', 'stderr'))
-    logs.add_argument(
-        '--runs-directory',
-        type=Path,
-        default=DEFAULT_RUNS_DIRECTORY,
-    )
+    job = commands.add_parser('job', help='show one stored job')
+    job.add_argument('job_id')
+    job.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+
+    tasks = commands.add_parser('tasks', help='show one job task history')
+    tasks.add_argument('job_id')
+    tasks.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+
+    task = commands.add_parser('task', help='show one task and its attempts')
+    task.add_argument('task_id')
+    task.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
 
     run = commands.add_parser('run', help='run a bounded review-remediation loop')
-    run.add_argument('run_id')
+    run.add_argument('job_id')
     run.add_argument('--objective', required=True)
     run.add_argument('--timeout', type=int, default=1800)
     run.add_argument('--developer-timeout', type=int, default=1800)
@@ -219,8 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.set_defaults(reviewer_command=())
 
-    resume = commands.add_parser('resume', help='resume one recoverable run')
-    resume.add_argument('run_id')
+    resume = commands.add_parser('resume', help='resume one recoverable job')
+    resume.add_argument('job_id')
     resume.add_argument(
         '--runs-directory',
         type=Path,
@@ -270,17 +270,17 @@ def _enqueue_local(  # noqa: PLR0911
         return 2
     if args.supersedes is not None:
         if not args.database.is_file():
-            print(f'error: run not found: {args.supersedes}', file=sys.stderr)
+            print(f'error: job not found: {args.supersedes}', file=sys.stderr)
             return 2
         try:
             predecessor = store.get(args.supersedes)
         except RunNotFoundError as error:
-            print(f'error: run not found: {error}', file=sys.stderr)
+            print(f'error: job not found: {error}', file=sys.stderr)
             return 2
         if predecessor.state not in {RunState.FAILED, RunState.SUPERSEDED}:
             print(
-                f'error: run {predecessor.id} is {predecessor.state}; resume '
-                'recoverable runs instead',
+                f'error: job {predecessor.id} is {predecessor.state}; resume '
+                'recoverable jobs instead',
                 file=sys.stderr,
             )
             return 2
@@ -289,7 +289,7 @@ def _enqueue_local(  # noqa: PLR0911
             or predecessor.worktree_path != run.worktree_path
         ):
             print(
-                'error: superseded run belongs to a different worktree', file=sys.stderr
+                'error: superseded job belongs to a different worktree', file=sys.stderr
             )
             return 2
         run = Run.create_local(
@@ -316,7 +316,7 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
                 {
                     'schema_version': CLI_SCHEMA_VERSION,
                     'directory': str(directory),
-                    'runs': [],
+                    'jobs': [],
                     'summary': {'enqueued': 0, 'clean': 0, 'failed': 0},
                     'failures': [],
                     'error': {
@@ -360,8 +360,8 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
             {
                 'schema_version': CLI_SCHEMA_VERSION,
                 'directory': str(directory),
-                'runs': [
-                    {'id': str(run.id), 'worktree_path': str(run.worktree_path)}
+                'jobs': [
+                    {'job_id': str(run.id), 'worktree_path': str(run.worktree_path)}
                     for run in runs
                 ],
                 'summary': {
@@ -378,44 +378,287 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
     return 2 if not runs and failures else 0
 
 
-def _status(args: argparse.Namespace, store: RunStore) -> int:
-    """Write persisted run status as versioned JSON without creating state."""
+def _job_summary(run: Run) -> dict[str, object]:
+    """Return one job using the public job vocabulary."""
+
+    return {
+        'job_id': str(run.id),
+        'scenario': str(run.scenario),
+        'repository_path': str(run.repo_path),
+        'worktree_path': str(run.worktree_path),
+        'state': str(run.state),
+        'base_sha': run.base_sha,
+        'head_sha': run.head_sha,
+        'diff_digest': run.diff_digest,
+        'iteration': run.iteration,
+        'remote_url': run.remote_url,
+        'supersedes_job_id': run.supersedes_run_id,
+        'created_at': run.created_at.astimezone(UTC).isoformat().replace('+00:00', 'Z'),
+        'updated_at': run.updated_at.astimezone(UTC).isoformat().replace('+00:00', 'Z'),
+    }
+
+
+def _stream_document(path_value: str, *, include_content: bool) -> dict[str, object]:
+    """Describe one attempt stream, optionally reading its content."""
+
+    path = Path(path_value)
+    document: dict[str, object] = {
+        'path': str(path),
+        'available': path.is_file(),
+    }
+    if include_content:
+        document['content'] = (
+            path.read_text(encoding='utf-8', errors='replace')
+            if path.is_file()
+            else None
+        )
+    return document
+
+
+def _attempt_document(
+    record: InvocationRecord, *, include_stream_content: bool
+) -> dict[str, object]:
+    """Return one invocation record using the public attempt vocabulary."""
+
+    return {
+        'attempt_id': record.invocation_id,
+        'attempt': record.attempt,
+        'status': record.status,
+        'conclusion': record.conclusion,
+        'agent_vendor': record.agent_vendor,
+        'requested_model': record.requested_model,
+        'effective_models': list(record.effective_models),
+        'effective_model_status': record.effective_model_status,
+        'runtime': record.runtime,
+        'started_at': record.started_at,
+        'finished_at': record.finished_at,
+        'response_received_at': record.response_received_at,
+        'validation_started_at': record.validation_started_at,
+        'exit_code': record.exit_code,
+        'timed_out': record.timed_out,
+        'interrupted': record.interrupted,
+        'legacy': False,
+        'streams': {
+            'stdout': _stream_document(
+                record.stdout_path, include_content=include_stream_content
+            ),
+            'stderr': _stream_document(
+                record.stderr_path, include_content=include_stream_content
+            ),
+        },
+    }
+
+
+def _task_documents(
+    records: tuple[InvocationRecord, ...], *, include_stream_content: bool
+) -> list[dict[str, object]]:
+    """Group validated attempt evidence into deterministic task history."""
+
+    grouped: dict[str, list[InvocationRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.task_id, []).append(record)
+    documents: list[dict[str, object]] = []
+    for task_id, attempts in sorted(grouped.items()):
+        ordered = tuple(sorted(attempts, key=lambda item: item.attempt))
+        latest = ordered[-1]
+        documents.append(
+            {
+                'task_id': task_id,
+                'job_id': latest.run_id,
+                'role': latest.role,
+                'iteration': latest.iteration,
+                'status': str(derive_task_status(ordered)),
+                'conclusion': latest.conclusion,
+                'attempt': latest.attempt,
+                'attempts': [
+                    _attempt_document(
+                        record, include_stream_content=include_stream_content
+                    )
+                    for record in ordered
+                ],
+            }
+        )
+    return documents
+
+
+def _job_directory(job_id: str, runs_directory: Path) -> Path | None:
+    """Resolve one contained job evidence directory when it exists."""
+
+    root = runs_directory.expanduser().resolve()
+    job_directory = root / job_id
+    if job_directory.is_symlink() or not job_directory.resolve().is_relative_to(root):
+        message = 'job directory escapes the runs directory'
+        raise InvocationEvidenceError(message)
+    if not job_directory.is_dir():
+        return None
+    return job_directory
+
+
+def _job_tasks(
+    job_id: str, runs_directory: Path, *, include_stream_content: bool
+) -> list[dict[str, object]]:
+    """Read task evidence for one job."""
+
+    job_directory = _job_directory(job_id, runs_directory)
+    if job_directory is None:
+        return []
+    return _task_documents(
+        read_records(job_directory, job_id),
+        include_stream_content=include_stream_content,
+    )
+
+
+def _write_job_error(
+    code: str,
+    message: str,
+    *,
+    job_id: str | None = None,
+    task_id: str | None = None,
+) -> None:
+    """Write a versioned error for a public job or task query."""
+
+    document: dict[str, object] = {'schema_version': CLI_SCHEMA_VERSION}
+    if job_id is not None:
+        document['job_id'] = job_id
+    if task_id is not None:
+        document['task_id'] = task_id
+    document['error'] = {'code': code, 'message': message}
+    print(json.dumps(document, indent=2))
+
+
+def _jobs(args: argparse.Namespace, store: RunStore) -> int:
+    """List stored jobs without reading mutable workflow state."""
 
     if not args.database.is_file():
-        print(f'state database not found: {args.database}', file=sys.stderr)
+        _write_job_error(
+            'state_database_not_found',
+            f'state database not found: {args.database}',
+        )
         return 2
-    try:
-        runs = (store.get(args.run_id),) if args.run_id else store.list_runs()
-    except RunNotFoundError as error:
-        print(f'run not found: {error}', file=sys.stderr)
-        return 2
-    document = {
-        'schema_version': CLI_SCHEMA_VERSION,
-        'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
-        'runs': [
+    print(
+        json.dumps(
             {
-                'id': str(run.id),
-                'scenario': str(run.scenario),
-                'repository_path': str(run.repo_path),
-                'worktree_path': str(run.worktree_path),
-                'state': str(run.state),
-                'base_sha': run.base_sha,
-                'head_sha': run.head_sha,
-                'diff_digest': run.diff_digest,
-                'iteration': run.iteration,
-                'remote_url': run.remote_url,
-                'supersedes_run_id': run.supersedes_run_id,
-                'created_at': run.created_at.astimezone(UTC)
-                .isoformat()
-                .replace('+00:00', 'Z'),
-                'updated_at': run.updated_at.astimezone(UTC)
-                .isoformat()
-                .replace('+00:00', 'Z'),
-            }
-            for run in runs
-        ],
-    }
-    print(json.dumps(document, indent=2))
+                'schema_version': CLI_SCHEMA_VERSION,
+                'jobs': [_job_summary(run) for run in store.list_runs()],
+                'error': None,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _selected_job(
+    args: argparse.Namespace,
+    store: RunStore,
+    *,
+    include_stream_content: bool,
+) -> tuple[Run, list[dict[str, object]]] | None:
+    """Resolve one job and its task history, reporting stable query errors."""
+
+    if not args.database.is_file():
+        _write_job_error(
+            'state_database_not_found',
+            f'state database not found: {args.database}',
+            job_id=args.job_id,
+        )
+        return None
+    try:
+        run = store.get(args.job_id)
+        tasks = _job_tasks(
+            str(run.id),
+            args.runs_directory,
+            include_stream_content=include_stream_content,
+        )
+    except RunNotFoundError as error:
+        _write_job_error('job_not_found', f'job not found: {error}', job_id=args.job_id)
+        return None
+    except (InvocationEvidenceError, OSError) as error:
+        _write_job_error('invalid_evidence', str(error), job_id=args.job_id)
+        return None
+    return run, tasks
+
+
+def _job(args: argparse.Namespace, store: RunStore) -> int:
+    """Show one job and all currently non-terminal tasks."""
+
+    selected = _selected_job(args, store, include_stream_content=False)
+    if selected is None:
+        return 2
+    run, tasks = selected
+    document = _job_summary(run)
+    document['current'] = [
+        {
+            'task_id': task['task_id'],
+            'role': task['role'],
+            'attempt': task['attempt'],
+            'status': task['status'],
+            'conclusion': task['conclusion'],
+        }
+        for task in tasks
+        if task['status'] in {'pending', 'running'}
+    ]
+    print(
+        json.dumps(
+            {'schema_version': CLI_SCHEMA_VERSION, 'job': document, 'error': None},
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _tasks(args: argparse.Namespace, store: RunStore) -> int:
+    """Show the complete durable task history for one job."""
+
+    selected = _selected_job(args, store, include_stream_content=True)
+    if selected is None:
+        return 2
+    run, tasks = selected
+    print(
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'job_id': str(run.id),
+                'tasks': tasks,
+                'error': None,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _task(args: argparse.Namespace, store: RunStore) -> int:
+    """Show one task addressed by its globally unique durable identifier."""
+
+    separator = args.task_id.rfind(':')
+    if separator < 1:
+        _write_job_error(
+            'invalid_task_id',
+            'task ID must contain its job ID',
+            task_id=args.task_id,
+        )
+        return 2
+    args.job_id = args.task_id[:separator]
+    selected = _selected_job(args, store, include_stream_content=True)
+    if selected is None:
+        return 2
+    _, tasks = selected
+    matching = [task for task in tasks if task['task_id'] == args.task_id]
+    if not matching:
+        _write_job_error(
+            'task_not_found',
+            f'task not found: {args.task_id}',
+            job_id=args.job_id,
+            task_id=args.task_id,
+        )
+        return 2
+    print(
+        json.dumps(
+            {'schema_version': CLI_SCHEMA_VERSION, 'task': matching[0], 'error': None},
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -438,7 +681,7 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         )
         return 2
     try:
-        run = store.get(args.run_id)
+        run = store.get(args.job_id)
         _require_external_database(args.database, run.worktree_path)
         if args.reviewer_command:
             reviewer_command = args.reviewer_command
@@ -505,7 +748,7 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         json.dumps(
             {
                 'schema_version': CLI_SCHEMA_VERSION,
-                'run_id': str(result.id),
+                'job_id': str(result.id),
                 'state': result.state,
                 'error': None,
             },
@@ -516,7 +759,7 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
 
 
 def _write_resume_document(
-    run_id: str,
+    job_id: str,
     *,
     state: RunState | None = None,
     error_code: str | None = None,
@@ -528,7 +771,7 @@ def _write_resume_document(
         json.dumps(
             {
                 'schema_version': CLI_SCHEMA_VERSION,
-                'run_id': run_id,
+                'job_id': job_id,
                 'state': state,
                 'error': (
                     {'code': error_code, 'message': error_message}
@@ -546,13 +789,13 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
 
     if not args.database.is_file():
         _write_resume_document(
-            args.run_id,
+            args.job_id,
             error_code='state_database_not_found',
             error_message=f'state database not found: {args.database}',
         )
         return 2
     try:
-        run = store.get(args.run_id)
+        run = store.get(args.job_id)
         _require_external_database(args.database, run.worktree_path)
         result = resume_review(
             store=store,
@@ -562,269 +805,31 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
         )
     except RunNotFoundError as error:
         _write_resume_document(
-            args.run_id,
-            error_code='run_not_found',
-            error_message=f'run not found: {error}',
+            args.job_id,
+            error_code='job_not_found',
+            error_message=f'job not found: {error}',
         )
         return 2
     except ConcurrentUpdateError as error:
         _write_resume_document(
-            args.run_id,
+            args.job_id,
             error_code='concurrent_update',
-            error_message=f'run changed concurrently: {error}',
+            error_message=f'job changed concurrently: {error}',
         )
         return 2
     except (OSError, WorkerError) as error:
         message = str(error)
         code = error.code if isinstance(error, WorkerError) else None
+        if code is not None:
+            code = PUBLIC_WORKER_ERROR_CODES.get(code, code)
         _write_resume_document(
-            args.run_id,
+            args.job_id,
             error_code=code or 'resume_evidence_invalid',
             error_message=message,
         )
         return 2
     _write_resume_document(str(result.id), state=result.state)
     return 0
-
-
-def _log_stream_document(
-    *,
-    role: str,
-    vendor: str | None,
-    requested_model: str | None,
-    effective_models: tuple[str, ...],
-    effective_model_status: str,
-    runtime: str | None,
-    iteration: int | None,
-    attempt: int | None,
-    invocation_id: str,
-    stream: str,
-    path: Path,
-    started_at: str | None,
-    finished_at: str | None,
-    exit_code: int | None,
-    timed_out: bool | None,
-    interrupted: bool | None,
-    task_id: str | None = None,
-    status: str = 'unavailable',
-    conclusion: str | None = 'unavailable',
-    response_received_at: str | None = None,
-    validation_started_at: str | None = None,
-) -> tuple[dict[str, object] | None, dict[str, object] | None]:
-    """Return one log stream document or a structured missing-file failure."""
-
-    if not path.is_file():
-        return None, {
-            'code': 'missing_log',
-            'stream': stream,
-            'path': str(path),
-            'message': f'missing {stream} log: {path}',
-        }
-    return (
-        {
-            'invocation_id': invocation_id,
-            'task_id': task_id,
-            'role': role,
-            'agent_vendor': vendor,
-            'requested_model': requested_model,
-            'effective_models': list(effective_models),
-            'effective_model_status': effective_model_status,
-            'runtime': runtime,
-            'iteration': iteration,
-            'attempt': attempt,
-            'started_at': started_at,
-            'finished_at': finished_at,
-            'exit_code': exit_code,
-            'timed_out': timed_out,
-            'interrupted': interrupted,
-            'status': status,
-            'conclusion': conclusion,
-            'response_received_at': response_received_at,
-            'validation_started_at': validation_started_at,
-            'stream': stream,
-            'path': str(path),
-            'content': path.read_text(encoding='utf-8', errors='replace'),
-            'legacy': iteration is None,
-        },
-        None,
-    )
-
-
-def _write_logs_document(
-    run_id: str,
-    *,
-    streams: list[dict[str, object]] | None = None,
-    failures: list[dict[str, object]] | None = None,
-    error_code: str | None = None,
-    error_message: str | None = None,
-) -> None:
-    """Write one versioned JSON logs result to standard output."""
-
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'run_id': run_id,
-                'streams': streams or [],
-                'failures': failures or [],
-                'error': (
-                    {'code': error_code, 'message': error_message}
-                    if error_code is not None
-                    else None
-                ),
-            },
-            indent=2,
-        )
-    )
-
-
-def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
-    """Write process logs as JSON without initializing or modifying run state."""
-
-    if not args.database.is_file():
-        _write_logs_document(
-            args.run_id,
-            error_code='state_database_not_found',
-            error_message=f'state database not found: {args.database}',
-        )
-        return 2
-    try:
-        store.get(args.run_id)
-    except RunNotFoundError as error:
-        _write_logs_document(
-            args.run_id,
-            error_code='run_not_found',
-            error_message=f'run not found: {error}',
-        )
-        return 2
-    root = args.runs_directory.expanduser().resolve()
-    run_directory = root / args.run_id
-    if run_directory.is_symlink() or not run_directory.resolve().is_relative_to(root):
-        _write_logs_document(
-            args.run_id,
-            error_code='run_evidence_escape',
-            error_message='run evidence escapes the configured runs directory',
-        )
-        return 2
-    if not run_directory.is_dir():
-        _write_logs_document(
-            args.run_id,
-            error_code='run_evidence_not_found',
-            error_message=f'run evidence not found: {run_directory}',
-        )
-        return 2
-    requested_streams = (args.stream,) if args.stream else ('stdout', 'stderr')
-    stream_documents: list[dict[str, object]] = []
-    failures: list[dict[str, object]] = []
-    try:
-        records = read_records(run_directory, args.run_id)
-        if records:
-            for record in records:
-                if args.iteration is not None and record.iteration != args.iteration:
-                    continue
-                if args.role is not None and record.role != args.role:
-                    continue
-                if (
-                    args.invocation is not None
-                    and record.invocation_id != args.invocation
-                ):
-                    continue
-                if args.runtime is not None and record.runtime != args.runtime:
-                    continue
-                for stream in requested_streams:
-                    path = Path(
-                        record.stdout_path if stream == 'stdout' else record.stderr_path
-                    )
-                    document, failure = _log_stream_document(
-                        role=record.role,
-                        vendor=record.agent_vendor,
-                        requested_model=record.requested_model,
-                        effective_models=record.effective_models,
-                        effective_model_status=record.effective_model_status,
-                        runtime=record.runtime,
-                        iteration=record.iteration,
-                        attempt=record.attempt,
-                        invocation_id=record.invocation_id,
-                        stream=stream,
-                        path=path,
-                        started_at=record.started_at,
-                        finished_at=record.finished_at,
-                        exit_code=record.exit_code,
-                        timed_out=record.timed_out,
-                        interrupted=record.interrupted,
-                        task_id=record.task_id,
-                        status=record.status,
-                        conclusion=record.conclusion,
-                        response_received_at=record.response_received_at,
-                        validation_started_at=record.validation_started_at,
-                    )
-                    if document is not None:
-                        stream_documents.append(document)
-                    if failure is not None:
-                        failures.append(failure)
-        else:
-            if (
-                args.iteration is not None
-                or args.invocation is not None
-                or args.runtime is not None
-            ):
-                _write_logs_document(
-                    args.run_id,
-                    error_code='legacy_metadata_unavailable',
-                    error_message=(
-                        'legacy logs do not contain iteration, invocation, or runtime metadata'
-                    ),
-                )
-                return 2
-            for sequence, role, stdout_path, stderr_path in legacy_log_groups(
-                run_directory
-            ):
-                if args.role is not None and role != args.role:
-                    continue
-                for stream in requested_streams:
-                    path = stdout_path if stream == 'stdout' else stderr_path
-                    document, failure = _log_stream_document(
-                        role=role,
-                        vendor=None,
-                        requested_model=None,
-                        effective_models=(),
-                        effective_model_status='unavailable',
-                        runtime=None,
-                        iteration=None,
-                        attempt=None,
-                        invocation_id=f'legacy-{sequence}-{role}',
-                        stream=stream,
-                        path=path,
-                        started_at=None,
-                        finished_at=None,
-                        exit_code=None,
-                        timed_out=None,
-                        interrupted=None,
-                    )
-                    if document is not None:
-                        stream_documents.append(document)
-                    if failure is not None:
-                        failures.append(failure)
-    except (InvocationEvidenceError, OSError) as error:
-        _write_logs_document(
-            args.run_id,
-            error_code='invalid_evidence',
-            error_message=str(error),
-        )
-        return 2
-    if not stream_documents and not failures:
-        _write_logs_document(
-            args.run_id,
-            error_code='no_matching_logs',
-            error_message='no matching logs found',
-        )
-        return 2
-    _write_logs_document(
-        args.run_id,
-        streams=stream_documents,
-        failures=failures,
-    )
-    return 2 if failures else 0
 
 
 def _install_skills(args: argparse.Namespace) -> int:
@@ -875,10 +880,14 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _enqueue_local(args, store)
     if args.command == 'enqueue-locals':
         return _enqueue_locals(args, store)
-    if args.command == 'status':
-        return _status(args, store)
-    if args.command == 'logs':
-        return _logs(args, store)
+    if args.command == 'jobs':
+        return _jobs(args, store)
+    if args.command == 'job':
+        return _job(args, store)
+    if args.command == 'tasks':
+        return _tasks(args, store)
+    if args.command == 'task':
+        return _task(args, store)
     if args.command == 'run':
         return _run(args, store)
     if args.command == 'resume':

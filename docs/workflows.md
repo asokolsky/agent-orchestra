@@ -42,11 +42,11 @@ flowchart TB
 1. **Enqueue the worktree.** The user or calling process runs `enqueue-local`,
    or runs `enqueue-locals` on a directory whose immediate children are repos.
    The CLI resolves `HEAD`, computes a SHA-256 identity from the binary tracked
-   diff and untracked file paths and contents, creates a `local_changes` run in
-   the `queued` state, and returns the run ID. A clean worktree is rejected.
+   diff and untracked file paths and contents, creates a `local_changes` job in
+   the `queued` state, and returns the job ID. A clean worktree is rejected.
    The command does not commit, stash, reset, or clean anything.
 
-2. **Prepare the run.** The orchestrator moves the run to the `preparing`
+2. **Prepare the job.** The orchestrator moves the job to the `preparing`
    state, reads applicable repo instructions, records the existing worktree
    state, and confirms that the worktree and changes can be preserved. It
    recomputes and records the current digest if the worktree changed since
@@ -54,17 +54,17 @@ flowchart TB
    or ambiguous worktree produces a blocked or failed result without mutation.
 
 3. **Obtain a developer handoff.** If implementation is still required, the
-   orchestrator moves the run to the `developing` state and sends a
+   orchestrator moves the job to the `developing` state and sends a
    `development_assignment` containing the objective, worktree, iteration,
    timeout, and allowed actions. The developer edits only the assigned
    worktree, validates the result, and returns a `developer_handoff`. If the
    worktree was supplied with completed uncommitted changes, the orchestrator
-   skips the initial developer invocation and treats those changes as the
+   skips the initial developer attempt and treats those changes as the
    handoff.
 
 4. **Freeze the review identity.** Immediately before review, the orchestrator
    recomputes the diff digest. It records the current base SHA, head SHA, and
-   digest, moves the run to the `reviewing` state, and increments the
+   digest, moves the job to the `reviewing` state, and increments the
    review iteration. The digest is the approval boundary; the worktree itself
    is not assumed to remain unchanged.
 
@@ -79,11 +79,11 @@ flowchart TB
    an `approved`, `changes_requested`, or `blocked` verdict; the reviewed
    digest; summary; ordered findings; validation evidence; and remaining
    verification gaps. It also writes the Markdown artifact to the requested
-   path. The orchestrator verifies that the result names the requested run,
+   path. The orchestrator verifies that the result names the requested job,
    iteration, and digest before accepting it.
 
 7. **Remediate requested changes.** After a `changes_requested` verdict, the
-   run enters the `changes_requested` state and then returns to `developing`.
+   job enters the `changes_requested` state and then returns to `developing`.
    The orchestrator sends a `remediation_request` containing the original
    objective and paths to the complete canonical review result and Markdown
    artifact. The developer evaluates every
@@ -92,51 +92,51 @@ flowchart TB
    repeats steps 4-7. A valid `blocked` or `failed` handoff enters
    `validation_required`; after the external obstacle is resolved, `resume`
    appends a correlated remediation request and retries the developer within
-   the same run. If every finding is instead rejected or blocked with a
-   rationale and the diff is unchanged, the run returns to `changes_requested`
+   the same job. If every finding is instead rejected or blocked with a
+   rationale and the diff is unchanged, the job returns to `changes_requested`
    with durable decision-required evidence for human resolution. Review
    iterations are bounded; exhausting the configured
-   limit fails the run instead of looping forever.
+   limit fails the job instead of looping forever.
 
 8. **Handle blocked or failed work.** A blocked review remains unresolved until
    its missing scope, evidence, or decision is supplied. Timeouts and user
    interruptions enter `interrupted`; `resume` reuses the unanswered canonical
-   request and appends a numbered invocation attempt. Protocol-invalid
+   request and appends a numbered attempt. Protocol-invalid
    evidence, nonzero process exits, and other non-recoverable errors enter
    `failed`. Resume validates the saved schema version, message chain, original
    role configuration, and diff scope before it changes state or launches an
    agent.
 
 9. **Accept approval for one digest.** After an `approved` verdict, the
-   orchestrator records it and moves the run to the `approved` state. It
+   orchestrator records it and moves the job to the `approved` state. It
    recomputes the digest before any commit action. If the worktree changed,
-   approval is invalidated, the run returns to `reviewing` with a new
+   approval is invalidated, the job returns to `reviewing` with a new
    iteration, and no commit is made.
 
-10. **Request commit authorization.** The run moves to
+10. **Request commit authorization.** The job moves to
     `awaiting_commit_authorization`, and the orchestrator sends an
     `authorization_request` describing the exact digest and proposed commit.
     Denial cancels the action without discarding the worktree. Approval permits
     only the commit; it does not permit a push or pull request.
 
 11. **Commit and request publication separately.** After a successful commit,
-    the run moves through `committed` to `awaiting_publish_authorization`. A
+    the job moves through `committed` to `awaiting_publish_authorization`. A
     second `authorization_request` names the proposed push and pull-request
     operation. On approval, the authorized developer or provider adapter
     publishes and returns an `operation_result` with the branch, commit, and
-    pull-request identity. The run becomes `published`. Denial leaves the local
+    pull-request identity. The job becomes `published`. Denial leaves the local
     commit intact and unpublished.
 
-12. **Finish without destructive cleanup.** Completion reports the final run
+12. **Finish without destructive cleanup.** Completion reports the final job
     state and artifact locations. Worktree removal, branch deletion, merging,
     and remote cleanup are separate actions and require their own safety checks
     and authorization.
 
-A terminal `failed` or `superseded` run may be followed by an exceptional new
-enqueue using `--supersedes RUN_ID`. The new run records its predecessor, but
+A terminal `failed` or `superseded` job may be followed by an exceptional new
+enqueue using `--supersedes JOB_ID`. The new job records its predecessor, but
 does not copy or rewrite prior evidence. `interrupted` and
-`validation_required` runs must use `resume` instead so iterative work stays
-under one run ID.
+`validation_required` jobs must use `resume` instead so iterative work stays
+under one job ID.
 
 ## Remote pull-request review
 
@@ -146,8 +146,8 @@ implemented.
 
 1. **Enqueue the pull-request URL.** The caller submits a GitHub or GitLab URL.
    The orchestrator validates the provider and project identity, stores the
-   canonical URL, creates a `pull_request` run in the `queued` state, and
-   returns its run ID. URL parsing does not post to the provider.
+   canonical URL, creates a `pull_request` job in the `queued` state, and
+   returns its job ID. URL parsing does not post to the provider.
 
 2. **Resolve live pull-request metadata.** In `preparing`, the provider adapter
    reads the pull-request identifier, target branch and SHA, source branch and
@@ -163,7 +163,7 @@ implemented.
 
 4. **Freeze the remote review scope.** The orchestrator computes the exact
    target-to-head diff and digest, records the base SHA, head SHA, and digest,
-   moves the run to `reviewing`, and increments the iteration. The URL
+   moves the job to `reviewing`, and increments the iteration. The URL
    alone is never treated as an immutable review target.
 
 5. **Send the review request.** The `review_request` contains the objective and
@@ -174,8 +174,8 @@ implemented.
 
 6. **Detect concurrent updates.** Before accepting the result, the orchestrator
    reads the live head again and recomputes the local digest. If either differs
-   from the request, the result is stale and is not published. The run becomes
-   `superseded`; the new head must be enqueued as a new run and review scope.
+   from the request, the result is stale and is not published. The job becomes
+   `superseded`; the new head must be enqueued as a new job and review scope.
 
 7. **Return the local review result.** For an unchanged head, the reviewer
    returns a `review_result` with the exact reviewed head and digest, verdict,

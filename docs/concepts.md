@@ -2,12 +2,14 @@
 
 Agent-orchestra separates five concepts:
 
-- a **run** is one tracked workflow instance for one objective;
-- a **role** defines what an agent invocation is responsible for;
-- a **runtime** is the product that executes the invocation;
+- a **job** is one tracked workflow instance for one objective;
+- a **task** is one durable role assignment within a job;
+- an **attempt** is one agent process execution for a task;
+- a **role** defines what an agent task is responsible for;
+- a **runtime** is the product that executes the attempt;
 - an **adapter** translates between a runtime and the canonical workflow
   contract for a role;
-- a **capability** is one narrowly scoped action the invocation may perform.
+- a **capability** is one narrowly scoped action the attempt may perform.
 
 This separation lets different agent products use the same workflow. It also
 lets new roles reuse the orchestration core.
@@ -19,36 +21,38 @@ flowchart TB
     orchestrator -->|selects| runtime[Runtime]
     role -->|message schema and capability ceiling| adapter[Runtime-role adapter]
     orchestrator -->|request and allowed actions| adapter
-    adapter -->|bounded invocation| runtime
+    adapter -->|bounded attempt| runtime
     runtime -->|structured output| adapter
     adapter -->|validated result| orchestrator
-    orchestrator -->|state, messages, and artifacts| store[(Run storage)]
+    orchestrator -->|state, messages, and artifacts| store[(Job storage)]
 ```
 
 The role defines the job and its maximum permissions. The runtime executes it.
 The adapter translates between the shared message contract and that runtime.
 The orchestrator accepts only a validated result and stores the workflow state.
 
-## Runs
+## Jobs, tasks, and attempts
 
-A run is one stored instance of a workflow for one objective. It links the
+A job is one stored instance of a workflow for one objective. It links the
 workflow state, agent messages, review iterations, artifacts, and authorization
-decisions. Starting another agent invocation or revising the local diff advances
-the existing run; it does not create a new one.
+decisions. Starting another task attempt or revising the local diff advances
+the existing job; it does not create a new one.
 
-Each run has a permanent **run ID**. Repo paths, worktrees, branches, URLs, Git
-SHAs, and diff digests describe the run's current scope, but they are not its
-identity. They may change while the run ID stays the same.
+Each job has a permanent **job ID**. Repo paths, worktrees, branches, URLs, Git
+SHAs, and diff digests describe the job's current scope, but they are not its
+identity. They may change while the job ID stays the same. Each task has a
+stable task ID across retries, while each process launch has a distinct attempt
+ID and positive attempt ordinal.
 
 ```mermaid
 flowchart LR
-    objective[Objective] --> run[Run<br/>permanent run ID]
-    run --> state[Current state]
-    run --> messages[Agent messages]
-    run --> iterations[Review iterations]
-    run --> artifacts[Artifacts and logs]
-    run --> decisions[Authorization decisions]
-    run --> scope[Current repo and diff scope]
+    objective[Objective] --> job[Job<br/>permanent job ID]
+    job --> state[Current state]
+    job --> tasks[Durable tasks]
+    tasks --> attempts[Process attempts]
+    job --> messages[Agent messages]
+    job --> artifacts[Artifacts and streams]
+    job --> decisions[Authorization decisions]
 ```
 
 ## Roles
@@ -137,7 +141,7 @@ An adapter must:
 
 1. Accept the canonical request for its assigned role.
 2. Verify that the runtime executable and canonical role skill are available.
-3. Translate the request into a bounded, non-interactive runtime invocation.
+3. Translate the request into a bounded, non-interactive runtime attempt.
 4. Enforce the role's worktree access policy and capability ceiling.
 5. Translate structured runtime output into the canonical role result.
 6. Apply local schema and correlation validation even when the runtime claims
@@ -163,7 +167,7 @@ Representative capabilities include:
 - read the assigned worktree;
 - edit the assigned worktree;
 - run local validation;
-- write a declared run artifact;
+- write a declared job artifact;
 - perform a named remote read;
 - perform one separately authorized commit or remote write.
 
@@ -184,16 +188,16 @@ The orchestrator rejects:
 ## Canonical messages and artifacts
 
 Versioned UTF-8 JSON messages are the machine contract between the orchestrator
-and each adapter. The envelope identifies the run, message, correlation,
+and each adapter. The envelope identifies the job, message, correlation,
 iteration, sender, recipient, and exact diff. The payload carries the assignment
 or result.
 
 Markdown is a human-readable artifact. Agent stdout and stderr are execution
 logs. Neither is parsed to reconstruct workflow state.
 
-Each external process has adapter-neutral invocation evidence. It identifies
+Each external process has adapter-neutral attempt evidence. It identifies
 the role, agent vendor, optional requested model override, effective models
-reported through stable runtime metadata, runtime, iteration, invocation,
+reported through stable runtime metadata, runtime, iteration, attempt,
 timestamps, exit status, timeout or interruption status, and the separate
 stdout and stderr paths. Effective identity is explicitly unavailable when the
 runtime does not report it; defaults and human-formatted log headers are never

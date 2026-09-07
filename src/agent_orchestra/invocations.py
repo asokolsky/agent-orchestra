@@ -16,7 +16,6 @@ from agent_orchestra.models import RunState
 
 INVOCATION_DIRECTORY_ESCAPE = 'invocation directory escapes the run directory'
 INVOCATION_RECORD_ESCAPE = 'invocation record escapes the run directory'
-LOG_DIRECTORY_ESCAPE = 'log directory escapes the run directory'
 UNEXPECTED_FIELDS = 'unexpected fields'
 
 
@@ -547,38 +546,3 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             )
         )
     return tuple(records)
-
-
-LEGACY_LOG = re.compile(
-    r'^(?P<sequence>\d+)-(?P<role>developer|reviewer)\.(?P<stream>stdout|stderr)\.log$'
-)
-
-
-def legacy_log_groups(run_directory: Path) -> tuple[tuple[str, str, Path, Path], ...]:
-    """Group safe legacy stdout and stderr logs by sequence and role."""
-
-    root = run_directory.resolve()
-    logs = root / 'logs'
-    if logs.is_symlink():
-        _fail(LOG_DIRECTORY_ESCAPE)
-    if not logs.is_dir():
-        return ()
-    groups: dict[tuple[str, str], dict[str, Path]] = {}
-    for path in sorted(logs.glob('*.log')):
-        match = LEGACY_LOG.fullmatch(path.name)
-        if match is None:
-            continue
-        resolved = path.resolve()
-        if path.is_symlink() or not resolved.is_relative_to(root):
-            _fail(f'log {path.name} escapes the run directory')
-        key = (match['sequence'], match['role'])
-        groups.setdefault(key, {})[match['stream']] = resolved
-    return tuple(
-        (
-            sequence,
-            role,
-            streams.get('stdout', logs / f'{sequence}-{role}.stdout.log'),
-            streams.get('stderr', logs / f'{sequence}-{role}.stderr.log'),
-        )
-        for (sequence, role), streams in sorted(groups.items())
-    )

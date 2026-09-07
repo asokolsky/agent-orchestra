@@ -2365,7 +2365,7 @@ def _resume_intermediate_state(
         raise WorkerError(ITERATION_LIMIT)
     if not execution.developer.command:
         raise WorkerError(
-            f'run is not resumable from {run.state}',
+            f'job is not resumable from {run.state}',
             code=RUN_NOT_RESUMABLE_CODE,
         )
     if last_message['message_type'] == 'remediation_request':
@@ -2447,7 +2447,7 @@ def _resume_review(
         RunState.APPROVED,
     }:
         raise WorkerError(
-            f'run is not resumable from {run.state}', code=RUN_NOT_RESUMABLE_CODE
+            f'job is not resumable from {run.state}', code=RUN_NOT_RESUMABLE_CODE
         )
     run_directory = runs_directory.expanduser().resolve() / str(run.id)
     if run_directory.is_relative_to(run.worktree_path.resolve()):
