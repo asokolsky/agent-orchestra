@@ -230,6 +230,18 @@ class IssueJob:
 
 
 @dataclass(frozen=True, slots=True)
+class JobTransition:
+    """One ordered persistent state transition for any job scenario."""
+
+    job_id: str
+    scenario: ScenarioType
+    from_state: RunState | None
+    to_state: RunState
+    scope_digest: str | None
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderAction:
     """Durable identity of one issue-provider write."""
 

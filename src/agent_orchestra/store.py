@@ -7,7 +7,14 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState, ScenarioType
+from agent_orchestra.models import (
+    IssueJob,
+    JobTransition,
+    ProviderAction,
+    Run,
+    RunState,
+    ScenarioType,
+)
 
 LEGACY_REVIEW_STATE = 'awaiting_review'
 
@@ -54,9 +61,11 @@ class RunStore:
 
                 CREATE TABLE IF NOT EXISTS transitions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL REFERENCES runs(id),
+                    job_id TEXT NOT NULL,
+                    scenario TEXT NOT NULL,
                     from_state TEXT,
                     to_state TEXT NOT NULL,
+                    scope_digest TEXT,
                     occurred_at TEXT NOT NULL
                 );
 
@@ -88,6 +97,11 @@ class RunStore:
                     PRIMARY KEY (job_id, iteration, action)
                 );
                 """
+            )
+            self._migrate_transitions(connection)
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS transitions_job_id_id '
+                'ON transitions(job_id, id)'
             )
             columns = {
                 row['name']
@@ -137,6 +151,15 @@ class RunStore:
                     job.created_at.isoformat(),
                     job.updated_at.isoformat(),
                 ),
+            )
+            self._add_transition(
+                connection,
+                job_id=job.id,
+                scenario=ScenarioType.ISSUE_REVIEW,
+                from_state=None,
+                to_state=job.state,
+                scope_digest=job.source_digest,
+                occurred_at=job.created_at,
             )
 
     def get_issue(self, job_id: str) -> IssueJob:
@@ -194,6 +217,15 @@ class RunStore:
             )
             if cursor.rowcount != 1:
                 raise ConcurrentUpdateError(job.id)
+            self._add_transition(
+                connection,
+                job_id=job.id,
+                scenario=ScenarioType.ISSUE_REVIEW,
+                from_state=expected_state,
+                to_state=job.state,
+                scope_digest=job.source_digest,
+                occurred_at=job.updated_at,
+            )
 
     def get_issue_action(
         self, job_id: str, iteration: int, action: str
@@ -279,10 +311,14 @@ class RunStore:
                 """,
                 self._values(run),
             )
-            connection.execute(
-                'INSERT INTO transitions (run_id, from_state, to_state, occurred_at) '
-                'VALUES (?, NULL, ?, ?)',
-                (str(run.id), run.state, run.created_at.isoformat()),
+            self._add_transition(
+                connection,
+                job_id=str(run.id),
+                scenario=run.scenario,
+                from_state=None,
+                to_state=run.state,
+                scope_digest=run.diff_digest,
+                occurred_at=run.created_at,
             )
 
     def get(self, run_id: str) -> Run:
@@ -345,11 +381,68 @@ class RunStore:
                 if exists is None:
                     raise RunNotFoundError(str(run.id))
                 raise ConcurrentUpdateError(str(run.id))
-            connection.execute(
-                'INSERT INTO transitions (run_id, from_state, to_state, occurred_at) '
-                'VALUES (?, ?, ?, ?)',
-                (str(run.id), expected_state, run.state, run.updated_at.isoformat()),
+            self._add_transition(
+                connection,
+                job_id=str(run.id),
+                scenario=run.scenario,
+                from_state=expected_state,
+                to_state=run.state,
+                scope_digest=run.diff_digest,
+                occurred_at=run.updated_at,
             )
+
+    def list_transitions(self, job_id: str) -> tuple[JobTransition, ...]:
+        """Return one job's state transitions in persistent order."""
+
+        if not self.database_path.is_file():
+            return ()
+        with closing(self._connect_read_only()) as connection:
+            columns = {
+                row['name']
+                for row in connection.execute(
+                    'PRAGMA table_info(transitions)'
+                ).fetchall()
+            }
+            if not columns:
+                return ()
+            if 'run_id' in columns:
+                rows = connection.execute(
+                    """SELECT transitions.run_id AS job_id,
+                        COALESCE(runs.scenario, ?) AS scenario,
+                        transitions.from_state, transitions.to_state,
+                        NULL AS scope_digest, transitions.occurred_at
+                    FROM transitions
+                    LEFT JOIN runs ON runs.id = transitions.run_id
+                    WHERE transitions.run_id = ?
+                    ORDER BY transitions.id""",
+                    (ScenarioType.LOCAL_CHANGES, job_id),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    'SELECT * FROM transitions WHERE job_id = ? ORDER BY id',
+                    (job_id,),
+                ).fetchall()
+        return tuple(
+            JobTransition(
+                job_id=row['job_id'],
+                scenario=ScenarioType(row['scenario']),
+                from_state=(
+                    RunState.REVIEWING
+                    if row['from_state'] == LEGACY_REVIEW_STATE
+                    else RunState(row['from_state'])
+                    if row['from_state'] is not None
+                    else None
+                ),
+                to_state=(
+                    RunState.REVIEWING
+                    if row['to_state'] == LEGACY_REVIEW_STATE
+                    else RunState(row['to_state'])
+                ),
+                scope_digest=row['scope_digest'],
+                occurred_at=datetime.fromisoformat(row['occurred_at']),
+            )
+            for row in rows
+        )
 
     def interrupted_origin(self, run_id: str) -> RunState:
         """Return the active state from which a run was interrupted."""
@@ -358,7 +451,7 @@ class RunStore:
             row = connection.execute(
                 """
                 SELECT from_state FROM transitions
-                WHERE run_id = ? AND to_state = ?
+                WHERE job_id = ? AND to_state = ?
                 ORDER BY id DESC LIMIT 1
                 """,
                 (str(run_id), RunState.INTERRUPTED),
@@ -367,12 +460,100 @@ class RunStore:
             raise RunNotFoundError(f'interruption transition for {run_id}')
         return RunState(row['from_state'])
 
+    @staticmethod
+    def _add_transition(
+        connection: sqlite3.Connection,
+        *,
+        job_id: str,
+        scenario: ScenarioType,
+        from_state: RunState | None,
+        to_state: RunState,
+        scope_digest: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        """Insert one transition with its immutable scope correlation."""
+
+        connection.execute(
+            """INSERT INTO transitions (
+                job_id, scenario, from_state, to_state, scope_digest, occurred_at
+            ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                job_id,
+                scenario,
+                from_state,
+                to_state,
+                scope_digest,
+                occurred_at.isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _migrate_transitions(connection: sqlite3.Connection) -> None:
+        """Migrate run-only transitions atomically and resume interrupted work."""
+
+        tables = {
+            row['name']
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        columns = {
+            row['name']
+            for row in connection.execute('PRAGMA table_info(transitions)').fetchall()
+        }
+        has_backup = 'run_transitions' in tables
+        if not has_backup and 'run_id' not in columns:
+            return
+        connection.execute('SAVEPOINT migrate_transitions')
+        try:
+            if not has_backup:
+                connection.execute('ALTER TABLE transitions RENAME TO run_transitions')
+                connection.execute(
+                    """CREATE TABLE transitions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL,
+                        scenario TEXT NOT NULL,
+                        from_state TEXT,
+                        to_state TEXT NOT NULL,
+                        scope_digest TEXT,
+                        occurred_at TEXT NOT NULL
+                    )"""
+                )
+            connection.execute(
+                """INSERT OR IGNORE INTO transitions (
+                id, job_id, scenario, from_state, to_state, scope_digest,
+                occurred_at
+                )
+                SELECT transitions.id, transitions.run_id,
+                    COALESCE(runs.scenario, ?), transitions.from_state,
+                    transitions.to_state, NULL, transitions.occurred_at
+                FROM run_transitions AS transitions
+                LEFT JOIN runs ON runs.id = transitions.run_id
+                ORDER BY transitions.id""",
+                (ScenarioType.LOCAL_CHANGES,),
+            )
+            connection.execute('DROP TABLE run_transitions')
+            connection.execute('RELEASE SAVEPOINT migrate_transitions')
+        except Exception:
+            connection.execute('ROLLBACK TO SAVEPOINT migrate_transitions')
+            connection.execute('RELEASE SAVEPOINT migrate_transitions')
+            raise
+
     def _connect(self) -> sqlite3.Connection:
         """Open a configured SQLite connection."""
 
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
         connection.execute('PRAGMA foreign_keys = ON')
+        connection.execute('PRAGMA busy_timeout = 5000')
+        return connection
+
+    def _connect_read_only(self) -> sqlite3.Connection:
+        """Open the existing database without permitting writes or creation."""
+
+        database_uri = f'{self.database_path.resolve().as_uri()}?mode=ro'
+        connection = sqlite3.connect(database_uri, uri=True)
+        connection.row_factory = sqlite3.Row
         connection.execute('PRAGMA busy_timeout = 5000')
         return connection
 
