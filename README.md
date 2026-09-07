@@ -10,7 +10,7 @@ worktree for remote review.
 ## Problem We Are Trying to Solve
 
 Coding agents can implement and review changes, but coordinating several agent
-invocations is still largely manual.
+task attempts is still largely manual.
 
 Agent-orchestra intends to be a thin coordination layer offering improved agent productivity.
 
@@ -153,30 +153,26 @@ the change to review.
 Run [`enqueue-local`](docs/cli.md#enqueue-local) to record one repo's
 uncommitted diff. Use [`enqueue-locals`](docs/cli.md#enqueue-locals) to scan
 immediate child repos, record dirty ones, and skip clean ones. Neither command
-starts development or review. The second example uses
-[`status`](docs/cli.md#status):
+starts development or review. The second example lists jobs:
 
 ```shell
-export RUN_ID="$(mise agent-orchestra -- enqueue-local /path/to/dirty/repo)"
-mise agent-orchestra -- status
+export JOB_ID="$(mise agent-orchestra -- enqueue-local /path/to/dirty/repo)"
+mise agent-orchestra -- jobs
 ```
 
-[`enqueue-local`](docs/cli.md#enqueue-local) prints only the new run ID, so
-command substitution can save it directly in `RUN_ID`. Confirm it before
+[`enqueue-local`](docs/cli.md#enqueue-local) prints only the new job ID, so
+command substitution can save it directly in `JOB_ID`. Confirm it before
 continuing:
 
 ```shell
-printf '%s\n' "$RUN_ID"
+printf '%s\n' "$JOB_ID"
 ```
 
 [`enqueue-locals`](docs/cli.md#enqueue-locals) prints one versioned JSON
-document containing the enqueued runs, summary counts, and per-repo failures.
-Select a run from its `runs` array. If the enqueue output is no longer
-available, run [`status`](docs/cli.md#status) and use the `id` from the matching
-repo entry. See the [batch CLI output contract](docs/cli.md#enqueue-locals) and
-[Run status output](docs/design.md#run-status-output) for recovery through
-[`status`](docs/cli.md#status). Its `runs_directory` field identifies the
-default evidence root used by `run` and `logs`.
+document containing the enqueued jobs, summary counts, and per-repo failures.
+Select a job from its `jobs` array. If the enqueue output is no longer
+available, run [`jobs`](docs/cli.md#job-and-task-views) and use `job_id` from
+the matching repo entry.
 
 ### 2. Run the review
 
@@ -184,7 +180,7 @@ Start the review with the default built-in Codex adapter through
 [`run`](docs/cli.md#run):
 
 ```shell
-mise agent-orchestra -- run "$RUN_ID" \
+mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review the queued implementation"
 ```
 
@@ -203,7 +199,7 @@ Select Claude Code independently for the reviewer role with
 [`run`](docs/cli.md#run):
 
 ```shell
-mise agent-orchestra -- run "$RUN_ID" \
+mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review the queued implementation" \
   --reviewer-agent claude-code \
   --reviewer-model sonnet
@@ -216,9 +212,9 @@ each remediation, and `--max-iterations` limits review requests (default: 3).
 The Codex developer remains confined to the assigned worktree but has outbound
 network access so project tooling can fetch dependencies required by local
 validation. Its writable `mise` data, tool installations, cache, and state plus
-the `uv` cache use invocation-scoped temporary directories. Existing mise tool
+the `uv` cache use attempt-scoped temporary directories. Existing mise tool
 installations remain available as read-only shared roots, and the assigned
-worktree's `mise` configuration is trusted for that invocation. This access
+worktree's `mise` configuration is trusted for that attempt. This access
 does not authorize commits, publication, or other remote lifecycle writes. The
 Codex reviewer remains read-only with command networking disabled.
 The Claude Code developer runs with OS-enforced filesystem sandboxing: writes
@@ -241,24 +237,19 @@ digest.
 
 ### 3. Inspect the result
 
-Run [`status`](docs/cli.md#status) to inspect durable workflow state. Use
-[`logs`](docs/cli.md#logs) to receive a versioned JSON document containing
-separate stdout and stderr entries with their role, agent, runtime, iteration,
-timing, and process outcome:
+Use the four [job and task views](docs/cli.md#job-and-task-views) to inspect
+durable workflow state, task history, attempts, and separate stdout and stderr
+streams:
 
 ```shell
-mise agent-orchestra -- logs "$RUN_ID"
-mise agent-orchestra -- logs "$RUN_ID" \
-  --iteration 2 --role reviewer --stream stderr
+mise agent-orchestra -- job "$JOB_ID"
+mise agent-orchestra -- tasks "$JOB_ID"
+mise agent-orchestra -- task "$TASK_ID"
 ```
 
-The [`logs` command](docs/cli.md#logs) also filters by `--invocation` and
-`--runtime`. Pass the same `--runs-directory` used by
-[`run`](docs/cli.md#run) when using a non-default evidence root. It is read-only,
-never uploads process output, and reports unsafe, malformed, or missing evidence
-through the same JSON contract instead of following paths outside the selected
-run. Older filename-only logs remain viewable with unavailable identity fields
-set to `null`.
+Pass the same `--runs-directory` used by [`run`](docs/cli.md#run) when using a
+non-default evidence root. These views are read-only, never upload process
+output, and reject evidence paths outside the selected job.
 
 A built-in review that requests changes dispatches the
 selected developer and repeats review after a new digest is produced. Approval
@@ -268,10 +259,10 @@ continue through [`resume`](docs/cli.md#resume). Blocked review, non-progress,
 invalid handoff, or iteration exhaustion stops without committing. A custom
 reviewer command retains the one-review compatibility path and stops at
 `changes_requested` because no custom developer command is configured.
-Worker failures are also recorded in the run's `failure.json`, so the exact
+Worker failures are also recorded in the job's `failure.json`, so the exact
 stable diagnostic remains available after the [CLI](docs/cli.md#run) exits.
 When the developer rejects or blocks every finding with rationale and makes no
-change, the run returns to `changes_requested` and records
+change, the job returns to `changes_requested` and records
 `decision-required.json` for human resolution instead of misclassifying the
 disagreement as non-progress.
 
@@ -282,14 +273,14 @@ orchestration.
 
 The current implementation provides:
 
-- typed run, review, and finding models;
+- typed job, review, and finding models;
 - an explicit, validated state machine;
-- SQLite run storage with transition history and optimistic updates;
+- SQLite job storage with transition history and optimistic updates;
 - an interface for agent adapters with timeouts;
 - digest capture for tracked and untracked local changes;
 - Markdown review rendering;
 - commands to initialize state, enqueue local changes from one repo or a
-  directory of repos, and inspect runs;
+  directory of repos, and inspect jobs and tasks;
 - a Python-native installer for Codex and Claude Code skills;
 - versioned developer and reviewer skills under `skills/`;
 - built-in Codex and Claude Code adapters for developer and reviewer roles,
@@ -297,9 +288,8 @@ The current implementation provides:
 - a bounded remediation loop with strict messages, finding dispositions,
   digest progress checks, role-specific timeouts, resumable interruptions and
   blocked handoffs, and iteration exhaustion;
-- adapter-neutral invocation records separating requested and effective model
-  provenance, plus read-only, filterable process log viewing with legacy-log
-  support.
+- adapter-neutral attempt records separating requested and effective model
+  provenance, plus read-only process stream viewing through tasks.
 
 The supported roles are documented separately:
 
@@ -309,9 +299,9 @@ The supported roles are documented separately:
 Installation and invocation examples are in
 [Development and review cycle](#development-and-review-cycle).
 
-Every review and remediation request, result, artifact, invocation
+Every review and remediation request, result, artifact, attempt
 configuration, process log, and terminal failure is persisted outside the
-worktree. Recoverable runs continue with the same run ID through the
+worktree. Recoverable jobs continue with the same job ID through the
 [`resume` command](docs/cli.md#resume); terminal replacements can retain lineage
 through [`enqueue-local --supersedes`](docs/cli.md#enqueue-local). Initial
 clean-worktree development, worktree creation, leases, Git provider

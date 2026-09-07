@@ -3,8 +3,9 @@
 ## How it works
 
 A user invokes the CLI to have one change developed and independently reviewed.
-Agent-orchestra records that work as a [run](concepts.md#runs), so it can
-preserve the objective, progress, and review history across agent invocations.
+Agent-orchestra records that work as a
+[job](concepts.md#jobs-tasks-and-attempts), so it can preserve the objective,
+progress, and review history across task attempts.
 The [orchestrator](concepts.md#system-participants) then coordinates the two
 roles:
 
@@ -44,7 +45,7 @@ The developer and reviewer communicate through versioned
 [messages](concepts.md#canonical-messages-and-artifacts). A
 [runtime](concepts.md#runtimes) and [adapter](concepts.md#adapters) execute each
 role with only its allowed [capabilities](concepts.md#capabilities). SQLite
-stores the run state, while messages, artifacts, and logs remain outside the
+stores the job state, while messages, artifacts, and streams remain outside the
 target worktree.
 
 Approval applies only to the reviewed diff. Commit and publication require
@@ -128,76 +129,46 @@ These choices optimize for local agents and minimum resource use. Python is the
 preferred implementation language, with a toolchain based on uv, Ruff, and
 mise.
 
-## Run ID format
+## Job ID format
 
-The [run ID](concepts.md#runs) has the form `{UTC timestamp}-{random hex}`, such
+The [job ID](concepts.md#jobs-tasks-and-attempts) has the form
+`{UTC timestamp}-{random hex}`, such
 as `20260902T130000Z-a7f3c921`. The timestamp makes IDs sortable, and the random
 suffix avoids collisions. Consumers treat IDs as opaque strings so older
 UUID-based runs remain readable.
 
-## Run status output
+## Job and task output
 
-The `status` command prints stored runs as versioned JSON. To recover a run ID,
-match its repo and worktree in the `runs` array:
+CLI output schema version 8 introduces the public `job` -> `task` -> `attempt`
+hierarchy. The `jobs`, `job`, `tasks`, and `task` commands are separate
+read-only views. `job.current` is always an array and contains only pending or
+running tasks. Completed work remains in `tasks` history. Attempt output uses
+`attempt_id` and embeds separately captured stdout and stderr streams.
 
-```json
-{
-  "schema_version": 7,
-  "runs_directory": "/home/user/.local/state/agent-orchestra/runs",
-  "runs": [
-    {
-      "id": "20260902T150612Z-a7f3c921",
-      "scenario": "local_changes",
-      "repository_path": "/path/to/primary/repo",
-      "worktree_path": "/path/to/linked/worktree",
-      "state": "queued",
-      "base_sha": "<base-commit-sha>",
-      "head_sha": "<head-commit-sha>",
-      "diff_digest": "sha256:<working-tree-digest>",
-      "iteration": 0,
-      "remote_url": null,
-      "supersedes_run_id": null,
-      "created_at": "2026-09-02T15:06:12Z",
-      "updated_at": "2026-09-02T15:06:12Z"
-    }
-  ]
-}
-```
+The SQLite tables and canonical evidence retain their implementation-level
+column and field names. Those names are not exposed by the schema-8 CLI. This
+keeps storage mechanics separate from the public vocabulary without adding
+compatibility aliases to the command surface.
 
-`runs_directory` is the resolved absolute default evidence root used by `run`
-and `logs` when no command-specific override is supplied. A custom
-`--runs-directory` is not persisted in the run record and therefore is not
-reported by `status`.
+Schema version history:
 
-For newly captured local changes, `repository_path` is the primary repository
-location reported by Git. This is the primary worktree for a non-bare
-repository, including one whose Git directory is stored separately, or the
-backing bare repository path. `worktree_path` is the exact checkout whose
-changes were captured and where agents execute. The values are equal when that
-checkout is the primary worktree and normally differ for a linked-worktree
-capture. Existing run records are historical evidence and are not rewritten,
-so older local runs may contain the selected worktree in both fields.
-
-This CLI output is not a workflow message. The message contract begins below.
-CLI output schema version 5 adds `supersedes_run_id`, resumable-run output, and
-invocation attempt numbers. Version 4 adds `runs_directory` to successful
-`status` documents. Version 3 changes `enqueue-locals` from plain-text rows and
-stderr diagnostics to one JSON document. Version 2 renamed `awaiting_review`
-to `reviewing`. Existing databases remain readable, and initialization
-rewrites the legacy stored value. Consumers of schema version 1 should treat
-the two names as the same lifecycle state while migrating to a current schema.
+- Version 7 exposed the former `status` and `logs` documents with `run_id`,
+  `runs`, and `invocation_id` fields.
+- Version 8 replaces those commands with `jobs`, `job`, `tasks`, and `task`,
+  and exposes `job_id`, `jobs`, and `attempt_id`. Stored SQLite columns and
+  canonical evidence keep their implementation-level field names.
 
 ## Batch enqueue output
 
 `enqueue-locals` prints one versioned JSON document. Its `directory` identifies
-the scanned parent, `runs` lists enqueued run IDs and absolute worktree paths in
+the scanned parent, `jobs` lists enqueued job IDs and absolute worktree paths in
 repo-basename order, and `summary` contains numeric `enqueued`, `clean`, and
 `failed` counts. Independent repo failures appear in `failures` with their
 source path and diagnostic. A command-level failure uses the top-level `error`
 object; successful and completed partial scans set `error` to `null`.
 
 This JSON is CLI output rather than a workflow message. Callers must use the
-declared schema version and treat run IDs as opaque strings.
+declared schema version and treat job IDs as opaque strings.
 
 ## Message representation
 
@@ -618,15 +589,13 @@ interrupted, any artifact it produced is moved to an attempt-qualified file in
 `logs/`; the retry must produce the canonical artifact again before its result
 can be accepted.
 
-`logs RUN_ID` is a read-only JSON view over that evidence. Its versioned
-envelope contains the selected stdout and stderr entries, independently missing
-stream failures, and a command-level error. Filters select iteration, role,
-invocation, runtime, or stream without merging stdout and stderr. Every path
-must resolve beneath the configured runs directory and match the selected run
-ID; traversal, symlink escape, malformed metadata, and missing streams are
-reported through the same JSON contract. Legacy filename-only logs remain
-readable, but fields that cannot be established from existing evidence are
-`null` and the entry is marked `legacy`.
+`task TASK_ID` is the read-only public view over attempt evidence. It resolves
+the parent job from the task ID, groups all numbered attempts, and returns each
+attempt's separate stdout and stderr stream objects. Every path must resolve
+beneath the configured evidence root and match the selected job; traversal,
+symlink escape, and malformed metadata fail closed. The public attempt object
+uses `attempt_id`; the persisted invocation identifier remains an internal
+evidence detail.
 
 ## Request and response validation
 
@@ -717,9 +686,9 @@ invocation-attempt evidence is appended. Timeout and user interruption enter
 `interrupted`; malformed protocol evidence, invalid execution metadata,
 nonzero process exits, and other non-recoverable failures enter `failed`.
 
-When a failed or superseded run truly cannot continue, a caller may enqueue a
-new run with `--supersedes RUN_ID`. The new run stores that lineage link. The
-old evidence is never copied or rewritten, and recoverable runs cannot be
+When a failed or superseded job truly cannot continue, a caller may enqueue a
+new job with `--supersedes JOB_ID`. The new job stores that lineage link. The
+old evidence is never copied or rewritten, and recoverable jobs cannot be
 replaced through this escape hatch.
 
 Approval is tied to the reviewed digest. If the diff changes after approval or

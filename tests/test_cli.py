@@ -637,6 +637,33 @@ def test_enqueue_local_records_terminal_run_lineage(
     assert str(replacement.id) in capsys.readouterr().out
 
 
+def test_enqueue_local_supersedes_errors_use_job_vocabulary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Use the public job noun when a predecessor cannot be found."""
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('change\n')
+    database = tmp_path / 'missing.db'
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'enqueue-local',
+            str(repo),
+            '--supersedes',
+            'missing-job',
+        ]
+    )
+
+    assert result == 2
+    assert capsys.readouterr().err == 'error: job not found: missing-job\n'
+    assert not database.exists()
+
+
 def test_enqueue_locals_captures_changed_child_repositories(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -663,11 +690,11 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 7,
+        'schema_version': 8,
         'directory': str(projects),
-        'runs': [
-            {'id': str(runs[1].id), 'worktree_path': str(changed_a)},
-            {'id': str(runs[0].id), 'worktree_path': str(changed_b)},
+        'jobs': [
+            {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},
+            {'job_id': str(runs[0].id), 'worktree_path': str(changed_b)},
         ],
         'summary': {'enqueued': 2, 'clean': 1, 'failed': 0},
         'failures': [],
@@ -696,8 +723,8 @@ def test_enqueue_locals_distinguishes_linked_worktree_repo(
     run = RunStore(database).list_runs()[0]
     assert run.repo_path == repo
     assert run.worktree_path == worktree
-    assert json.loads(capsys.readouterr().out)['runs'] == [
-        {'id': str(run.id), 'worktree_path': str(worktree)}
+    assert json.loads(capsys.readouterr().out)['jobs'] == [
+        {'job_id': str(run.id), 'worktree_path': str(worktree)}
     ]
 
 
@@ -813,7 +840,7 @@ def test_enqueue_locals_reports_directory_without_repositories(
     assert not database.exists()
     document = json.loads(capsys.readouterr().out)
     assert document['directory'] == str(projects)
-    assert document['runs'] == []
+    assert document['jobs'] == []
     assert document['summary'] == {'enqueued': 0, 'clean': 0, 'failed': 0}
     assert document['failures'] == []
     assert document['error'] is None
@@ -839,24 +866,33 @@ def test_enqueue_locals_rejects_missing_directory(
     assert not database.exists()
 
 
-def test_status_does_not_create_missing_database(
+def test_jobs_does_not_create_missing_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Keep status read-only when no state database exists."""
+    """Keep job listing read-only when no state database exists."""
 
     database = tmp_path / 'missing' / 'state.db'
 
-    result = main(['--database', str(database), 'status'])
+    result = main(['--database', str(database), 'jobs'])
 
     assert result == 2
-    assert 'state database not found' in capsys.readouterr().err
+    assert 'state database not found' in capsys.readouterr().out
     assert not database.exists()
 
 
-def test_status_lists_persisted_run(
+def test_jobs_rejects_evidence_directory_option(tmp_path: Path) -> None:
+    """Do not accept an option that job listing cannot use."""
+
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(['jobs', '--runs-directory', str(tmp_path / 'evidence')])
+
+
+def test_jobs_lists_persisted_job(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Display a persisted run without changing state."""
+    """Display a persisted job without changing state."""
 
     database = tmp_path / 'state.db'
     store = RunStore(database)
@@ -864,28 +900,29 @@ def test_status_lists_persisted_run(
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
 
-    result = main(['--database', str(database), 'status'])
+    result = main(['--database', str(database), 'jobs'])
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith(
-        '{\n  "schema_version": 7,\n'
-        f'  "runs_directory": "{DEFAULT_RUNS_DIRECTORY.expanduser().resolve()}",\n'
-        '  "runs": [\n    {\n'
-    )
+    assert output.startswith('{\n  "schema_version": 8,\n  "jobs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
-        'repository_path' if field.name == 'repo_path' else field.name
+        'job_id'
+        if field.name == 'id'
+        else 'repository_path'
+        if field.name == 'repo_path'
+        else 'supersedes_job_id'
+        if field.name == 'supersedes_run_id'
+        else field.name
         for field in fields(Run)
     }
-    assert set(document['runs'][0]) == expected_fields
+    assert set(document['jobs'][0]) == expected_fields
     assert document == {
-        'schema_version': 7,
-        'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
-        'runs': [
+        'schema_version': 8,
+        'jobs': [
             {
-                'id': str(run.id),
+                'job_id': str(run.id),
                 'scenario': 'local_changes',
                 'repository_path': str(tmp_path),
                 'worktree_path': str(tmp_path),
@@ -895,18 +932,19 @@ def test_status_lists_persisted_run(
                 'diff_digest': 'digest',
                 'iteration': 0,
                 'remote_url': None,
-                'supersedes_run_id': None,
+                'supersedes_job_id': None,
                 'created_at': run.created_at.isoformat().replace('+00:00', 'Z'),
                 'updated_at': run.updated_at.isoformat().replace('+00:00', 'Z'),
             }
         ],
+        'error': None,
     }
 
 
-def test_status_filters_json_document_by_run_id(
+def test_job_selects_one_job_by_id(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Keep single-run status output in the versioned runs envelope."""
+    """Return a single job with no current tasks before execution."""
 
     database = tmp_path / 'state.db'
     store = RunStore(database)
@@ -916,15 +954,16 @@ def test_status_filters_json_document_by_run_id(
     store.add(first)
     store.add(second)
 
-    result = main(['--database', str(database), 'status', str(first.id)])
+    result = main(['--database', str(database), 'job', str(first.id)])
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 7
-    assert [run['id'] for run in document['runs']] == [str(first.id)]
+    assert document['schema_version'] == 8
+    assert document['job']['job_id'] == str(first.id)
+    assert document['job']['current'] == []
 
 
-def test_status_reads_legacy_review_state_without_initializing(
+def test_job_reads_persisted_review_state_without_initializing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Expose the renamed state without requiring a separate init command."""
@@ -939,12 +978,12 @@ def test_status_reads_legacy_review_state_without_initializing(
             "UPDATE runs SET state = 'awaiting_review' WHERE id = ?", (str(run.id),)
         )
 
-    result = main(['--database', str(database), 'status', str(run.id)])
+    result = main(['--database', str(database), 'job', str(run.id)])
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 7
-    assert document['runs'][0]['state'] == 'reviewing'
+    assert document['schema_version'] == 8
+    assert document['job']['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
             'SELECT state FROM runs WHERE id = ?', (str(run.id),)
@@ -952,7 +991,7 @@ def test_status_reads_legacy_review_state_without_initializing(
     assert stored_state == ('awaiting_review',)
 
 
-def test_status_lists_empty_runs_as_json(
+def test_jobs_lists_empty_jobs_as_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Return a stable empty collection for an initialized database."""
@@ -960,20 +999,20 @@ def test_status_lists_empty_runs_as_json(
     database = tmp_path / 'state.db'
     RunStore(database).initialize()
 
-    result = main(['--database', str(database), 'status'])
+    result = main(['--database', str(database), 'jobs'])
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 7,
-        'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
-        'runs': [],
+        'schema_version': 8,
+        'jobs': [],
+        'error': None,
     }
 
 
-def test_status_reports_resolved_default_runs_directory(
+def test_task_commands_share_resolved_default_runs_directory(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Report the canonical evidence root when its configured ancestor is a symlink."""
+    """Resolve one default evidence root for every evidence-aware view."""
 
     database = tmp_path / 'state.db'
     RunStore(database).initialize()
@@ -983,27 +1022,36 @@ def test_status_reports_resolved_default_runs_directory(
     linked_parent.symlink_to(actual_parent, target_is_directory=True)
     monkeypatch.setattr(cli, 'DEFAULT_RUNS_DIRECTORY', linked_parent / 'runs')
 
-    result = main(['--database', str(database), 'status'])
+    job = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    RunStore(database).add(job)
+    (actual_parent / 'runs' / str(job.id)).mkdir(parents=True)
 
-    assert result == 0
-    assert json.loads(capsys.readouterr().out)['runs_directory'] == str(
-        (actual_parent / 'runs').resolve()
-    )
+    for command, identifier in (
+        ('job', str(job.id)),
+        ('tasks', str(job.id)),
+        ('task', f'{job.id}:000001-reviewer'),
+    ):
+        arguments = ['--database', str(database), command, identifier]
+        result = main(arguments)
+        document = json.loads(capsys.readouterr().out)
+        assert result == (2 if command == 'task' else 0)
+        if command == 'task':
+            assert document['error']['code'] == 'task_not_found'
 
 
-def test_run_and_logs_share_default_runs_directory() -> None:
-    """Keep both evidence consumers aligned with the status contract."""
+def test_run_and_task_share_default_runs_directory() -> None:
+    """Keep evidence producers and consumers on the same default root."""
 
     parser = build_parser()
 
     run_args = parser.parse_args(['run', 'run-id', '--objective', 'Review.'])
-    logs_args = parser.parse_args(['logs', 'run-id'])
+    task_args = parser.parse_args(['task', 'job-id:000001-reviewer'])
 
     assert run_args.runs_directory == DEFAULT_RUNS_DIRECTORY
-    assert logs_args.runs_directory == DEFAULT_RUNS_DIRECTORY
+    assert task_args.runs_directory == DEFAULT_RUNS_DIRECTORY
 
 
-def test_status_reports_unknown_run(
+def test_job_reports_unknown_job(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Return a distinct error when the requested run does not exist."""
@@ -1011,10 +1059,11 @@ def test_status_reports_unknown_run(
     database = tmp_path / 'state.db'
     RunStore(database).initialize()
 
-    result = main(['--database', str(database), 'status', str(uuid4())])
+    result = main(['--database', str(database), 'job', str(uuid4())])
 
     assert result == 2
-    assert 'run not found' in capsys.readouterr().err
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'job_not_found'
 
 
 def test_run_dispatches_review_and_awaits_commit_authorization(
@@ -1074,8 +1123,8 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert invocation['exit_code'] == 0
     assert invocation['timed_out'] is False
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 7,
-        'run_id': str(enqueued_run.run.id),
+        'schema_version': 8,
+        'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
     }
@@ -1432,15 +1481,18 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 7,
-        'run_id': str(context.run.id),
+        'schema_version': 8,
+        'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
     }
 
     assert main(resume_arguments(context)) == 2
     repeated = json.loads(capsys.readouterr().out)
-    assert repeated['error']['code'] == 'run_not_resumable'
+    assert repeated['error']['code'] == 'job_not_resumable'
+    assert repeated['error']['message'] == (
+        'job is not resumable from awaiting_commit_authorization'
+    )
     assert len(tuple(messages.iterdir())) == 8
 
 
@@ -2630,7 +2682,7 @@ def test_concurrent_active_resumes_launch_one_process(
         ('timeout', '1', 2, True),
     ],
 )
-def test_builtin_run_exposes_child_output_through_logs(
+def test_builtin_run_exposes_child_output_through_task_view(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -2666,8 +2718,8 @@ def test_builtin_run_exposes_child_output_through_logs(
             [
                 '--database',
                 str(enqueued_run.database),
-                'logs',
-                str(enqueued_run.run.id),
+                'task',
+                f'{enqueued_run.run.id}:000001-reviewer',
                 '--runs-directory',
                 str(enqueued_run.runs_directory),
             ]
@@ -2675,13 +2727,13 @@ def test_builtin_run_exposes_child_output_through_logs(
         == 0
     )
     document = json.loads(capsys.readouterr().out)
-    streams = {entry['stream']: entry for entry in document['streams']}
-    assert 'child stdout\n' in streams['stdout']['content']
-    assert 'child stderr\n' in streams['stderr']['content']
-    assert streams['stdout']['requested_model'] == 'test-model'
-    assert streams['stdout']['effective_models'] == []
-    assert streams['stdout']['effective_model_status'] == 'unavailable'
-    assert streams['stdout']['timed_out'] is timed_out
+    attempt = document['task']['attempts'][0]
+    assert 'child stdout\n' in attempt['streams']['stdout']['content']
+    assert 'child stderr\n' in attempt['streams']['stderr']['content']
+    assert attempt['requested_model'] == 'test-model'
+    assert attempt['effective_models'] == []
+    assert attempt['effective_model_status'] == 'unavailable'
+    assert attempt['timed_out'] is timed_out
 
 
 def test_run_rejects_state_database_inside_worktree(
