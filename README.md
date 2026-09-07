@@ -210,8 +210,7 @@ Select Claude Code independently for the reviewer role with
 ```shell
 mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review the queued implementation" \
-  --reviewer-agent claude-code \
-  --reviewer-model sonnet
+  --reviewer-agent claude-code --reviewer-model sonnet
 ```
 
 Select the developer runtime and its model independently with
