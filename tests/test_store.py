@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agent_orchestra.models import Run, RunState
+from agent_orchestra.models import IssueJob, Run, RunState, ScenarioType
 from agent_orchestra.store import ConcurrentUpdateError, RunNotFoundError, RunStore
 from agent_orchestra.workflow import transition
 
@@ -127,6 +127,121 @@ def test_update_records_new_state(tmp_path: Path) -> None:
     store.update(updated, expected_state=RunState.QUEUED)
 
     assert store.get(run.id).state is RunState.PREPARING
+    assert [item.to_state for item in store.list_transitions(run.id)] == [
+        RunState.QUEUED,
+        RunState.PREPARING,
+    ]
+    assert all(item.scope_digest == 'digest' for item in store.list_transitions(run.id))
+
+
+def test_issue_job_records_ordered_transitions_with_source_digest(
+    tmp_path: Path,
+) -> None:
+    """Record issue-job creation and updates with immutable scope correlation."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    job = IssueJob.create(
+        provider='github',
+        host='github.com',
+        remote_url='https://github.com/acme/widgets/issues/12',
+        namespace='acme',
+        project='widgets',
+        issue_number=12,
+        title='Describe feature',
+        author='author',
+        source_updated_at='2026-01-02T00:00:00Z',
+        source_digest='sha256:' + '1' * 64,
+    )
+    store.add_issue(job)
+    reviewing = replace(job, state=RunState.REVIEWING, iteration=1)
+    store.update_issue(reviewing, RunState.QUEUED)
+    finished = replace(reviewing, state=RunState.CHANGES_REQUESTED)
+    store.update_issue(finished, RunState.REVIEWING)
+
+    transitions = store.list_transitions(job.id)
+
+    assert [item.from_state for item in transitions] == [
+        None,
+        RunState.QUEUED,
+        RunState.REVIEWING,
+    ]
+    assert [item.to_state for item in transitions] == [
+        RunState.QUEUED,
+        RunState.REVIEWING,
+        RunState.CHANGES_REQUESTED,
+    ]
+    assert all(item.scenario is ScenarioType.ISSUE_REVIEW for item in transitions)
+    assert all(item.scope_digest == job.source_digest for item in transitions)
+
+
+def test_list_transitions_does_not_create_an_absent_database(tmp_path: Path) -> None:
+    """Return empty history without creating storage from a read path."""
+
+    database = tmp_path / 'state.db'
+
+    assert RunStore(database).list_transitions('missing-job') == ()
+    assert not database.exists()
+
+
+def test_list_transitions_handles_an_absent_table_without_mutation(
+    tmp_path: Path,
+) -> None:
+    """Return empty history when an existing database predates transition storage."""
+
+    database = tmp_path / 'state.db'
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE placeholder (id INTEGER PRIMARY KEY)')
+    before = database.read_bytes()
+
+    assert RunStore(database).list_transitions('missing-job') == ()
+    assert database.read_bytes() == before
+
+
+def test_initialize_migrates_run_transitions_without_inventing_digest(
+    tmp_path: Path,
+) -> None:
+    """Preserve old transition order while leaving historical scope unknown."""
+
+    database = tmp_path / 'state.db'
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE runs (
+                id TEXT PRIMARY KEY, scenario TEXT NOT NULL,
+                repository_path TEXT NOT NULL, worktree_path TEXT NOT NULL,
+                state TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL,
+                diff_digest TEXT, iteration INTEGER NOT NULL, remote_url TEXT,
+                supersedes_run_id TEXT, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES runs(id), from_state TEXT,
+                to_state TEXT NOT NULL, occurred_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            'INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            RunStore._values(run),
+        )
+        connection.execute(
+            'INSERT INTO transitions VALUES (?, ?, ?, ?, ?)',
+            (7, run.id, None, run.state, run.created_at.isoformat()),
+        )
+
+    store = RunStore(database)
+    store.initialize()
+
+    transition_history = store.list_transitions(run.id)
+    assert len(transition_history) == 1
+    assert transition_history[0].scenario is ScenarioType.LOCAL_CHANGES
+    assert transition_history[0].scope_digest is None
+    with sqlite3.connect(database) as connection:
+        row = connection.execute('SELECT id, job_id FROM transitions').fetchone()
+    assert row == (7, run.id)
 
 
 def test_initialize_renames_legacy_awaiting_review_state(tmp_path: Path) -> None:
@@ -142,13 +257,19 @@ def test_initialize_renames_legacy_awaiting_review_state(tmp_path: Path) -> None
             "UPDATE runs SET state = 'awaiting_review' WHERE id = ?", (str(run.id),)
         )
         connection.execute(
-            "UPDATE transitions SET to_state = 'awaiting_review' WHERE run_id = ?",
+            "UPDATE transitions SET to_state = 'awaiting_review' WHERE job_id = ?",
             (str(run.id),),
         )
         connection.execute(
-            'INSERT INTO transitions (run_id, from_state, to_state, occurred_at) '
-            "VALUES (?, 'awaiting_review', 'approved', ?)",
-            (str(run.id), run.updated_at.isoformat()),
+            """INSERT INTO transitions (
+                job_id, scenario, from_state, to_state, scope_digest, occurred_at
+            ) VALUES (?, ?, 'awaiting_review', 'approved', ?, ?)""",
+            (
+                str(run.id),
+                run.scenario,
+                run.diff_digest,
+                run.updated_at.isoformat(),
+            ),
         )
 
     store.initialize()

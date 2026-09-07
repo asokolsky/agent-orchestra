@@ -73,6 +73,22 @@ diff under review. SQLite fits one-machine coordination; a distributed or
 multi-host service would need a different storage implementation behind the
 same interface.
 
+## State transition history
+
+One ordered transition table records state changes for both source-code and
+issue-review jobs. Each row carries the opaque job ID, scenario, prior and next
+state, occurrence time, and the diff or source digest current at that
+transition. Job creation records an initial transition with no prior state;
+every later row is inserted in the same transaction as its successful
+state-checked job update.
+
+Schema initialization migrates run-only transition rows into this shared
+shape. Their transition-time digest is unknowable and remains null; current
+rows must never be backfilled from a job's later digest. New transitions always
+require a scope digest. The store exposes transition history in persistent row
+order through a read-only API that neither initializes nor changes the
+database.
+
 ## Synchronization and collision avoidance
 
 Agents do not maintain inboxes or wait on a shared message queue. The current
