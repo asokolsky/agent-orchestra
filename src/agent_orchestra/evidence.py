@@ -9,12 +9,55 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, cast
 from uuid import uuid4
 
 HASH_CHUNK_SIZE = 1024 * 1024
 INTEGRITY_INDEX = '.integrity.json'
 INTEGRITY_LOCK = '.integrity.lock'
 INTEGRITY_PENDING = '.integrity.pending.json'
+EvidenceType = Literal[
+    'decision_required',
+    'developer_handoff',
+    'execution',
+    'failure',
+    'invocation_record',
+    'issue_feedback',
+    'issue_review_request',
+    'issue_review_result',
+    'issue_snapshot',
+    'process_stderr',
+    'process_stdout',
+    'rejected_developer_handoff',
+    'rejected_review_artifact',
+    'rejected_review_result',
+    'remediation_request',
+    'review_artifact',
+    'review_request',
+    'review_result',
+]
+EVIDENCE_TYPES: frozenset[str] = frozenset(
+    {
+        'decision_required',
+        'developer_handoff',
+        'execution',
+        'failure',
+        'invocation_record',
+        'issue_feedback',
+        'issue_review_request',
+        'issue_review_result',
+        'issue_snapshot',
+        'process_stderr',
+        'process_stdout',
+        'rejected_developer_handoff',
+        'rejected_review_artifact',
+        'rejected_review_result',
+        'remediation_request',
+        'review_artifact',
+        'review_request',
+        'review_result',
+    }
+)
 
 
 class EvidencePathError(ValueError):
@@ -26,7 +69,7 @@ class IntegrityEntry:
     """Immutable metadata for one finalized evidence file."""
 
     job_id: str
-    evidence_type: str
+    evidence_type: EvidenceType
     path: str
     size: int
     sha256: str
@@ -69,7 +112,7 @@ def record_finalized_evidence(
     root: Path,
     job_id: str,
     path: Path,
-    evidence_type: str,
+    evidence_type: EvidenceType,
     *,
     finalized_at: datetime | None = None,
     replace_existing: bool = True,
@@ -96,7 +139,13 @@ def record_finalized_evidence(
     with os.fdopen(lock_descriptor, 'a+', encoding='utf-8') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         _recover_pending(root, job_id)
-        _update_index(root, job_id, entry, replace_existing=replace_existing)
+        _update_index(
+            root,
+            job_id,
+            entry,
+            replace_existing=replace_existing,
+            native_creation=False,
+        )
     return entry
 
 
@@ -105,9 +154,10 @@ def finalize_evidence_write(
     job_id: str,
     temporary: Path,
     path: Path,
-    evidence_type: str,
+    evidence_type: EvidenceType,
     *,
     exclusive: bool = False,
+    remove_source_entry: bool = False,
 ) -> IntegrityEntry:
     """Publish a prepared file through a recoverable index transaction."""
 
@@ -131,7 +181,8 @@ def finalize_evidence_write(
     with os.fdopen(descriptor, 'a+', encoding='utf-8') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         _recover_pending(root, job_id)
-        _write_pending(root, job_id, relative, evidence_type)
+        removed_path = temporary_relative.as_posix() if remove_source_entry else None
+        _write_pending(root, job_id, relative, evidence_type, removed_path)
         if exclusive:
             try:
                 os.link(temporary, contained)
@@ -142,9 +193,34 @@ def finalize_evidence_write(
         else:
             temporary.replace(contained)
         entry = _entry_for_file(root, job_id, contained, evidence_type)
-        _update_index(root, job_id, entry)
+        _update_index(
+            root,
+            job_id,
+            entry,
+            native_creation=True,
+            removed_path=removed_path,
+        )
         resolve_evidence_path(root, job_id, INTEGRITY_PENDING).unlink()
     return entry
+
+
+def relocate_finalized_evidence(
+    root: Path,
+    job_id: str,
+    source: Path,
+    destination: Path,
+    evidence_type: EvidenceType,
+) -> IntegrityEntry:
+    """Atomically relocate finalized evidence and its indexed identity."""
+
+    return finalize_evidence_write(
+        root,
+        job_id,
+        source,
+        destination,
+        evidence_type,
+        remove_source_entry=True,
+    )
 
 
 def recover_evidence_index(root: Path, job_id: str) -> None:
@@ -176,7 +252,7 @@ def _relative_evidence_path(job_directory: Path, path: Path) -> Path:
 
 
 def _entry_for_file(
-    root: Path, job_id: str, path: Path, evidence_type: str
+    root: Path, job_id: str, path: Path, evidence_type: EvidenceType
 ) -> IntegrityEntry:
     """Hash one contained regular file into an integrity entry."""
 
@@ -217,11 +293,14 @@ def _update_index(
     entry: IntegrityEntry,
     *,
     replace_existing: bool = True,
+    native_creation: bool,
+    removed_path: str | None = None,
 ) -> None:
     """Replace one entry in the integrity index while its lock is held."""
 
     index_path = resolve_evidence_path(root, job_id, INTEGRITY_INDEX)
     entries: list[object] = []
+    backfilled_at: str | None = None
     if index_path.exists():
         try:
             descriptor = os.open(index_path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
@@ -232,14 +311,26 @@ def _update_index(
             message = 'integrity index is malformed'
             raise EvidencePathError(message) from error
         if (
-            document.get('schema_version') != 1
+            set(document) != {'schema_version', 'job_id', 'backfilled_at', 'entries'}
+            or document.get('schema_version') != 1
             or document.get('job_id') != job_id
+            or (
+                document.get('backfilled_at') is not None
+                and not isinstance(document.get('backfilled_at'), str)
+            )
             or not _valid_entries(root, job_id, entries)
         ):
             message = 'integrity index is malformed'
             raise EvidencePathError(message)
+        backfilled_at = document['backfilled_at']
+    elif not native_creation or _has_other_evidence(root, job_id, entry.path):
+        backfilled_at = datetime.now(UTC).isoformat().replace('+00:00', 'Z')
     serialized = asdict(entry)
     valid_entries = [item for item in entries if isinstance(item, dict)]
+    if removed_path is not None:
+        valid_entries = [
+            item for item in valid_entries if item.get('path') != removed_path
+        ]
     prior = next(
         (item for item in valid_entries if item.get('path') == entry.path), None
     )
@@ -255,7 +346,12 @@ def _update_index(
     else:
         valid_entries.append(serialized)
     valid_entries.sort(key=lambda item: str(item['path']))
-    document = {'schema_version': 1, 'job_id': job_id, 'entries': valid_entries}
+    document = {
+        'schema_version': 1,
+        'job_id': job_id,
+        'backfilled_at': backfilled_at,
+        'entries': valid_entries,
+    }
     temporary = index_path.with_name(f'.{index_path.name}.{uuid4()}.tmp')
     try:
         with temporary.open('x', encoding='utf-8') as file:
@@ -285,7 +381,7 @@ def _valid_entries(root: Path, job_id: str, entries: list[object]) -> bool:
         finalized_at = item.get('finalized_at')
         if (
             not isinstance(evidence_type, str)
-            or not evidence_type
+            or evidence_type not in EVIDENCE_TYPES
             or not isinstance(path, str)
             or not path
             or path in paths
@@ -307,12 +403,23 @@ def _valid_entries(root: Path, job_id: str, entries: list[object]) -> bool:
     return True
 
 
-def _write_pending(root: Path, job_id: str, relative: Path, evidence_type: str) -> None:
+def _write_pending(
+    root: Path,
+    job_id: str,
+    relative: Path,
+    evidence_type: EvidenceType,
+    removed_path: str | None,
+) -> None:
     """Durably announce one evidence rename before publishing it."""
 
     path = resolve_evidence_path(root, job_id, INTEGRITY_PENDING)
     temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
-    document = {'job_id': job_id, 'path': relative.as_posix(), 'type': evidence_type}
+    document = {
+        'job_id': job_id,
+        'path': relative.as_posix(),
+        'type': evidence_type,
+        'removed_path': removed_path,
+    }
     try:
         with temporary.open('x', encoding='utf-8') as file:
             json.dump(document, file, indent=2)
@@ -337,21 +444,54 @@ def _recover_pending(root: Path, job_id: str) -> None:
         raise EvidencePathError(message) from error
     if (
         not isinstance(document, dict)
-        or set(document) != {'job_id', 'path', 'type'}
+        or set(document) != {'job_id', 'path', 'type', 'removed_path'}
         or document['job_id'] != job_id
         or not isinstance(document['path'], str)
         or not isinstance(document['type'], str)
-        or not document['type']
+        or document['type'] not in EVIDENCE_TYPES
+        or (
+            document['removed_path'] is not None
+            and not isinstance(document['removed_path'], str)
+        )
     ):
         message = 'pending integrity transaction is malformed'
         raise EvidencePathError(message)
     relative = Path(document['path'])
-    evidence_type = document['type']
+    evidence_type = cast('EvidenceType', document['type'])
     target = resolve_evidence_path(root, job_id, *relative.parts)
+    removed_path = document['removed_path']
+    if removed_path is not None:
+        removed_relative = Path(removed_path)
+        removed_source = resolve_evidence_path(root, job_id, *removed_relative.parts)
+        removed_path = removed_relative.as_posix()
+        if removed_source.exists():
+            pending.unlink()
+            return
     if target.is_file():
         _update_index(
             root,
             job_id,
             _entry_for_file(root, job_id, target, evidence_type),
+            native_creation=True,
+            removed_path=removed_path,
         )
     pending.unlink()
+
+
+def _has_other_evidence(root: Path, job_id: str, current_path: str) -> bool:
+    """Return whether an index is first appearing around earlier evidence."""
+
+    job_directory = resolve_evidence_path(root, job_id)
+    internal = {INTEGRITY_INDEX, INTEGRITY_LOCK, INTEGRITY_PENDING}
+    for directory, names, files in os.walk(job_directory, followlinks=False):
+        names[:] = [name for name in names if not (Path(directory) / name).is_symlink()]
+        for name in files:
+            path = Path(directory) / name
+            relative = path.relative_to(job_directory).as_posix()
+            if (
+                relative != current_path
+                and relative not in internal
+                and not name.endswith('.tmp')
+            ):
+                return True
+    return False

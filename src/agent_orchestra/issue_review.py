@@ -20,6 +20,7 @@ from agent_orchestra.adapter.codex import CodexIssueReviewerAdapter
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.evidence import (
     EvidencePathError,
+    EvidenceType,
     finalize_evidence_write,
     record_finalized_evidence,
     recover_evidence_index,
@@ -65,7 +66,12 @@ def _reject(message: str) -> Never:
     raise IssueReviewError(message)
 
 
-def _write_json(job_directory: Path, path: Path, document: dict[str, Any]) -> None:
+def _write_json(
+    job_directory: Path,
+    path: Path,
+    document: dict[str, Any],
+    evidence_type: EvidenceType,
+) -> None:
     """Write a JSON object atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,14 +83,22 @@ def _write_json(job_directory: Path, path: Path, document: dict[str, Any]) -> No
             file.flush()
             os.fsync(file.fileno())
         finalize_evidence_write(
-            job_directory.parent, job_directory.name, temporary, path, path.stem
+            job_directory.parent,
+            job_directory.name,
+            temporary,
+            path,
+            evidence_type,
         )
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def _write_text(
-    job_directory: Path, path: Path, content: str, *, finalized: bool = False
+    job_directory: Path,
+    path: Path,
+    content: str,
+    *,
+    evidence_type: EvidenceType | None = None,
 ) -> None:
     """Write UTF-8 text atomically."""
 
@@ -95,13 +109,13 @@ def _write_text(
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        if finalized:
+        if evidence_type is not None:
             finalize_evidence_write(
                 job_directory.parent,
                 job_directory.name,
                 temporary,
                 path,
-                path.parent.name,
+                evidence_type,
             )
         else:
             temporary.replace(path)
@@ -127,7 +141,9 @@ def _job_directory(root: Path, job_id: str) -> Path:
         raise IssueReviewError(str(error)) from error
 
 
-def _record_finalized_path(job_directory: Path, path: Path, evidence_type: str) -> None:
+def _record_finalized_path(
+    job_directory: Path, path: Path, evidence_type: EvidenceType
+) -> None:
     """Record a finalized issue-review artifact in its owning job index."""
 
     record_finalized_evidence(
@@ -542,7 +558,7 @@ def run_issue_review(
         f'.candidate-result-{uuid4()}.json',
     )
     if not retry:
-        _write_json(job_directory, request_path, request)
+        _write_json(job_directory, request_path, request, 'issue_review_request')
     reviewing = replace(
         job,
         state=RunState.REVIEWING,
@@ -601,11 +617,11 @@ def run_issue_review(
                 job_directory, 'iterations', f'{iteration:06d}', 'feedback.md'
             ),
             _render_feedback(result_document),
-            finalized=True,
+            evidence_type='issue_feedback',
         )
         _finish_invocation(job_directory, record_path, invocation, execution=execution)
         invocation_finished = True
-        _write_json(job_directory, result_path, result_document)
+        _write_json(job_directory, result_path, result_document, 'issue_review_result')
     except (
         IssueReviewError,
         IssueReviewerError,

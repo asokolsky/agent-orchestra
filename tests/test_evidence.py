@@ -12,6 +12,7 @@ from agent_orchestra.evidence import (
     finalize_evidence_write,
     record_finalized_evidence,
     recover_evidence_index,
+    relocate_finalized_evidence,
     resolve_evidence_path,
 )
 
@@ -65,6 +66,7 @@ def test_record_finalized_evidence_writes_job_relative_index(tmp_path: Path) -> 
         == 'sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
     )
     assert document['job_id'] == 'job-1'
+    assert document['backfilled_at'] is not None
     assert document['entries'] == [asdict(entry)]
 
 
@@ -95,7 +97,7 @@ def test_recover_evidence_index_finishes_interrupted_publication(
     temporary.write_text('final')
     original_update = evidence_module._update_index
 
-    def interrupt_update(*_args: object) -> None:
+    def interrupt_update(*_args: object, **_kwargs: object) -> None:
         """Simulate process loss after the evidence rename."""
 
         message = 'simulated interruption'
@@ -103,12 +105,15 @@ def test_recover_evidence_index_finishes_interrupted_publication(
 
     monkeypatch.setattr(evidence_module, '_update_index', interrupt_update)
     with pytest.raises(OSError, match='simulated interruption'):
-        finalize_evidence_write(tmp_path, 'job-1', temporary, evidence, 'request')
+        finalize_evidence_write(
+            tmp_path, 'job-1', temporary, evidence, 'review_request'
+        )
     monkeypatch.setattr(evidence_module, '_update_index', original_update)
 
     recover_evidence_index(tmp_path, 'job-1')
 
     document = json.loads((job / '.integrity.json').read_text())
+    assert document['backfilled_at'] is None
     assert [entry['path'] for entry in document['entries']] == ['messages/request.json']
     assert not (job / '.integrity.pending.json').exists()
 
@@ -116,10 +121,16 @@ def test_recover_evidence_index_finishes_interrupted_publication(
 @pytest.mark.parametrize(
     'document',
     [
-        {'schema_version': 1, 'job_id': 'other', 'entries': []},
+        {
+            'schema_version': 1,
+            'job_id': 'other',
+            'backfilled_at': None,
+            'entries': [],
+        },
         {
             'schema_version': 1,
             'job_id': 'job-1',
+            'backfilled_at': None,
             'entries': [
                 {
                     'job_id': 'job-1',
@@ -134,6 +145,7 @@ def test_recover_evidence_index_finishes_interrupted_publication(
         {
             'schema_version': 1,
             'job_id': 'job-1',
+            'backfilled_at': None,
             'entries': [
                 {
                     'job_id': 'job-1',
@@ -161,3 +173,83 @@ def test_record_finalized_evidence_rejects_miscorrelated_index(
 
     with pytest.raises(EvidencePathError, match='integrity index is malformed'):
         record_finalized_evidence(tmp_path, 'job-1', evidence, 'execution')
+
+
+def test_recover_relocation_removes_stale_source_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Complete both sides of an indexed relocation after interruption."""
+
+    job = tmp_path / 'job-1'
+    source = job / 'artifacts/review.md'
+    destination = job / 'logs/rejected-review.md'
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir()
+    source.write_text('review')
+    record_finalized_evidence(tmp_path, 'job-1', source, 'review_artifact')
+    original_update = evidence_module._update_index
+
+    def interrupt_update(*_args: object, **_kwargs: object) -> None:
+        """Simulate exit after relocation and before index replacement."""
+
+        message = 'simulated relocation interruption'
+        raise OSError(message)
+
+    monkeypatch.setattr(evidence_module, '_update_index', interrupt_update)
+    with pytest.raises(OSError, match='relocation interruption'):
+        relocate_finalized_evidence(
+            tmp_path,
+            'job-1',
+            source,
+            destination,
+            'rejected_review_artifact',
+        )
+    monkeypatch.setattr(evidence_module, '_update_index', original_update)
+
+    recover_evidence_index(tmp_path, 'job-1')
+
+    document = json.loads((job / '.integrity.json').read_text())
+    assert [entry['path'] for entry in document['entries']] == [
+        'logs/rejected-review.md'
+    ]
+
+
+def test_recover_pre_rename_relocation_keeps_source_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Do not infer a move from a destination that existed before interruption."""
+
+    job = tmp_path / 'job-1'
+    source = job / 'artifacts/review.md'
+    destination = job / 'logs/rejected-review.md'
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir()
+    source.write_text('authoritative')
+    destination.write_text('older destination')
+    record_finalized_evidence(tmp_path, 'job-1', source, 'review_artifact')
+    before = json.loads((job / '.integrity.json').read_text())
+    original_pending = evidence_module._write_pending
+
+    def interrupt_after_pending(*args: object, **kwargs: object) -> None:
+        """Leave the durable relocation intent without performing its rename."""
+
+        original_pending(*args, **kwargs)  # type: ignore[arg-type]
+        message = 'simulated pre-rename interruption'
+        raise OSError(message)
+
+    monkeypatch.setattr(evidence_module, '_write_pending', interrupt_after_pending)
+    with pytest.raises(OSError, match='pre-rename interruption'):
+        relocate_finalized_evidence(
+            tmp_path,
+            'job-1',
+            source,
+            destination,
+            'rejected_review_artifact',
+        )
+    monkeypatch.setattr(evidence_module, '_write_pending', original_pending)
+
+    recover_evidence_index(tmp_path, 'job-1')
+
+    assert source.read_text() == 'authoritative'
+    assert destination.read_text() == 'older destination'
+    assert json.loads((job / '.integrity.json').read_text()) == before

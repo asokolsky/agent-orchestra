@@ -1124,6 +1124,10 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert invocation['timed_out'] is False
     integrity = json.loads((run_directory / '.integrity.json').read_text())
     indexed_paths = {entry['path'] for entry in integrity['entries']}
+    indexed_types = {
+        entry['path']: entry['evidence_type'] for entry in integrity['entries']
+    }
+    assert indexed_types['messages/000002-review-result.json'] == 'review_result'
     assert {
         'execution.json',
         'messages/000001-review-request.json',
@@ -1436,6 +1440,15 @@ def test_worker_remediates_and_reviews_new_digest(
         '000005-review-request.json',
         '000006-review-result.json',
     ]
+    integrity = json.loads(
+        (context.runs_directory / context.run.id / '.integrity.json').read_text()
+    )
+    indexed_types = {
+        entry['path']: entry['evidence_type'] for entry in integrity['entries']
+    }
+    assert indexed_types['messages/000004-developer-handoff.json'] == (
+        'developer_handoff'
+    )
     second_request = json.loads((messages / '000005-review-request.json').read_text())
     assert second_request['iteration'] == 2
     assert second_request['scope']['diff_digest'] == result.diff_digest
@@ -2330,6 +2343,12 @@ def test_resume_rejects_stale_artifact_from_interrupted_reviewer(
     )
     assert not artifact_path.exists()
     assert archived_path.read_text() == '# Stale review\n'
+    integrity = json.loads((run_directory / '.integrity.json').read_text())
+    indexed = {entry['path']: entry for entry in integrity['entries']}
+    assert 'artifacts/review-0001.md' not in indexed
+    archived_relative = 'logs/000002-rejected-review-artifact-attempt-0001.md'
+    assert indexed[archived_relative]['evidence_type'] == 'rejected_review_artifact'
+    assert all((run_directory / path).is_file() for path in indexed)
 
     write_reviewer(reviewer, 'approved', write_artifact=False)
     assert main(resume_arguments(enqueued_run)) == 2
@@ -2496,13 +2515,15 @@ def test_resume_writes_recovery_request_before_activating_developer(
     assert blocked.state is RunState.VALIDATION_REQUIRED
     original_write = worker._write_json_atomic
 
-    def fail_recovery_request(path: Path, document: dict[str, object]) -> None:
+    def fail_recovery_request(
+        path: Path, document: dict[str, object], evidence_type: Any
+    ) -> None:
         """Simulate failure to persist only the recovery request."""
 
         if path.name == '000005-remediation-request.json':
             message = 'simulated write failure'
             raise OSError(message)
-        original_write(path, document)
+        original_write(path, document, evidence_type)
 
     monkeypatch.setattr(worker, '_write_json_atomic', fail_recovery_request)
     assert main(resume_arguments(context)) == 2

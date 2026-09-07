@@ -135,6 +135,12 @@ def test_run_issue_review_persists_result_and_feedback(
     assert Path(records[0].stdout_path).read_text() == ''
     assert records[0].exit_code == 0
     integrity = json.loads((runs / job.id / '.integrity.json').read_text())
+    indexed_types = {
+        entry['path']: entry['evidence_type'] for entry in integrity['entries']
+    }
+    assert indexed_types['iterations/000001/feedback.md'] == 'issue_feedback'
+    assert indexed_types['iterations/000001/request.json'] == 'issue_review_request'
+    assert indexed_types['iterations/000001/result.json'] == 'issue_review_result'
     assert {entry['path'] for entry in integrity['entries']} == {
         'issue.json',
         'iterations/000001/feedback.md',

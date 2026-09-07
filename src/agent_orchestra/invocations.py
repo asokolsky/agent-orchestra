@@ -9,11 +9,12 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Never
+from typing import Literal, Never, cast
 from uuid import uuid4
 
 from agent_orchestra.evidence import (
     EvidencePathError,
+    EvidenceType,
     finalize_evidence_write,
     record_finalized_evidence,
     resolve_evidence_path,
@@ -634,6 +635,6 @@ def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> N
                 run_directory.parent,
                 run_id,
                 expected,
-                kind,
+                cast('EvidenceType', kind),
                 replace_existing=False,
             )

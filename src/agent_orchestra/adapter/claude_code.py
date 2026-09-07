@@ -32,7 +32,7 @@ from agent_orchestra.adapter.issue_reviewer import (
     issue_review_prompt,
 )
 from agent_orchestra.adapter.process import run_streaming_process
-from agent_orchestra.evidence import finalize_evidence_write
+from agent_orchestra.evidence import EvidenceType, finalize_evidence_write
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
@@ -124,7 +124,7 @@ def _write_text_atomic(
     content: str,
     *,
     job_directory: Path | None = None,
-    evidence_type: str | None = None,
+    evidence_type: EvidenceType | None = None,
 ) -> None:
     """Write UTF-8 text atomically."""
 
@@ -135,7 +135,7 @@ def _write_text_atomic(
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        if job_directory is None:
+        if job_directory is None or evidence_type is None:
             temporary.replace(path)
         else:
             finalize_evidence_write(
@@ -143,7 +143,7 @@ def _write_text_atomic(
                 job_directory.name,
                 temporary,
                 path,
-                evidence_type or path.stem,
+                evidence_type,
             )
     finally:
         temporary.unlink(missing_ok=True)

@@ -21,9 +21,11 @@ from agent_orchestra.agents import (
 )
 from agent_orchestra.evidence import (
     EvidencePathError,
+    EvidenceType,
     finalize_evidence_write,
     record_finalized_evidence,
     recover_evidence_index,
+    relocate_finalized_evidence,
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import (
@@ -158,7 +160,9 @@ def _digest(
         raise WorkerError(f'cannot compute worktree digest: {error}') from error
 
 
-def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
+def _write_json_atomic(
+    path: Path, document: dict[str, Any], evidence_type: EvidenceType
+) -> None:
     """Write one UTF-8 JSON document atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,12 +173,14 @@ def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        _finalize_temporary_path(temporary, path)
+        _finalize_temporary_path(temporary, path, evidence_type)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _write_text_atomic(path: Path, content: str, *, finalized: bool = True) -> None:
+def _write_text_atomic(
+    path: Path, content: str, *, evidence_type: EvidenceType | None = None
+) -> None:
     """Write one UTF-8 text artifact atomically."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,22 +190,36 @@ def _write_text_atomic(path: Path, content: str, *, finalized: bool = True) -> N
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        if finalized:
-            _finalize_temporary_path(temporary, path)
+        if evidence_type is not None:
+            _finalize_temporary_path(temporary, path, evidence_type)
         else:
             temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _archive_unaccepted_response(path: Path, destination: Path) -> None:
+def _archive_unaccepted_response(
+    path: Path, destination: Path, evidence_type: EvidenceType
+) -> None:
     """Preserve a partial response so a retry cannot consume stale output."""
 
     if path.exists():
-        _finalize_temporary_path(path, destination)
+        structural = {'messages', 'artifacts', 'logs', 'invocations'}
+        job_directory = (
+            destination.parent.parent
+            if destination.parent.name in structural
+            else destination.parent
+        )
+        relocate_finalized_evidence(
+            job_directory.parent,
+            job_directory.name,
+            path,
+            destination,
+            evidence_type,
+        )
 
 
-def _record_finalized_path(path: Path, evidence_type: str | None = None) -> None:
+def _record_finalized_path(path: Path, evidence_type: EvidenceType) -> None:
     """Record one finalized worker artifact in its owning job index."""
 
     structural = {'messages', 'artifacts', 'logs', 'invocations'}
@@ -210,13 +230,12 @@ def _record_finalized_path(path: Path, evidence_type: str | None = None) -> None
         job_directory.parent,
         job_directory.name,
         path,
-        evidence_type
-        or (path.parent.name if path.parent.name in structural else path.stem),
+        evidence_type,
     )
 
 
 def _finalize_temporary_path(
-    temporary: Path, path: Path, evidence_type: str | None = None
+    temporary: Path, path: Path, evidence_type: EvidenceType
 ) -> None:
     """Publish one worker file through the recoverable evidence protocol."""
 
@@ -229,8 +248,7 @@ def _finalize_temporary_path(
         job_directory.name,
         temporary,
         path,
-        evidence_type
-        or (path.parent.name if path.parent.name in structural else path.stem),
+        evidence_type,
     )
 
 
@@ -342,13 +360,11 @@ def _record_invocation(
         _write_text_atomic(
             stdout_path,
             _output_text(stdout),
-            finalized=False,
         )
     if stderr is not None or not stderr_path.exists():
         _write_text_atomic(
             stderr_path,
             _output_text(stderr),
-            finalized=False,
         )
     _persist_attempt_record(
         invocations / f'{log_stem}.json',
@@ -907,7 +923,9 @@ def _run_queued_review(
         except ValidationError as error:
             raise WorkerError(f'invalid execution record: {error}') from error
         _write_json_atomic(
-            _run_evidence_path(run_directory, 'execution.json'), execution_document
+            _run_evidence_path(run_directory, 'execution.json'),
+            execution_document,
+            'execution',
         )
         reviewing = transition(prepared, RunState.REVIEWING)
         store.update(reviewing, expected_state=RunState.PREPARING)
@@ -953,7 +971,7 @@ def _run_queued_review(
                 },
             }
             _validate_review_request(request, run_directory=run_directory)
-            _write_json_atomic(request_path, request)
+            _write_json_atomic(request_path, request, 'review_request')
         else:
             request = retry_review_request
             retry_review_request = None
@@ -1052,11 +1070,13 @@ def _run_queued_review(
                 response_path,
                 logs / f'{sequence + 1:06d}-rejected-review-result-attempt-'
                 f'{reviewer_attempt:04d}.json',
+                'rejected_review_result',
             )
             _archive_unaccepted_response(
                 artifact_path,
                 logs / f'{sequence + 1:06d}-rejected-review-artifact-attempt-'
                 f'{reviewer_attempt:04d}.md',
+                'rejected_review_artifact',
             )
             interrupted = transition(reviewing, RunState.INTERRUPTED)
             store.update(interrupted, expected_state=RunState.REVIEWING)
@@ -1093,11 +1113,13 @@ def _run_queued_review(
                 response_path,
                 logs / f'{sequence + 1:06d}-rejected-review-result-attempt-'
                 f'{reviewer_attempt:04d}.json',
+                'rejected_review_result',
             )
             _archive_unaccepted_response(
                 artifact_path,
                 logs / f'{sequence + 1:06d}-rejected-review-artifact-attempt-'
                 f'{reviewer_attempt:04d}.md',
+                'rejected_review_artifact',
             )
             interrupted = transition(reviewing, RunState.INTERRUPTED)
             store.update(interrupted, expected_state=RunState.REVIEWING)
@@ -1225,7 +1247,11 @@ def _run_queued_review(
                     if response_valid
                     else logs / f'{sequence + 1:06d}-rejected-review-result.json'
                 )
-                _finalize_temporary_path(response_path, destination)
+                _finalize_temporary_path(
+                    response_path,
+                    destination,
+                    'review_result' if response_valid else 'rejected_review_result',
+                )
 
         _record_invocation(
             run=run,
@@ -1292,7 +1318,7 @@ def _run_queued_review(
             },
         }
         _validate_remediation_request(remediation, run_directory=run_directory)
-        _write_json_atomic(remediation_path, remediation)
+        _write_json_atomic(remediation_path, remediation, 'remediation_request')
         developing = transition(decided, RunState.DEVELOPING)
         store.update(developing, expected_state=RunState.CHANGES_REQUESTED)
         developer_stem = _invocation_stem(sequence, 'developer', 1)
@@ -1373,6 +1399,7 @@ def _run_queued_review(
                 handoff_temporary,
                 logs
                 / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-0001.json',
+                'rejected_developer_handoff',
             )
             interrupted = transition(developing, RunState.INTERRUPTED)
             store.update(interrupted, expected_state=RunState.DEVELOPING)
@@ -1408,6 +1435,7 @@ def _run_queued_review(
                 handoff_temporary,
                 logs
                 / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-0001.json',
+                'rejected_developer_handoff',
             )
             interrupted = transition(developing, RunState.INTERRUPTED)
             store.update(interrupted, expected_state=RunState.DEVELOPING)
@@ -1550,6 +1578,7 @@ def _run_queued_review(
                         .isoformat()
                         .replace('+00:00', 'Z'),
                     },
+                    'decision_required',
                 )
                 return disagreement
             if recoverable:
@@ -1592,7 +1621,13 @@ def _run_queued_review(
                     else logs
                     / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-0001.json'
                 )
-                _finalize_temporary_path(handoff_temporary, destination)
+                _finalize_temporary_path(
+                    handoff_temporary,
+                    destination,
+                    'developer_handoff'
+                    if handoff_valid
+                    else 'rejected_developer_handoff',
+                )
         current_digest = new_digest
         prior_review_path = review_result_path
         reviewing = replace(
@@ -1719,6 +1754,7 @@ def _resume_developer_request(
             response_path,
             logs / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
             f'{attempt:04d}.json',
+            'rejected_developer_handoff',
         )
         interrupted = transition(run, RunState.INTERRUPTED)
         store.update(interrupted, expected_state=RunState.DEVELOPING)
@@ -1753,6 +1789,7 @@ def _resume_developer_request(
             response_path,
             logs / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
             f'{attempt:04d}.json',
+            'rejected_developer_handoff',
         )
         interrupted = transition(run, RunState.INTERRUPTED)
         store.update(interrupted, expected_state=RunState.DEVELOPING)
@@ -1918,7 +1955,11 @@ def _resume_developer_request(
                 else logs / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
                 f'{attempt:04d}.json'
             )
-            _finalize_temporary_path(response_path, destination)
+            _finalize_temporary_path(
+                response_path,
+                destination,
+                'developer_handoff' if handoff_valid else 'rejected_developer_handoff',
+            )
 
     reviewing = replace(
         transition(run, RunState.REVIEWING),
@@ -2114,7 +2155,9 @@ def _resume_reviewer_validation(
                 f'{sequence + 1:06d}-rejected-review-result-attempt-'
                 f'{record.attempt:04d}.json',
             )
-            _finalize_temporary_path(response_path, destination)
+            _finalize_temporary_path(
+                response_path, destination, 'rejected_review_result'
+            )
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.REVIEWING)
         raise
@@ -2168,7 +2211,7 @@ def _resume_reviewer_validation(
         },
     }
     _validate_remediation_request(remediation, run_directory=run_directory)
-    _write_json_atomic(remediation_path, remediation)
+    _write_json_atomic(remediation_path, remediation, 'remediation_request')
     developing = transition(decided, RunState.DEVELOPING)
     return _resume_developer_request(
         store=store,
@@ -2265,7 +2308,9 @@ def _resume_developer_validation(
                 f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
                 f'{record.attempt:04d}.json',
             )
-            _finalize_temporary_path(response_path, destination)
+            _finalize_temporary_path(
+                response_path, destination, 'rejected_developer_handoff'
+            )
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.DEVELOPING)
         raise
@@ -2511,6 +2556,7 @@ def _resume_intermediate_state(
                 run_directory, 'messages', f'{sequence:06d}-remediation-request.json'
             ),
             request,
+            'remediation_request',
         )
     else:
         message = 'changes-requested run has no recoverable review decision'
@@ -2763,7 +2809,7 @@ def _resume_review(
         },
     }
     _validate_remediation_request(recovery_request, run_directory=run_directory)
-    _write_json_atomic(request_path, recovery_request)
+    _write_json_atomic(request_path, recovery_request, 'remediation_request')
     resumed = transition(run, RunState.DEVELOPING)
     return _resume_developer_request(
         store=store,
@@ -2820,6 +2866,7 @@ def resume_review(
                         .isoformat()
                         .replace('+00:00', 'Z'),
                     },
+                    'failure',
                 )
             except OSError:
                 pass
@@ -2883,6 +2930,7 @@ def run_queued_review(
                         .isoformat()
                         .replace('+00:00', 'Z'),
                     },
+                    'failure',
                 )
             except OSError:
                 pass
