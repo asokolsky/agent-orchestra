@@ -364,7 +364,7 @@ recovered by finding the hidden idempotency marker on the provider.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 8 JSON views expose
+is one process execution. Four read-only, schema-version 9 JSON views expose
 that hierarchy:
 
 ```text
@@ -594,6 +594,12 @@ After a valid developer handoff reports `blocked` or `failed`, it creates the
 next remediation request and retries the developer. The job ID, message
 history, review iteration, and objective remain unchanged. Each retried
 invocation receives a higher attempt number and new log files.
+
+For an issue-review job in `failed` or recoverable `reviewing`, `resume` reads
+the persisted issue-review request and latest completed attempt, then retries
+the same built-in reviewer runtime and requested model. Custom reviewer
+commands are not persisted and must instead be supplied again with
+`review-issue`.
 
 Examples:
 

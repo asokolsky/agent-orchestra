@@ -11,6 +11,7 @@ import pytest
 
 from agent_orchestra import issue_review
 from agent_orchestra.adapter.base import IssueReviewExecution
+from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.cli import main
 from agent_orchestra.invocations import read_records
 from agent_orchestra.issue_review import (
@@ -133,6 +134,90 @@ def test_run_issue_review_persists_result_and_feedback(
     assert records[0].conclusion == 'succeeded'
     assert Path(records[0].stdout_path).read_text() == ''
     assert records[0].exit_code == 0
+
+
+def test_feedback_renders_validation_and_verification_gaps() -> None:
+    """Keep every explanatory result section in provider-facing feedback."""
+
+    rendered = issue_review._render_feedback(
+        {
+            'verdict': 'blocked',
+            'summary': 'More evidence is needed.',
+            'findings': [],
+            'validation': ['Checked the stated acceptance criteria.'],
+            'verification_gaps': ['The external dependency is unspecified.'],
+        }
+    )
+
+    assert '## Validation\n\n- Checked the stated acceptance criteria.' in rendered
+    assert (
+        '## Verification gaps\n\n- The external dependency is unspecified.' in rendered
+    )
+
+
+def test_resume_issue_review_retries_timed_out_builtin_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Resume a failed built-in issue review from its durable request and identity."""
+
+    store, job, runs = setup_job(tmp_path)
+    monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
+
+    def timeout(*_args: object, **_kwargs: object) -> object:
+        """Simulate a timed-out built-in adapter invocation."""
+
+        message = 'timed out'
+        raise IssueReviewerError(message, timed_out=True)
+
+    monkeypatch.setattr(
+        'agent_orchestra.issue_review.CodexIssueReviewerAdapter.execute', timeout
+    )
+    with pytest.raises(IssueReviewError, match='timed out'):
+        run_issue_review(
+            job,
+            store,
+            runs,
+            objective='Review readiness.',
+            agent='codex',
+            model='codex-test',
+            timeout=30,
+        )
+
+    result = {
+        'schema_version': 1,
+        'source_digest': snapshot().digest,
+        'verdict': 'ready',
+        'summary': 'The issue is ready.',
+        'findings': [],
+        'validation': ['Reviewed all dimensions.'],
+        'verification_gaps': [],
+    }
+    monkeypatch.setattr(
+        'agent_orchestra.issue_review.CodexIssueReviewerAdapter.execute',
+        lambda *_args, **_kwargs: IssueReviewExecution(result, '', '', 0),
+    )
+
+    assert (
+        main(
+            [
+                '--database',
+                str(store.database_path),
+                'resume',
+                job.id,
+                '--runs-directory',
+                str(runs),
+            ]
+        )
+        == 0
+    )
+
+    assert json.loads(capsys.readouterr().out)['state'] == 'approved'
+    assert store.get_issue(job.id).state is RunState.APPROVED
+    records = read_records(runs / job.id, job.id)
+    assert [record.conclusion for record in records] == ['timed_out', 'succeeded']
+    assert records[-1].requested_model == 'codex-test'
 
 
 def test_run_issue_review_dispatches_claude_code_adapter(

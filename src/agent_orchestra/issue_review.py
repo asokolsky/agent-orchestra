@@ -152,6 +152,20 @@ def _render_feedback(result: dict[str, Any]) -> str:
                 '',
             ]
         )
+    lines.extend(['## Validation', ''])
+    validation = result['validation']
+    lines.extend(
+        (f'- {item}' for item in validation)
+        if validation
+        else ['No validation reported.']
+    )
+    lines.extend(['', '## Verification gaps', ''])
+    verification_gaps = result['verification_gaps']
+    lines.extend(
+        (f'- {item}' for item in verification_gaps)
+        if verification_gaps
+        else ['No verification gaps reported.']
+    )
     return '\n'.join(lines).rstrip() + '\n'
 
 
@@ -218,8 +232,14 @@ def _start_invocation(
         task_id=task_id,
         invocation_id=f'{task_id}:attempt-{attempt:04d}',
         role='issue_reviewer',
-        agent_vendor='openai' if agent == 'codex' else 'anthropic',
-        requested_model=model,
+        agent_vendor=(
+            'openai'
+            if agent == 'codex'
+            else 'anthropic'
+            if agent == 'claude-code'
+            else 'custom'
+        ),
+        requested_model=model if agent != 'custom' else None,
         effective_models=(),
         effective_model_status='unavailable',
         runtime=agent,
@@ -493,7 +513,7 @@ def run_issue_review(
             job_directory,
             job,
             iteration,
-            agent=agent,
+            agent='custom' if command else agent,
             model=model,
             attempt=attempt,
         )
@@ -558,6 +578,55 @@ def run_issue_review(
     finished = replace(reviewing, state=state, updated_at=datetime.now(UTC))
     store.update_issue(finished, RunState.REVIEWING)
     return finished
+
+
+def resume_issue_review(
+    job: IssueJob,
+    store: RunStore,
+    runs_directory: Path,
+    *,
+    timeout: int,
+) -> IssueJob:
+    """Resume one built-in issue-review attempt from durable evidence."""
+
+    if job.iteration < 1 or job.state not in {RunState.FAILED, RunState.REVIEWING}:
+        message = f'issue-review job is not resumable from {job.state}'
+        raise IssueReviewError(message)
+    root = runs_directory.expanduser().resolve()
+    job_directory = _evidence_path(root, job.id)
+    request_path = _evidence_path(
+        job_directory, 'iterations', f'{job.iteration:06d}', 'request.json'
+    )
+    try:
+        request = IssueReviewRequestSchema.model_validate(_read_json(request_path))
+    except ValidationError as error:
+        message = 'invalid persisted issue-review request'
+        raise IssueReviewError(message) from error
+    task_id = f'{job.id}:{job.iteration:06d}-issue_reviewer'
+    attempts = [
+        record
+        for record in read_records(job_directory, job.id)
+        if record.task_id == task_id
+    ]
+    if not attempts:
+        message = 'issue-review resume has no durable attempt evidence'
+        raise IssueReviewError(message)
+    latest = attempts[-1]
+    if latest.status != 'completed':
+        message = 'issue review activation is uncertain'
+        raise IssueReviewError(message)
+    if latest.runtime not in {'codex', 'claude-code'}:
+        message = 'custom issue reviewers must be retried with review-issue'
+        raise IssueReviewError(message)
+    return run_issue_review(
+        job,
+        store,
+        runs_directory,
+        objective=request.objective,
+        agent=latest.runtime,
+        model=latest.requested_model,
+        timeout=timeout,
+    )
 
 
 def _publish_issue_feedback_locked(

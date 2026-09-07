@@ -25,6 +25,7 @@ from agent_orchestra.invocations import (
 from agent_orchestra.issue_review import (
     IssueReviewError,
     publish_issue_feedback,
+    resume_issue_review,
     run_issue_review,
 )
 from agent_orchestra.issue_sources import IssueSourceError, fetch_issue, write_snapshot
@@ -1042,15 +1043,26 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
             error_message=f'state database not found: {args.database}',
         )
         return 2
+    result: Run | IssueJob
     try:
-        run = store.get(args.job_id)
-        _require_external_database(args.database, run.worktree_path)
-        result = resume_review(
-            store=store,
-            run=run,
-            runs_directory=args.runs_directory,
-            digest_worktree=_working_tree_digest,
-        )
+        try:
+            run = store.get(args.job_id)
+        except RunNotFoundError:
+            issue = store.get_issue(args.job_id)
+            result = resume_issue_review(
+                issue,
+                store,
+                args.runs_directory,
+                timeout=1800,
+            )
+        else:
+            _require_external_database(args.database, run.worktree_path)
+            result = resume_review(
+                store=store,
+                run=run,
+                runs_directory=args.runs_directory,
+                digest_worktree=_working_tree_digest,
+            )
     except RunNotFoundError as error:
         _write_resume_document(
             args.job_id,
@@ -1065,7 +1077,7 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
             error_message=f'job changed concurrently: {error}',
         )
         return 2
-    except (OSError, WorkerError) as error:
+    except (IssueReviewError, InvocationEvidenceError, OSError, WorkerError) as error:
         message = str(error)
         code = error.code if isinstance(error, WorkerError) else None
         if code is not None:
