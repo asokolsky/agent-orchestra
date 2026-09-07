@@ -23,7 +23,10 @@ from agent_orchestra.adapter.developer import (
 from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
-from agent_orchestra.runtime_metadata import child_process_environment
+from agent_orchestra.runtime_metadata import (
+    child_process_environment,
+    reviewer_process_environment,
+)
 from agent_orchestra.schemas import (
     DEVELOPER_RESULT_SCHEMA,
     REVIEW_RESULT_SCHEMA,
@@ -89,7 +92,7 @@ def _write_json_atomic(path: Path, document: dict[str, Any]) -> None:
     _write_text_atomic(path, json.dumps(document, indent=2) + '\n')
 
 
-def _prompt(request: dict[str, Any]) -> str:
+def _prompt(request: dict[str, Any], temporary_directory: Path) -> str:
     """Build the complete non-interactive reviewer assignment."""
 
     return f"""Invoke $agent-orchestra-reviewer and perform the assigned review.
@@ -99,8 +102,11 @@ as authoritative even though it is embedded in this prompt. Work only in its
 scope, keep the review read-only, and return only the JSON object required by
 the supplied output schema. The digest covers more than raw `git diff`; do not
 compare it to a plain diff hash. Agent-orchestra verifies digest identity before
-and after review. Do not write files; agent-orchestra will persist the response
-and Markdown artifact.
+and after review. The reviewed worktree is read-only. Transient validation files
+and tool caches may be written only beneath `{temporary_directory}`; do not use
+them as workflow evidence. Agent-orchestra persists the response and Markdown
+artifact. Use the supplied worktree path explicitly because the process working
+directory is the isolated validation directory.
 
 Review request:
 {json.dumps(request, indent=2)}
@@ -194,7 +200,7 @@ def run_codex_reviewer(
 
     request = _read_object(request_path)
     try:
-        worktree = Path(request['scope']['worktree_path'])
+        Path(request['scope']['worktree_path'])
         artifact_path = Path(request['payload']['artifact_path'])
         timeout_seconds = int(request['payload']['timeout_seconds'])
     except (KeyError, TypeError, ValueError) as error:
@@ -225,9 +231,16 @@ def run_codex_reviewer(
                 '--ephemeral',
                 '--ignore-user-config',
                 '--sandbox',
-                'read-only',
+                'workspace-write',
                 '--cd',
-                str(worktree),
+                str(temporary),
+                '--skip-git-repo-check',
+                '-c',
+                'sandbox_workspace_write.exclude_slash_tmp=true',
+                '-c',
+                'sandbox_workspace_write.exclude_tmpdir_env_var=true',
+                '-c',
+                'sandbox_workspace_write.network_access=false',
                 '--output-schema',
                 str(schema_path),
                 '--output-last-message',
@@ -240,8 +253,8 @@ def run_codex_reviewer(
             command.append('-')
             completed = run_streaming_process(
                 command,
-                env=child_process_environment(),
-                input=_prompt(request),
+                env=reviewer_process_environment(temporary),
+                input=_prompt(request, temporary),
                 timeout=max(1, timeout_seconds - 5),
             )
         except subprocess.TimeoutExpired as error:

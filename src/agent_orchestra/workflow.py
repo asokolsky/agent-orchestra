@@ -33,6 +33,7 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
             RunState.CHANGES_REQUESTED,
             RunState.VALIDATION_REQUIRED,
             RunState.FAILED,
+            RunState.CANCELLED,
             RunState.INTERRUPTED,
         }
     ),
@@ -41,6 +42,7 @@ TRANSITIONS: dict[RunState, frozenset[RunState]] = {
             RunState.CHANGES_REQUESTED,
             RunState.APPROVED,
             RunState.FAILED,
+            RunState.CANCELLED,
             RunState.INTERRUPTED,
             RunState.SUPERSEDED,
         }

@@ -2,7 +2,7 @@
 name: agent-orchestra-reviewer
 description: Review an exact diff produced by an agent-orchestra development run and return structured, actionable findings without modifying the worktree. Use for the reviewer role, including repeat reviews after fixes.
 metadata:
-  version: "2.0.0"
+  version: "2.1.0"
   source: "https://github.com/asokolsky/agent-orchestra/tree/main/skills/agent-orchestra-reviewer"
 ---
 
@@ -60,8 +60,11 @@ plausible failure mode, or issues outside the assigned diff unless the change
 directly exposes them. Do not modify files, apply fixes, commit, push, post
 comments, or change remote state.
 
-Read-only validation commands may be run when useful. If a command would alter
-tracked files or external state, skip it and report the limitation.
+Read-only validation commands may be run when useful. An adapter-provided
+temporary directory may hold transient test files and tool caches, but the
+reviewed worktree must remain read-only and temporary files are never workflow
+evidence. If a command would alter tracked files or external state, skip it and
+report the limitation.
 
 Skip condition: skip inspection only when step 1 returns `blocked`.
 

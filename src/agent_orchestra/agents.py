@@ -14,6 +14,7 @@ from agent_orchestra.runtime_metadata import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -32,6 +33,7 @@ class DeveloperRequest:
     stdout_path: Path | None = None
     stderr_path: Path | None = None
     runtime_metadata_path: Path | None = None
+    on_started: Callable[[], object] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -53,6 +55,7 @@ class ReviewerRequest:
     stdout_path: Path | None = None
     stderr_path: Path | None = None
     runtime_metadata_path: Path | None = None
+    on_started: Callable[[], object] | None = None
 
 
 type AgentRequest = DeveloperRequest | ReviewerRequest
@@ -112,35 +115,63 @@ class CommandAgentAdapter:
             }
         try:
             if request.stdout_path is None or request.stderr_path is None:
-                captured = subprocess.run(
+                captured_process = subprocess.Popen(
                     command,
                     cwd=request.worktree_path,
-                    check=False,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=request.timeout_seconds,
                     env=environment,
                 )
-                stdout = captured.stdout
-                stderr = captured.stderr
-                exit_code = captured.returncode
+                try:
+                    if request.on_started is not None:
+                        request.on_started()
+                    stdout, stderr = captured_process.communicate(
+                        timeout=request.timeout_seconds
+                    )
+                except subprocess.TimeoutExpired as error:
+                    captured_process.kill()
+                    stdout, stderr = captured_process.communicate()
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        request.timeout_seconds,
+                        output=stdout,
+                        stderr=stderr,
+                    ) from error
+                except BaseException:
+                    captured_process.kill()
+                    captured_process.communicate()
+                    raise
+                exit_code = captured_process.returncode
             else:
                 with (
                     request.stdout_path.open('wb') as stdout_file,
                     request.stderr_path.open('wb') as stderr_file,
                 ):
-                    redirected = subprocess.run(
+                    redirected_process = subprocess.Popen(
                         command,
                         cwd=request.worktree_path,
-                        check=False,
                         stdout=stdout_file,
                         stderr=stderr_file,
-                        timeout=request.timeout_seconds,
                         env=environment,
                     )
+                    try:
+                        if request.on_started is not None:
+                            request.on_started()
+                        redirected_process.wait(timeout=request.timeout_seconds)
+                    except subprocess.TimeoutExpired as error:
+                        redirected_process.kill()
+                        redirected_process.wait()
+                        raise subprocess.TimeoutExpired(
+                            command, request.timeout_seconds
+                        ) from error
+                    except BaseException:
+                        redirected_process.kill()
+                        redirected_process.wait()
+                        raise
                 stdout = None
                 stderr = None
-                exit_code = redirected.returncode
+                exit_code = redirected_process.returncode
         except BaseException as error:
             effective_models, effective_model_status = self._consume_runtime_metadata(
                 request.runtime_metadata_path

@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from agent_orchestra.cli import main
-from agent_orchestra.invocations import InvocationRecord, write_record
+from agent_orchestra.invocations import (
+    AttemptConclusion,
+    AttemptStatus,
+    InvocationRecord,
+    transition_attempt,
+    write_record,
+)
 from agent_orchestra.models import Run
 from agent_orchestra.store import RunStore
 
@@ -48,28 +55,43 @@ def add_invocation(
     stderr = logs / f'{invocation_id}.stderr.log'
     stdout.write_text(f'{invocation_id} output\n')
     stderr.write_text('')
-    write_record(
-        run_directory / 'invocations' / f'{invocation_id}.json',
-        InvocationRecord(
-            schema_version=3,
-            run_id=str(run.id),
-            invocation_id=invocation_id,
-            role=role,  # type: ignore[arg-type]
-            agent_vendor='openai',
-            requested_model='gpt-test',
-            effective_models=('gpt-effective',),
-            effective_model_status='reported',
-            runtime=runtime,
-            iteration=iteration,
-            started_at='2026-09-03T10:00:00Z',
-            finished_at='2026-09-03T10:01:00Z',
-            exit_code=0,
-            timed_out=False,
-            interrupted=False,
-            stdout_path=str(stdout),
-            stderr_path=str(stderr),
-        ),
+    task_id = f'{run.id}:{iteration:06d}-{role}'
+    path = run_directory / 'invocations' / f'{invocation_id}.json'
+    pending = InvocationRecord(
+        schema_version=4,
+        run_id=str(run.id),
+        task_id=task_id,
+        invocation_id=f'{task_id}:attempt-0001',
+        role=role,  # type: ignore[arg-type]
+        agent_vendor='openai',
+        requested_model='gpt-test',
+        effective_models=('gpt-effective',),
+        effective_model_status='reported',
+        runtime=runtime,
+        iteration=iteration,
+        started_at='2026-09-03T10:00:00Z',
+        finished_at=None,
+        exit_code=None,
+        timed_out=False,
+        interrupted=False,
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+        attempt=1,
+        status='pending',
+        conclusion=None,
     )
+    write_record(path, pending)
+    running = transition_attempt(pending, AttemptStatus.RUNNING)
+    write_record(path, running)
+    completed = transition_attempt(
+        replace(running, exit_code=0),
+        AttemptStatus.COMPLETED,
+        conclusion=AttemptConclusion.SUCCEEDED,
+        finished_at='2026-09-03T10:01:00Z',
+        response_received_at='2026-09-03T10:01:00Z',
+        validation_started_at='2026-09-03T10:01:00Z',
+    )
+    write_record(path, completed)
 
 
 def logs_arguments(database: Path, run: Run, run_directory: Path) -> list[str]:
@@ -99,21 +121,22 @@ def test_logs_identifies_and_orders_separate_streams(
     captured = capsys.readouterr()
     document = json.loads(captured.out)
     assert captured.err == ''
-    assert document['schema_version'] == 6
+    assert document['schema_version'] == 7
     assert document['run_id'] == str(run.id)
     assert document['failures'] == []
     assert document['error'] is None
     assert [
         (entry['invocation_id'], entry['stream']) for entry in document['streams']
     ] == [
-        ('first', 'stdout'),
-        ('first', 'stderr'),
-        ('second', 'stdout'),
-        ('second', 'stderr'),
+        (f'{run.id}:000001-reviewer:attempt-0001', 'stdout'),
+        (f'{run.id}:000001-reviewer:attempt-0001', 'stderr'),
+        (f'{run.id}:000002-reviewer:attempt-0001', 'stdout'),
+        (f'{run.id}:000002-reviewer:attempt-0001', 'stderr'),
     ]
     first = document['streams'][0]
     assert first == {
-        'invocation_id': 'first',
+        'invocation_id': f'{run.id}:000001-reviewer:attempt-0001',
+        'task_id': f'{run.id}:000001-reviewer',
         'role': 'reviewer',
         'agent_vendor': 'openai',
         'requested_model': 'gpt-test',
@@ -127,6 +150,10 @@ def test_logs_identifies_and_orders_separate_streams(
         'exit_code': 0,
         'timed_out': False,
         'interrupted': False,
+        'status': 'completed',
+        'conclusion': 'succeeded',
+        'response_received_at': '2026-09-03T10:01:00Z',
+        'validation_started_at': '2026-09-03T10:01:00Z',
         'stream': 'stdout',
         'path': str(run_directory / 'logs/first.stdout.log'),
         'content': 'first output\n',
@@ -158,7 +185,7 @@ def test_logs_filters_by_all_supported_identity_fields(
             '--role',
             'developer',
             '--invocation',
-            'chosen',
+            f'{run.id}:000002-developer:attempt-0001',
             '--runtime',
             'claude-code',
             '--stream',
@@ -172,7 +199,9 @@ def test_logs_filters_by_all_supported_identity_fields(
     document = json.loads(captured.out)
     assert captured.err == ''
     assert len(document['streams']) == 1
-    assert document['streams'][0]['invocation_id'] == 'chosen'
+    assert document['streams'][0]['invocation_id'] == (
+        f'{run.id}:000002-developer:attempt-0001'
+    )
     assert document['streams'][0]['stream'] == 'stdout'
     assert document['streams'][0]['content'] == 'chosen output\n'
 
@@ -259,32 +288,33 @@ def test_logs_reads_legacy_files_with_unknown_metadata(
     assert stdout['legacy'] is True
 
 
-@pytest.mark.parametrize('schema_version', [1, 2])
-def test_logs_reads_legacy_invocation_model_as_requested(
+@pytest.mark.parametrize('schema_version', [1, 2, 3])
+def test_logs_rejects_legacy_invocation_records(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     schema_version: int,
 ) -> None:
-    """Map historical model overrides without inventing effective identity."""
+    """Reject records whose task lifecycle cannot be established."""
 
     database, run, run_directory = create_run(tmp_path)
     add_invocation(run, run_directory, invocation_id='one')
     manifest = run_directory / 'invocations/one.json'
     document = json.loads(manifest.read_text())
     document['schema_version'] = schema_version
-    document['agent_model'] = document.pop('requested_model')
-    del document['effective_models']
-    del document['effective_model_status']
-    if schema_version == 1:
-        del document['attempt']
+    if schema_version in {1, 2}:
+        document['agent_model'] = document.pop('requested_model')
+        del document['effective_models']
+        del document['effective_model_status']
+        if schema_version == 1:
+            del document['attempt']
     manifest.write_text(json.dumps(document))
 
-    assert main(logs_arguments(database, run, run_directory)) == 0
+    assert main(logs_arguments(database, run, run_directory)) == 2
 
-    stream = json.loads(capsys.readouterr().out)['streams'][0]
-    assert stream['requested_model'] == 'gpt-test'
-    assert stream['effective_models'] == []
-    assert stream['effective_model_status'] == 'unavailable'
+    output = json.loads(capsys.readouterr().out)
+    assert output['streams'] == []
+    assert output['error']['code'] == 'invalid_evidence'
+    assert 'unsupported invocation record schema' in output['error']['message']
 
 
 def test_logs_rejects_duplicate_effective_models(
@@ -400,7 +430,7 @@ def test_logs_returns_json_when_database_is_missing(
     document = json.loads(captured.out)
     assert captured.err == ''
     assert document == {
-        'schema_version': 6,
+        'schema_version': 7,
         'run_id': 'unknown-run',
         'streams': [],
         'failures': [],

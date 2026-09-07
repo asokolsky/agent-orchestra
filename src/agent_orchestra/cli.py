@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 6
+CLI_SCHEMA_VERSION = 7
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -605,6 +605,11 @@ def _log_stream_document(
     exit_code: int | None,
     timed_out: bool | None,
     interrupted: bool | None,
+    task_id: str | None = None,
+    status: str = 'unavailable',
+    conclusion: str | None = 'unavailable',
+    response_received_at: str | None = None,
+    validation_started_at: str | None = None,
 ) -> tuple[dict[str, object] | None, dict[str, object] | None]:
     """Return one log stream document or a structured missing-file failure."""
 
@@ -618,6 +623,7 @@ def _log_stream_document(
     return (
         {
             'invocation_id': invocation_id,
+            'task_id': task_id,
             'role': role,
             'agent_vendor': vendor,
             'requested_model': requested_model,
@@ -631,6 +637,10 @@ def _log_stream_document(
             'exit_code': exit_code,
             'timed_out': timed_out,
             'interrupted': interrupted,
+            'status': status,
+            'conclusion': conclusion,
+            'response_received_at': response_received_at,
+            'validation_started_at': validation_started_at,
             'stream': stream,
             'path': str(path),
             'content': path.read_text(encoding='utf-8', errors='replace'),
@@ -742,6 +752,11 @@ def _logs(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
                         exit_code=record.exit_code,
                         timed_out=record.timed_out,
                         interrupted=record.interrupted,
+                        task_id=record.task_id,
+                        status=record.status,
+                        conclusion=record.conclusion,
+                        response_received_at=record.response_received_at,
+                        validation_started_at=record.validation_started_at,
                     )
                     if document is not None:
                         stream_documents.append(document)
