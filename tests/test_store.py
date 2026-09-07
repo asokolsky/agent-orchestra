@@ -198,6 +198,57 @@ def test_list_transitions_handles_an_absent_table_without_mutation(
     assert database.read_bytes() == before
 
 
+def test_list_transitions_reads_run_only_schema_without_migrating(
+    tmp_path: Path,
+) -> None:
+    """Read existing run history without changing its schema."""
+
+    database = tmp_path / 'state.db'
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE runs (id TEXT PRIMARY KEY, scenario TEXT NOT NULL);
+            CREATE TABLE transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+                from_state TEXT, to_state TEXT NOT NULL, occurred_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute('INSERT INTO runs VALUES (?, ?)', (run.id, run.scenario))
+        connection.execute(
+            'INSERT INTO transitions VALUES (?, ?, ?, ?, ?)',
+            (1, run.id, None, run.state, run.created_at.isoformat()),
+        )
+
+    history = RunStore(database).list_transitions(run.id)
+
+    assert len(history) == 1
+    assert history[0].scenario is ScenarioType.LOCAL_CHANGES
+    assert history[0].scope_digest is None
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute('PRAGMA table_info(transitions)')
+        }
+    assert 'run_id' in columns
+    assert 'job_id' not in columns
+
+
+def test_source_code_transition_allows_an_unknown_digest(tmp_path: Path) -> None:
+    """Preserve an explicitly unknown run digest in transition history."""
+
+    store = RunStore(tmp_path / 'state.db')
+    store.initialize()
+    run = replace(
+        Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
+        diff_digest=None,
+    )
+
+    store.add(run)
+
+    assert store.list_transitions(run.id)[0].scope_digest is None
+
+
 def test_initialize_migrates_run_transitions_without_inventing_digest(
     tmp_path: Path,
 ) -> None:
@@ -231,6 +282,10 @@ def test_initialize_migrates_run_transitions_without_inventing_digest(
             'INSERT INTO transitions VALUES (?, ?, ?, ?, ?)',
             (7, run.id, None, run.state, run.created_at.isoformat()),
         )
+        connection.execute(
+            'INSERT INTO transitions VALUES (?, ?, ?, ?, ?)',
+            (8, 'orphan-run', None, run.state, run.created_at.isoformat()),
+        )
 
     store = RunStore(database)
     store.initialize()
@@ -240,8 +295,49 @@ def test_initialize_migrates_run_transitions_without_inventing_digest(
     assert transition_history[0].scenario is ScenarioType.LOCAL_CHANGES
     assert transition_history[0].scope_digest is None
     with sqlite3.connect(database) as connection:
-        row = connection.execute('SELECT id, job_id FROM transitions').fetchone()
-    assert row == (7, run.id)
+        rows = connection.execute(
+            'SELECT id, job_id, scenario FROM transitions ORDER BY id'
+        ).fetchall()
+    assert rows == [
+        (7, run.id, ScenarioType.LOCAL_CHANGES),
+        (8, 'orphan-run', ScenarioType.LOCAL_CHANGES),
+    ]
+
+
+def test_initialize_resumes_an_interrupted_transition_migration(
+    tmp_path: Path,
+) -> None:
+    """Recover the old table when initialization stopped after its rename."""
+
+    database = tmp_path / 'state.db'
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store = RunStore(database)
+    store.initialize()
+    store.add(run)
+    with sqlite3.connect(database) as connection:
+        connection.execute('ALTER TABLE transitions RENAME TO run_transitions')
+        connection.execute(
+            'ALTER TABLE run_transitions RENAME COLUMN job_id TO run_id'
+        )
+        connection.execute(
+            """CREATE TABLE transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
+                scenario TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL,
+                scope_digest TEXT, occurred_at TEXT NOT NULL
+            )"""
+        )
+
+    store.initialize()
+
+    assert [item.to_state for item in store.list_transitions(run.id)] == [
+        RunState.QUEUED
+    ]
+    with sqlite3.connect(database) as connection:
+        backup = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'run_transitions'"
+        ).fetchone()
+    assert backup is None
 
 
 def test_initialize_renames_legacy_awaiting_review_state(tmp_path: Path) -> None:

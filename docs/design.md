@@ -84,10 +84,10 @@ state-checked job update.
 
 Schema initialization migrates run-only transition rows into this shared
 shape. Their transition-time digest is unknowable and remains null; current
-rows must never be backfilled from a job's later digest. New transitions always
-require a scope digest. The store exposes transition history in persistent row
-order through a read-only API that neither initializes nor changes the
-database.
+rows must never be backfilled from a job's later digest. New transitions record
+the current scope digest when one is available and otherwise keep it null. The
+store exposes transition history in persistent row order through a read-only
+API that neither initializes nor changes the database.
 
 ## Synchronization and collision avoidance
 

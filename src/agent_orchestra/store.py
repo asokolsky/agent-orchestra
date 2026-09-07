@@ -396,16 +396,32 @@ class RunStore:
 
         if not self.database_path.is_file():
             return ()
-        try:
-            with closing(self._connect_read_only()) as connection:
+        with closing(self._connect_read_only()) as connection:
+            columns = {
+                row['name']
+                for row in connection.execute(
+                    'PRAGMA table_info(transitions)'
+                ).fetchall()
+            }
+            if not columns:
+                return ()
+            if 'run_id' in columns:
+                rows = connection.execute(
+                    """SELECT transitions.run_id AS job_id,
+                        COALESCE(runs.scenario, ?) AS scenario,
+                        transitions.from_state, transitions.to_state,
+                        NULL AS scope_digest, transitions.occurred_at
+                    FROM transitions
+                    LEFT JOIN runs ON runs.id = transitions.run_id
+                    WHERE transitions.run_id = ?
+                    ORDER BY transitions.id""",
+                    (ScenarioType.LOCAL_CHANGES, job_id),
+                ).fetchall()
+            else:
                 rows = connection.execute(
                     'SELECT * FROM transitions WHERE job_id = ? ORDER BY id',
                     (job_id,),
                 ).fetchall()
-        except sqlite3.OperationalError as error:
-            if 'no such table: transitions' not in str(error):
-                raise
-            return ()
         return tuple(
             JobTransition(
                 job_id=row['job_id'],
@@ -457,9 +473,6 @@ class RunStore:
     ) -> None:
         """Insert one transition with its immutable scope correlation."""
 
-        if scope_digest is None:
-            message = 'new transitions require a scope digest'
-            raise ValueError(message)
         connection.execute(
             """INSERT INTO transitions (
                 job_id, scenario, from_state, to_state, scope_digest, occurred_at
@@ -476,39 +489,55 @@ class RunStore:
 
     @staticmethod
     def _migrate_transitions(connection: sqlite3.Connection) -> None:
-        """Migrate run-only transitions without inventing historical digests."""
+        """Migrate run-only transitions atomically and resume interrupted work."""
 
+        tables = {
+            row['name']
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
         columns = {
             row['name']
             for row in connection.execute('PRAGMA table_info(transitions)').fetchall()
         }
-        if 'run_id' not in columns:
+        has_backup = 'run_transitions' in tables
+        if not has_backup and 'run_id' not in columns:
             return
-        connection.executescript(
-            """
-            ALTER TABLE transitions RENAME TO run_transitions;
-            CREATE TABLE transitions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL,
-                scenario TEXT NOT NULL,
-                from_state TEXT,
-                to_state TEXT NOT NULL,
-                scope_digest TEXT,
-                occurred_at TEXT NOT NULL
-            );
-            INSERT INTO transitions (
+        connection.execute('SAVEPOINT migrate_transitions')
+        try:
+            if not has_backup:
+                connection.execute('ALTER TABLE transitions RENAME TO run_transitions')
+                connection.execute(
+                    """CREATE TABLE transitions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id TEXT NOT NULL,
+                        scenario TEXT NOT NULL,
+                        from_state TEXT,
+                        to_state TEXT NOT NULL,
+                        scope_digest TEXT,
+                        occurred_at TEXT NOT NULL
+                    )"""
+                )
+            connection.execute(
+                """INSERT OR IGNORE INTO transitions (
                 id, job_id, scenario, from_state, to_state, scope_digest,
                 occurred_at
+                )
+                SELECT transitions.id, transitions.run_id,
+                    COALESCE(runs.scenario, ?), transitions.from_state,
+                    transitions.to_state, NULL, transitions.occurred_at
+                FROM run_transitions AS transitions
+                LEFT JOIN runs ON runs.id = transitions.run_id
+                ORDER BY transitions.id""",
+                (ScenarioType.LOCAL_CHANGES,),
             )
-            SELECT transitions.id, transitions.run_id, runs.scenario,
-                transitions.from_state, transitions.to_state, NULL,
-                transitions.occurred_at
-            FROM run_transitions AS transitions
-            JOIN runs ON runs.id = transitions.run_id
-            ORDER BY transitions.id;
-            DROP TABLE run_transitions;
-            """
-        )
+            connection.execute('DROP TABLE run_transitions')
+            connection.execute('RELEASE SAVEPOINT migrate_transitions')
+        except Exception:
+            connection.execute('ROLLBACK TO SAVEPOINT migrate_transitions')
+            connection.execute('RELEASE SAVEPOINT migrate_transitions')
+            raise
 
     def _connect(self) -> sqlite3.Connection:
         """Open a configured SQLite connection."""
