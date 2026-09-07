@@ -11,6 +11,12 @@ the remote pull-request workflow remains a target design. See
 [Current scope](../README.md#current-scope) for the exact implementation
 boundary.
 
+Both implemented workflows can be reconstructed locally with the read-only
+[`audit`](cli.md#audit) command. Optional verification checks transition scope,
+canonical evidence correlation, containment, and finalized hashes without
+contacting a source-code host or issue provider. Active process streams remain
+visible as `in_progress` metadata and their contents are not embedded.
+
 ## Local development and review
 
 This workflow covers both a worktree that already has uncommitted changes and

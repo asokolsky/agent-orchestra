@@ -54,6 +54,10 @@ formatting and linting, mypy checks types, and pytest runs the test suite.
   again until it is ready for implementation. Codex and Claude Code receive the
   same provider-neutral request. Review is read-only; the generated feedback
   can be posted only through a separate explicitly authorized command.
+- The implemented [`audit`](docs/cli.md#audit) view reconstructs ordered state,
+  tasks, attempts, canonical message summaries, and provider actions for either
+  workflow. Optional local verification checks the finalized evidence index and
+  hashes without reading process-stream contents or contacting a provider.
 - The designed [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
   starts from a pull-request URL and reviews one exact remote head. Remote
   pull-request enqueueing and provider-side review actions are not implemented.

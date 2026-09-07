@@ -208,6 +208,10 @@ Markdown is a human-readable artifact. Agent stdout and stderr are execution
 logs. Neither is parsed to reconstruct workflow state.
 
 Finalized external evidence is correlated through a per-job integrity index.
+The read-only [`audit`](cli.md#audit) view combines that index with ordered
+state transitions and canonical message summaries. Its optional verification
+mode checks containment, correlation, and recorded hashes without changing job
+state or reading process-stream contents.
 The index records job-relative paths, types, sizes, byte digests, and
 finalization times; it supplements rather than replaces canonical JSON or
 SQLite state. Process streams become final only after their invocation process

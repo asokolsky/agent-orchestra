@@ -41,7 +41,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "jobs": [],
   "error": null
 }
@@ -216,7 +216,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -240,7 +240,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `9`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `10`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -364,7 +364,7 @@ recovered by finding the hidden idempotency marker on the provider.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 9 JSON views expose
+is one process execution. Four read-only, schema-version 10 JSON views expose
 that hierarchy:
 
 ```text
@@ -382,7 +382,7 @@ stdout and stderr paths and content.
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -438,7 +438,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-9 `job_id`,
+aliases. Callers must use the four commands above and the schema-10 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -449,6 +449,69 @@ replaces role filtering, and
 selects stdout. Iteration, runtime, attempt ID, and stream are ordinary fields
 in the same documents, so callers can combine filters without another CLI
 schema change.
+
+## `audit`
+
+Reconstruct a job's durable local history and optionally verify its finalized
+evidence:
+
+```text
+agent-orchestra [--database DATABASE] audit JOB_ID [--verify]
+    [--runs-directory DIRECTORY]
+```
+
+The command is read-only. It does not initialize or update the database,
+evidence, worktree, issue provider, or remote repo. It reports source-code and
+issue-review jobs from the same schema-10 document and never contacts GitHub or
+GitLab.
+
+Without `--verify`, indexed evidence has status `not_verified` and the document
+omits `result`. With `--verify`, the command hashes every finalized file,
+validates canonical JSON identity and correlation, checks transition scope
+digests, and adds `result`. Live process streams are not read or hashed; they
+appear as `in_progress` until their invocation completes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | Integer | Audit output contract; currently `10`. |
+| `job` | Object | Scenario-specific identity, immutable scope, state, and timestamps. |
+| `transitions` | Array | Ordered SQLite state history with the scope digest at each transition. |
+| `operations` | Array | Commit authorization, commit, publish authorization, and publication views derived from transitions. |
+| `tasks` | Array | Ordered roles and attempts; stream paths are included but stream contents are not. |
+| `evidence` | Array | Job-relative type, path, size, recorded digest, finalization time, and verification status. |
+| `integrity` | Object | Integrity schema and nullable `backfilled_at` provenance marker. |
+| `history` | Array | Canonical message and issue-iteration summaries, including findings, dispositions, and validation outcomes. |
+| `provider_actions` | Array | Persisted issue-provider writes; empty for source-code jobs. |
+| `findings` | Array | Independently aggregated objects containing `code`, `message`, and optional `path`. |
+| `result` | String | Present only with `--verify`: `failed`, `unverifiable`, `incomplete`, or `verified`. |
+| `error` | Object or null | Command-level lookup or containment failure, otherwise `null`. |
+
+Result precedence is `failed`, `unverifiable`, `incomplete`, then `verified`.
+Detected modification, escape, malformed canonical JSON, or correlation failure
+is `failed`. A missing, malformed, or backfilled integrity index, or a
+transition without a scope digest, is `unverifiable`. Sound evidence with live
+streams is `incomplete`; fully finalized sound evidence is `verified`.
+
+Stable finding codes are `integrity_index_missing`,
+`integrity_index_malformed`, `integrity_index_backfilled`,
+`duplicate_evidence_identity`, `evidence_missing`, `evidence_modified`,
+`evidence_unreadable`, `evidence_path_escape`, `unindexed_evidence`,
+`invalid_canonical_json`,
+`invalid_invocation_evidence`, `job_id_mismatch`,
+`iteration_mismatch`, `scope_digest_mismatch`, `source_digest_mismatch`,
+`message_sequence_mismatch`,
+`source_identity_mismatch`, `task_id_mismatch`, `attempt_id_mismatch`,
+`role_mismatch`, `message_correlation_failure`, and
+`transition_digest_missing`. Lookup failures use the same
+`state_database_not_found`, `job_not_found`, and `invalid_evidence` error
+objects as the other job views.
+
+```shell
+agent-orchestra audit "$JOB_ID"
+agent-orchestra audit "$JOB_ID" --verify
+agent-orchestra audit "$JOB_ID" --verify \
+  --runs-directory /var/tmp/orchestra/runs
+```
 
 ## `run`
 
@@ -499,7 +562,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -508,7 +571,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `9`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `10`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -551,7 +614,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -615,7 +678,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -626,7 +689,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

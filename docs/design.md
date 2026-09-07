@@ -197,14 +197,14 @@ UUID-based runs remain readable.
 
 ## Job and task output
 
-CLI output schema version 9 introduces the public `job` -> `task` -> `attempt`
+CLI output schema version 10 uses the public `job` -> `task` -> `attempt`
 hierarchy. The `jobs`, `job`, `tasks`, and `task` commands are separate
 read-only views. `job.current` is always an array and contains only pending or
 running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-9 CLI. This
+column and field names. Those names are not exposed by the schema-10 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -217,6 +217,8 @@ Schema version history:
   canonical evidence keep their implementation-level field names.
 - Version 9 adds issue-review jobs, the `issue_review` scenario, and recorded
   provider actions to the job and task views.
+- Version 10 adds deterministic audit documents, ordered transitions, integrity
+  verification, aggregated findings, and the optional verification result.
 
 ## Batch enqueue output
 

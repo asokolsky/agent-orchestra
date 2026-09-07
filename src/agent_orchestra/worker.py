@@ -614,7 +614,7 @@ def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecordS
     return record
 
 
-def _read_message_chain(
+def read_message_chain(
     run_directory: Path, run_id: str
 ) -> list[tuple[Path, dict[str, Any]]]:
     """Read and correlate every canonical message for recovery."""
@@ -2611,7 +2611,7 @@ def _resume_review(
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
     execution = _read_execution_record(run_directory, str(run.id))
-    chain = _read_message_chain(run_directory.resolve(), str(run.id))
+    chain = read_message_chain(run_directory.resolve(), str(run.id))
     if not execution.reviewer.command:
         message = 'resume reviewer command is missing'
         raise WorkerError(message)
