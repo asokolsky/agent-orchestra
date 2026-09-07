@@ -75,7 +75,7 @@ def setup_job(tmp_path: Path) -> tuple[RunStore, IssueJob, Path]:
     )
     store.add_issue(job)
     runs = tmp_path / 'runs'
-    write_snapshot(runs / job.id / 'issue.json', source)
+    write_snapshot(runs, job.id, runs / job.id / 'issue.json', source)
     return store, job, runs
 
 
@@ -134,6 +134,23 @@ def test_run_issue_review_persists_result_and_feedback(
     assert records[0].conclusion == 'succeeded'
     assert Path(records[0].stdout_path).read_text() == ''
     assert records[0].exit_code == 0
+    integrity = json.loads((runs / job.id / '.integrity.json').read_text())
+    indexed_types = {
+        entry['path']: entry['evidence_type'] for entry in integrity['entries']
+    }
+    assert indexed_types['iterations/000001/feedback.md'] == 'issue_feedback'
+    assert indexed_types['iterations/000001/request.json'] == 'issue_review_request'
+    assert indexed_types['iterations/000001/result.json'] == 'issue_review_result'
+    assert {entry['path'] for entry in integrity['entries']} == {
+        'issue.json',
+        'iterations/000001/feedback.md',
+        'iterations/000001/issue.json',
+        'iterations/000001/request.json',
+        'iterations/000001/result.json',
+        'invocations/000001-issue-reviewer-attempt-0001.json',
+        'logs/000001-issue-reviewer-attempt-0001.stderr.log',
+        'logs/000001-issue-reviewer-attempt-0001.stdout.log',
+    }
 
 
 def test_feedback_renders_validation_and_verification_gaps() -> None:

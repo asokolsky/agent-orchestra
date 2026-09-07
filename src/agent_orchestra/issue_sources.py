@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Never
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
+from agent_orchestra.evidence import finalize_evidence_write
+
 PROVIDER_TIMEOUT_SECONDS = 60
 
 if TYPE_CHECKING:
@@ -548,7 +550,9 @@ def fetch_issue(url: str) -> IssueSnapshot:
     return issue_provider(locator.provider).fetch(locator)
 
 
-def write_snapshot(path: Path, snapshot: IssueSnapshot) -> None:
+def write_snapshot(
+    root: Path, job_id: str, path: Path, snapshot: IssueSnapshot
+) -> None:
     """Write one source snapshot atomically without following a target symlink."""
 
     if path.is_symlink():
@@ -561,7 +565,13 @@ def write_snapshot(path: Path, snapshot: IssueSnapshot) -> None:
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        temporary.replace(path)
+        finalize_evidence_write(
+            root,
+            job_id,
+            temporary,
+            path,
+            'issue_snapshot',
+        )
     finally:
         temporary.unlink(missing_ok=True)
 

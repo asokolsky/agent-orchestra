@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.evidence import (
+    EvidencePathError,
+    resolve_evidence_path,
+)
 from agent_orchestra.invocations import (
     InvocationEvidenceError,
     InvocationIdentity,
@@ -441,15 +445,11 @@ def _enqueue_issue(args: argparse.Namespace, store: RunStore) -> int:
             source_digest=snapshot.digest,
         )
         root = args.runs_directory.expanduser().resolve()
-        job_directory = root / job.id
-        if job_directory.is_symlink() or not job_directory.resolve().is_relative_to(
-            root
-        ):
-            _fail_issue_job_directory()
-        write_snapshot(job_directory / 'issue.json', snapshot)
+        snapshot_path = resolve_evidence_path(root, job.id, 'issue.json')
+        write_snapshot(root, job.id, snapshot_path, snapshot)
         store.initialize()
         store.add_issue(job)
-    except (IssueSourceError, OSError) as error:
+    except (EvidencePathError, IssueSourceError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
     print(job.id)
@@ -518,13 +518,6 @@ def _post_issue_feedback(args: argparse.Namespace, store: RunStore) -> int:
         )
     )
     return 0
-
-
-def _fail_issue_job_directory() -> None:
-    """Raise the stable issue-job evidence containment error."""
-
-    message = 'job directory escapes the runs directory'
-    raise IssueSourceError(message)
 
 
 def _job_summary(run: Run) -> dict[str, object]:
@@ -674,10 +667,10 @@ def _job_directory(job_id: str, runs_directory: Path) -> Path | None:
     """Resolve one contained job evidence directory when it exists."""
 
     root = runs_directory.expanduser().resolve()
-    job_directory = root / job_id
-    if job_directory.is_symlink() or not job_directory.resolve().is_relative_to(root):
-        message = 'job directory escapes the runs directory'
-        raise InvocationEvidenceError(message)
+    try:
+        job_directory = resolve_evidence_path(root, job_id)
+    except EvidencePathError as error:
+        raise InvocationEvidenceError(str(error)) from error
     if not job_directory.is_dir():
         return None
     return job_directory

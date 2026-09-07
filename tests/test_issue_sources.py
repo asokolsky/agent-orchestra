@@ -367,7 +367,7 @@ def test_write_snapshot_rejects_symlink(
     )
 
     with pytest.raises(IssueSourceError, match='unsafe_evidence_path'):
-        write_snapshot(path, object())  # type: ignore[arg-type]
+        write_snapshot(tmp_path, 'job-1', path, object())  # type: ignore[arg-type]
 
     assert target.read_text() == 'safe'
 
