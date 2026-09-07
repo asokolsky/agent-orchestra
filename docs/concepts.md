@@ -1,6 +1,6 @@
 # Fundamental Concepts
 
-Agent-orchestra separates five concepts:
+Agent-orchestra separates seven concepts:
 
 - a **job** is one tracked workflow instance for one objective;
 - a **task** is one durable role assignment within a job;
@@ -60,16 +60,26 @@ flowchart LR
 A role defines one agent's job, request, result, and maximum permissions. It
 does not depend on an agent product.
 
-The version 1 workflow supports two roles:
+The workflows distinguish four responsibilities:
 
 | Role | Responsibility | Worktree access |
 |---|---|---|
-| [`developer`](role-developer.md) | Implement an objective or remediate accepted findings | Read and write the assigned worktree |
-| [`reviewer`](role-reviewer.md) | Evaluate one immutable diff and return a verdict and structured findings | Read-only |
+| [Source-code developer](role-developer.md) (`developer`) | Implement an objective or remediate source-code review findings | Read and write the assigned worktree |
+| [Source-code reviewer](role-reviewer.md) (`reviewer`) | Evaluate one immutable diff and return a verdict and structured findings | Read-only |
+| [Issue creator](role-issue-creator.md) | Write or revise issue prose in response to readiness feedback | Provider write only when separately authorized |
+| [Issue reviewer](role-issue-reviewer.md) (`issue_reviewer`) | Evaluate one immutable issue snapshot for implementation readiness | Read-only, without provider access |
+
+The source-code developer, source-code reviewer, and issue reviewer are
+currently dispatched agent roles. The issue creator is the corresponding
+workflow responsibility, currently performed by a person or external system;
+Agent Orchestra publishes feedback but does not yet dispatch an issue creator
+to revise provider content.
 
 The same role contract applies no matter which runtime executes it. A Codex
-reviewer and a Claude Code reviewer receive equivalent canonical requests,
+source-code reviewer and a Claude Code source-code reviewer receive equivalent canonical requests,
 operate under the same permissions, and return equivalent canonical results.
+The same rule applies to issue review: provider payloads are normalized before
+either runtime receives them.
 
 A supported role defines:
 
@@ -94,7 +104,9 @@ Some workflow participants are not agent roles:
   binds approval to an immutable diff, selects adapters, and records evidence.
 - The **authorization authority** is the user or system that allows or denies a
   specific commit or remote action.
-- A **Git provider adapter** reads or changes GitHub or GitLab only for the
+- An **issue source adapter** reads GitHub through `gh` or GitLab through
+  `glab`, then returns a provider-neutral snapshot. A **Git provider adapter**
+  changes GitHub or GitLab only for the
   provider operation it was asked and authorized to perform.
 
 These participants are not developers or reviewers. A state change does not

@@ -12,15 +12,32 @@ from uuid import uuid4
 
 import pytest
 
-from agent_orchestra.adapter.claude_code import run_claude_code_developer
+from agent_orchestra.adapter.claude_code import ClaudeCodeDeveloperAdapter
 from agent_orchestra.adapter.codex import (
+    CodexDeveloperAdapter,
     _developer_environment,
-    run_codex_developer,
 )
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
     read_runtime_metadata,
 )
+
+
+def run_codex_developer(
+    request: Path, response: Path, *, model: str | None = None
+) -> None:
+    """Invoke the concrete Codex developer adapter."""
+
+    CodexDeveloperAdapter(model).execute(request, response)
+
+
+def run_claude_code_developer(
+    request: Path, response: Path, *, model: str | None = None
+) -> None:
+    """Invoke the concrete Claude Code developer adapter."""
+
+    ClaudeCodeDeveloperAdapter(model).execute(request, response)
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable

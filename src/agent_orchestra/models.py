@@ -58,6 +58,7 @@ class ScenarioType(StrEnum):
 
     LOCAL_CHANGES = 'local_changes'
     PULL_REQUEST = 'pull_request'
+    ISSUE_REVIEW = 'issue_review'
 
 
 class RunState(StrEnum):
@@ -170,3 +171,71 @@ class Run:
             created_at=created_at,
             updated_at=created_at,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class IssueJob:
+    """Persistent state for one immutable provider issue review."""
+
+    id: str
+    state: RunState
+    provider: str
+    host: str
+    remote_url: str
+    namespace: str
+    project: str
+    issue_number: int
+    title: str
+    author: str
+    source_updated_at: str
+    source_digest: str
+    iteration: int = 0
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        provider: str,
+        host: str,
+        remote_url: str,
+        namespace: str,
+        project: str,
+        issue_number: int,
+        title: str,
+        author: str,
+        source_updated_at: str,
+        source_digest: str,
+    ) -> IssueJob:
+        """Create a queued issue-review job."""
+
+        created_at = utc_now()
+        return cls(
+            id=create_run_id(created_at),
+            state=RunState.QUEUED,
+            provider=provider,
+            host=host,
+            remote_url=remote_url,
+            namespace=namespace,
+            project=project,
+            issue_number=issue_number,
+            title=title,
+            author=author,
+            source_updated_at=source_updated_at,
+            source_digest=source_digest,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAction:
+    """Durable identity of one issue-provider write."""
+
+    job_id: str
+    iteration: int
+    action: str
+    provider_id: str
+    remote_url: str
+    created_at: datetime = field(default_factory=utc_now)

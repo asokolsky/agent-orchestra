@@ -2,21 +2,23 @@
 
 ## How it works
 
-A user invokes the CLI to have one change developed and independently reviewed.
+A user invokes the CLI to have one source-code change developed and independently reviewed.
 Agent-orchestra records that work as a
 [job](concepts.md#jobs-tasks-and-attempts), so it can preserve the objective,
 progress, and review history across task attempts.
 The [orchestrator](concepts.md#system-participants) then coordinates the two
-roles:
+source-code roles:
 
-1. The [`developer`](concepts.md#roles) edits and validates the assigned
+1. The [source-code developer](concepts.md#roles), represented by the
+   `developer` protocol role, edits and validates the assigned
    worktree, then returns a handoff.
 2. The orchestrator records the exact diff digest and asks the
-   [`reviewer`](concepts.md#roles) to evaluate that diff. The reviewer works
+   [source-code reviewer](concepts.md#roles), represented by the `reviewer`
+   protocol role, to evaluate that diff. The source-code reviewer works
    read-only and returns an `approved`, `changes_requested`, or `blocked`
    verdict.
 3. After `changes_requested`, the orchestrator gives the complete findings to
-   the developer. The developer addresses them, and the reviewer evaluates the
+   the source-code developer. That role addresses them, and the source-code reviewer evaluates the
    new diff. This cycle continues until approval or a stopping condition.
 
 The sequence diagram focuses on the two agent roles. The orchestrator mediates,
@@ -41,7 +43,7 @@ sequenceDiagram
     end
 ```
 
-The developer and reviewer communicate through versioned
+The source-code developer and source-code reviewer communicate through versioned
 [messages](concepts.md#canonical-messages-and-artifacts). A
 [runtime](concepts.md#runtimes) and [adapter](concepts.md#adapters) execute each
 role with only its allowed [capabilities](concepts.md#capabilities). SQLite
@@ -139,14 +141,14 @@ UUID-based runs remain readable.
 
 ## Job and task output
 
-CLI output schema version 8 introduces the public `job` -> `task` -> `attempt`
+CLI output schema version 9 introduces the public `job` -> `task` -> `attempt`
 hierarchy. The `jobs`, `job`, `tasks`, and `task` commands are separate
 read-only views. `job.current` is always an array and contains only pending or
 running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-8 CLI. This
+column and field names. Those names are not exposed by the schema-9 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -157,6 +159,8 @@ Schema version history:
 - Version 8 replaces those commands with `jobs`, `job`, `tasks`, and `task`,
   and exposes `job_id`, `jobs`, and `attempt_id`. Stored SQLite columns and
   canonical evidence keep their implementation-level field names.
+- Version 9 adds issue-review jobs, the `issue_review` scenario, and recorded
+  provider actions to the job and task views.
 
 ## Batch enqueue output
 
@@ -169,6 +173,45 @@ object; successful and completed partial scans set `error` to `null`.
 
 This JSON is CLI output rather than a workflow message. Callers must use the
 declared schema version and treat job IDs as opaque strings.
+
+## Issue-review source and messages
+
+Issue review uses contracts distinct from diff-scoped code review. A captured
+`issue.json` schema version 1 contains provider, host, canonical URL, namespace,
+project, provider issue number, title, body, author, labels, state, provider
+timestamps, and `source_digest`. The digest is canonical JSON SHA-256 over the
+normalized title, body, ordered labels, and state. Provider-only response fields
+are not retained as workflow state.
+
+An `issue_review_request` schema version 1 contains:
+
+| Field | Meaning |
+|---|---|
+| `job_id` / `iteration` | Durable job identity and positive review iteration. |
+| `objective` | Human review objective. |
+| `allowed_actions` | Only `read_issue_snapshot` and `write_review_evidence`. |
+| `source` | Complete validated provider-neutral issue snapshot. |
+| `prior_review` | Previous canonical result for disposition, or null. |
+
+An issue-review result schema version 1 contains the exact `source_digest`, a
+`ready`, `changes_requested`, or `blocked` verdict, summary, findings,
+validation, and verification gaps. Each finding has a unique ID, one readiness
+dimension, severity, title, optional issue section or field, explanation, and
+suggested change. `ready` forbids findings and `changes_requested` requires at
+least one.
+
+Before the first review, the live provider digest and `updated_at` must match
+the captured source. Before accepting every result, both values are fetched
+again and must match the request. A later iteration requires a different
+review-relevant digest and includes the prior result. Requests, snapshots,
+results, and rendered Markdown are stored under
+`iterations/{iteration:06d}/` outside target repos.
+
+Issue review grants no provider-write capability. The separate
+`post-issue-feedback --authorize` operation re-fetches and verifies the reviewed
+revision before posting. It stores the provider message identity in
+`issue_actions`; a hidden job, iteration, and digest marker recovers an existing
+comment or note when a retry follows an interrupted local persistence step.
 
 ## Message representation
 
@@ -628,9 +671,9 @@ these states:
 | `preparing` | The orchestrator is resolving instructions, worktree state, and the exact diff. |
 | `developing` | A developer is implementing the objective or remediating findings. |
 | `validation_required` | A valid developer handoff reported blocked or failed work; the remediation can be retried after intervention. |
-| `reviewing` | A reviewer is evaluating an immutable diff, or its result is being validated. |
-| `changes_requested` | A valid review found actionable defects and the run awaits remediation. |
-| `approved` | A valid review approved the exact recorded diff digest. |
+| `reviewing` | A reviewer is evaluating an immutable diff or issue snapshot, or its result is being validated. |
+| `changes_requested` | A valid review found actionable defects and the job awaits remediation or issue revision. |
+| `approved` | A valid review approved the exact recorded diff or issue-source digest. |
 | `awaiting_commit_authorization` | The approved digest is waiting for explicit commit authorization. |
 | `committed` | The approved change was committed but has not been authorized for publication. |
 | `awaiting_publish_authorization` | The commit is waiting for explicit push and pull-request authorization. |

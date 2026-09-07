@@ -5,6 +5,11 @@ interface. For the workflow model behind these commands, see
 [Workflows](workflows.md). For persisted messages and output schemas, see
 [Design and protocol](design.md).
 
+In this reference, source-code reviewers inspect immutable diffs and
+source-code developers edit worktrees. Issue reviewers inspect immutable issue
+snapshots, while issue creators revise issue prose in response. Commands retain
+the shorter option names `--reviewer-agent` and `--developer-agent`.
+
 ## Invocation
 
 Run the CLI from this repo through mise:
@@ -36,7 +41,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "jobs": [],
   "error": null
 }
@@ -211,7 +216,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -235,7 +240,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `8`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `9`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -272,6 +277,89 @@ Capture is completed for every candidate before any job is persisted. One
 unreadable repo does not prevent independent valid repos from enqueueing. The
 command exits nonzero only when at least one repo fails and none enqueue.
 
+## `enqueue-issue`
+
+Capture one GitHub or GitLab issue as an immutable issue-review job:
+
+```text
+agent-orchestra [--database DATABASE] enqueue-issue ISSUE_URL
+  [--runs-directory DIRECTORY]
+```
+
+The URL must use HTTPS and canonical provider syntax:
+
+```text
+https://github.com/OWNER/REPOSITORY/issues/NUMBER
+https://gitlab.com/NAMESPACE/PROJECT/-/issues/IID
+https://gitlab.example.test/NAMESPACE/PROJECT/-/issues/IID
+```
+
+GitLab namespaces may be nested. GitHub is read through authenticated `gh api`;
+GitLab is read through `glab api --hostname HOST`, including configured
+self-managed hosts and private projects visible to the current credentials. A
+self-managed host is configured when `glab auth status --hostname HOST`
+succeeds; otherwise the command reports `gitlab_host_not_configured` and asks
+the user to run `glab auth login --hostname HOST`. URL parsing itself performs
+no process or network access.
+
+The command normalizes provider fields, computes a deterministic digest over
+title, body, labels, and state, writes `issue.json` beneath the selected
+evidence root, persists the queued job, prints its opaque ID, and exits 0. It
+does not run an agent or write to the provider. Invalid URLs, unavailable
+provider CLIs, authentication failures, missing issues, malformed responses,
+and evidence-path violations write a diagnostic to stderr and exit 2.
+
+## `review-issue`
+
+Review a captured issue for implementation readiness:
+
+```text
+agent-orchestra [--database DATABASE] review-issue JOB_ID [OPTIONS]
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--objective TEXT` | `Review this issue for implementation readiness.` | Context supplied to the reviewer. |
+| `--timeout SECONDS` | `1800` | Positive bound for the reviewer process. |
+| `--reviewer-agent {codex,claude-code}` | `codex` | Issue-reviewer runtime adapter implementation. |
+| `--reviewer-model MODEL` | Runtime default | Optional model passed to the selected runtime. |
+| `--runs-directory DIRECTORY` | `~/.local/state/agent-orchestra/runs` | Evidence root used when the issue was captured. |
+
+Before and after agent execution, the command fetches the live issue. It
+rejects a changed source revision and does not itself post provider feedback. The
+versioned request gives both runtimes the same normalized snapshot, eight
+readiness dimensions, prior iteration result when present, and only local
+evidence permissions.
+
+Each iteration writes `issue.json`, `request.json`, `result.json`, and rendered
+`feedback.md` beneath `iterations/NNNNNN/`. Result verdicts are `ready`,
+`changes_requested`, and `blocked`. A repeated review requires the author to
+change a review-relevant issue field first.
+
+A custom issue reviewer may be supplied for testing or integration:
+
+```shell
+agent-orchestra review-issue "$JOB_ID" -- /absolute/path/to/reviewer
+```
+
+The command receives request and result paths as its final two arguments and
+must write the strict issue-review result JSON.
+
+## `post-issue-feedback`
+
+Publish accepted feedback as a GitHub comment or GitLab note:
+
+```text
+agent-orchestra [--database DATABASE] post-issue-feedback JOB_ID --authorize
+    [--runs-directory DIRECTORY]
+```
+
+The explicit `--authorize` flag is required. Before posting, the command
+re-fetches the issue and requires the reviewed digest and provider update time
+to remain unchanged. Repeated calls return the recorded provider message
+identity without creating another comment or note; interrupted persistence is
+recovered by finding the hidden idempotency marker on the provider.
+
 ## Job and task views
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
@@ -294,7 +382,7 @@ stdout and stderr paths and content.
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -323,12 +411,17 @@ the root before use and rejects job-directory and attempt-evidence escapes.
 | `state` | String | Durable workflow state. |
 | `current` | Array | Non-terminal tasks; present only in the single-job view. |
 | `supersedes_job_id` | String or null | Replaced terminal job, when any. |
-| Other fields | Mixed | Scenario, repo/worktree identity, immutable Git scope, iteration, remote URL, and timestamps. |
+| `scenario` | String | `local_changes` or `issue_review`. |
+| `provider` / `host` | String | Issue provider identity for issue-review jobs. |
+| `namespace` / `project` | String | Provider project identity for issue-review jobs. |
+| `issue_number` | Integer | GitHub issue number or GitLab project-scoped IID. |
+| `source_digest` | String | Immutable normalized issue scope for issue-review jobs. |
+| Other fields | Mixed | Repo/worktree or issue identity, immutable scope, iteration, remote URL, and timestamps. |
 
 | Task or attempt field | Type | Meaning |
 |---|---|---|
 | `task_id` | String | Globally addressable `{job_id}:{sequence}-{role}` identifier. |
-| `role` | String | `developer` or `reviewer`. |
+| `role` | String | `developer` or `reviewer` for source-code jobs; `issue_reviewer` for issue-readiness jobs. |
 | `status` | String | Task or attempt lifecycle status. |
 | `attempt_id` | String | Public identifier for one process execution. |
 | `attempt` | Integer | One-based attempt ordinal. |
@@ -345,7 +438,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-8 `job_id`,
+aliases. Callers must use the four commands above and the schema-9 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -406,7 +499,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -415,7 +508,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `8`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `9`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -458,7 +551,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -516,7 +609,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -527,7 +620,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

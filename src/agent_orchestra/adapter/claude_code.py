@@ -9,16 +9,27 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_orchestra.adapter.base import (
+    DeveloperAdapter,
+    IssueReviewerAdapter,
+    IssueReviewExecution,
+    ReviewerAdapter,
+)
 from agent_orchestra.adapter.developer import (
     DeveloperAdapterError,
     developer_prompt,
     read_request,
     write_handoff,
+)
+from agent_orchestra.adapter.issue_reviewer import (
+    IssueReviewerError,
+    issue_review_prompt,
 )
 from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
@@ -30,6 +41,7 @@ from agent_orchestra.runtime_metadata import (
 )
 from agent_orchestra.schemas import (
     DEVELOPER_RESULT_SCHEMA,
+    ISSUE_REVIEW_RESULT_SCHEMA,
     REVIEW_RESULT_SCHEMA,
     SchemaValidationError,
     validate_review_result,
@@ -199,7 +211,7 @@ def _output_with_runtime_metadata(stdout: str) -> dict[str, Any] | None:
     return output
 
 
-def run_claude_code_reviewer(
+def _execute_claude_code_reviewer(
     request_path: Path, response_path: Path, *, model: str | None = None
 ) -> None:
     """Invoke Claude Code and persist a correlated canonical review response."""
@@ -309,7 +321,89 @@ def run_claude_code_reviewer(
     _write_text_atomic(response_path, json.dumps(response, indent=2) + '\n')
 
 
-def run_claude_code_developer(
+@dataclass(frozen=True, slots=True)
+class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
+    """Run issue-readiness reviews through the Claude Code CLI."""
+
+    model: str | None = None
+
+    def execute(self, request: dict[str, Any], *, timeout: int) -> IssueReviewExecution:
+        """Run an isolated issue review and return structured output."""
+
+        executable = shutil.which('claude')
+        if executable is None:
+            raise IssueReviewerError(CLAUDE_CODE_NOT_FOUND)
+        with tempfile.TemporaryDirectory(prefix='.claude-issue-review-') as directory:
+            temporary = Path(directory)
+            command = [
+                executable,
+                '--print',
+                '--no-session-persistence',
+                '--setting-sources',
+                '',
+                '--settings',
+                _developer_settings(),
+                '--strict-mcp-config',
+                '--mcp-config',
+                '{"mcpServers":{}}',
+                '--output-format',
+                'json',
+                '--json-schema',
+                json.dumps(ISSUE_REVIEW_RESULT_SCHEMA, separators=(',', ':')),
+                '--permission-mode',
+                'dontAsk',
+                '--tools',
+                '',
+            ]
+            if self.model:
+                command.extend(['--model', self.model])
+            try:
+                completed = run_streaming_process(
+                    command,
+                    cwd=temporary,
+                    env=reviewer_process_environment(
+                        temporary, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'
+                    ),
+                    input=issue_review_prompt(request),
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                message = 'claude-code issue review timed out'
+                raise IssueReviewerError(
+                    message,
+                    stdout=str(error.stdout or ''),
+                    stderr=str(error.stderr or ''),
+                    timed_out=True,
+                ) from error
+        if completed.returncode != 0:
+            diagnostic = completed.stderr.strip() or completed.stdout.strip()
+            message = f'claude-code issue review failed: {diagnostic}'
+            raise IssueReviewerError(
+                message,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                exit_code=completed.returncode,
+            )
+        output = _output_with_runtime_metadata(completed.stdout)
+        if output is None or not isinstance(output.get('structured_output'), dict):
+            message = 'claude-code returned no structured issue review'
+            raise IssueReviewerError(
+                message,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                exit_code=completed.returncode,
+            )
+        result: dict[str, Any] = output['structured_output']
+        return IssueReviewExecution(
+            result,
+            completed.stdout,
+            completed.stderr,
+            completed.returncode,
+            _effective_models(output),
+        )
+
+
+def _execute_claude_code_developer(
     request_path: Path, response_path: Path, *, model: str | None = None
 ) -> None:
     """Invoke Claude Code with edit access and persist its canonical handoff."""
@@ -383,6 +477,30 @@ def run_claude_code_developer(
     write_handoff(response_path, request, result)
 
 
+@dataclass(frozen=True, slots=True)
+class ClaudeCodeReviewerAdapter(ReviewerAdapter):
+    """Implement canonical code review through the Claude Code CLI."""
+
+    model: str | None = None
+
+    def execute(self, request_path: Path, response_path: Path) -> None:
+        """Execute a diff-scoped review."""
+
+        _execute_claude_code_reviewer(request_path, response_path, model=self.model)
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeCodeDeveloperAdapter(DeveloperAdapter):
+    """Implement canonical development through the Claude Code CLI."""
+
+    model: str | None = None
+
+    def execute(self, request_path: Path, response_path: Path) -> None:
+        """Execute one development request."""
+
+        _execute_claude_code_developer(request_path, response_path, model=self.model)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run a Claude Code role adapter."""
 
@@ -394,12 +512,12 @@ def main(argv: list[str] | None = None) -> int:
     parsed = parser.parse_args(argv)
     try:
         if parsed.role == 'reviewer':
-            run_claude_code_reviewer(
-                parsed.request, parsed.response, model=parsed.model
+            ClaudeCodeReviewerAdapter(parsed.model).execute(
+                parsed.request, parsed.response
             )
         else:
-            run_claude_code_developer(
-                parsed.request, parsed.response, model=parsed.model
+            ClaudeCodeDeveloperAdapter(parsed.model).execute(
+                parsed.request, parsed.response
             )
     except (ClaudeCodeReviewerError, DeveloperAdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)

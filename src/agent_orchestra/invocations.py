@@ -98,7 +98,7 @@ class InvocationRecord:
     run_id: str
     task_id: str
     invocation_id: str
-    role: Literal['developer', 'reviewer']
+    role: Literal['developer', 'reviewer', 'issue_reviewer']
     agent_vendor: str
     requested_model: str | None
     effective_models: tuple[str, ...]
@@ -239,7 +239,7 @@ def validate_attempt_record(record: InvocationRecord) -> None:
         _fail('invalid effective_model_status')
     if (record.effective_model_status == 'reported') != bool(record.effective_models):
         _fail('effective_model_status contradicts effective_models')
-    if record.role not in {'developer', 'reviewer'}:
+    if record.role not in {'developer', 'reviewer', 'issue_reviewer'}:
         _fail('invalid attempt role')
     if record.iteration < 1 or record.attempt < 1:
         _fail('iteration and attempt must be positive')
@@ -520,7 +520,7 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             _fail(f'duplicate task attempt in {path.name}')
         seen_attempts.add(attempt_key)
         if (
-            record.role not in {'developer', 'reviewer'}
+            record.role not in {'developer', 'reviewer', 'issue_reviewer'}
             or record.iteration < 1
             or record.attempt < 1
             or not record.task_id

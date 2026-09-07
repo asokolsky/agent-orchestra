@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -129,7 +130,7 @@ def test_four_views_use_public_vocabulary_and_current_array(
 
     assert main(arguments(database, 'jobs', None, root)) == 0
     jobs = json.loads(capsys.readouterr().out)
-    assert jobs['schema_version'] == 8
+    assert jobs['schema_version'] == 9
     assert jobs['jobs'][0]['job_id'] == str(job.id)
     assert 'id' not in jobs['jobs'][0]
 
@@ -154,6 +155,34 @@ def test_four_views_use_public_vocabulary_and_current_array(
     assert attempt['attempt_id'] == f'{completed_id}:attempt-0001'
     assert 'invocation_id' not in attempt
     assert attempt['streams']['stdout']['content'] == 'child stdout\n'
+
+
+def test_views_treat_absent_issue_tables_as_empty(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Read an existing state database without creating issue tables."""
+
+    database = tmp_path / 'state.db'
+    RunStore(database).initialize()
+    with sqlite3.connect(database) as connection:
+        connection.execute('DROP TABLE issue_actions')
+        connection.execute('DROP TABLE issue_jobs')
+
+    assert main(['--database', str(database), 'jobs']) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        'schema_version': 9,
+        'jobs': [],
+        'error': None,
+    }
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert 'issue_jobs' not in tables
+    assert 'issue_actions' not in tables
 
 
 def test_task_groups_retries_and_uses_custom_evidence_root(

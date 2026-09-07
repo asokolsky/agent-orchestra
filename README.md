@@ -20,6 +20,12 @@ See [Roles, runtimes, adapters, and capabilities](docs/concepts.md) for the
 canonical definitions. See the [CLI reference](docs/cli.md) for every command,
 option, default, output, and exit behavior.
 
+Agent Orchestra distinguishes source-code reviewers and source-code developers,
+which exchange diff-bound findings, from issue reviewers and issue creators,
+which exchange readiness feedback about issue prose. The shorter persisted role
+values `reviewer` and `developer` refer to the source-code roles unless an
+`issue_review` job supplies the scenario context.
+
 ## Toolchain
 
 The project targets Python 3.14 and requires Git 2.36 or newer for
@@ -32,18 +38,22 @@ formatting and linting, mypy checks types, and pytest runs the test suite.
 
 - The implemented [local development and review workflow](docs/workflows.md#local-development-and-review)
   captures an existing uncommitted diff as a job, dispatches an independent
-  reviewer, sends structured findings to a developer for remediation, and
+  source-code reviewer, sends structured findings to a source-code developer
+  for remediation, and
   repeats review against each new diff digest. Codex and Claude Code can be
   selected independently for either role. Interrupted and validation-required
   jobs can resume from durable task and attempt evidence. Approval stops at the
   commit-authorization boundary; committing and publishing remain separate
   user-authorized actions.
-- The issue-refinement workflow reviews a newly filed issue before development
-  begins. A reviewer checks that its problem statement, scope, constraints,
+- The implemented [issue-refinement workflow](docs/workflows.md#issue-refinement)
+  captures a GitHub or GitLab issue and reviews its immutable source digest
+  before development
+  begins. An issue reviewer checks that its problem statement, scope, constraints,
   risks, and acceptance criteria are clear and testable, then communicates
-  actionable feedback to the author. The issue can be revised and reviewed
-  again until it is ready for implementation. This is currently a collaborative
-  review workflow rather than an automated CLI job.
+  actionable feedback to the issue creator. The issue can be revised and reviewed
+  again until it is ready for implementation. Codex and Claude Code receive the
+  same provider-neutral request. Review is read-only; the generated feedback
+  can be posted only through a separate explicitly authorized command.
 - The designed [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
   starts from a pull-request URL and reviews one exact remote head. Remote
   pull-request enqueueing and provider-side review actions are not implemented.
@@ -289,6 +299,8 @@ The current implementation provides:
 - Markdown review rendering;
 - commands to initialize state, enqueue local changes from one repo or a
   directory of repos, and inspect jobs and tasks;
+- commands to capture GitHub and GitLab issues and run digest-bound,
+  provider-neutral readiness reviews;
 - a Python-native installer for Codex and Claude Code skills;
 - versioned developer and reviewer skills under `skills/`;
 - built-in Codex and Claude Code adapters for developer and reviewer roles,
@@ -299,10 +311,12 @@ The current implementation provides:
 - adapter-neutral attempt records separating requested and effective model
   provenance, plus read-only process stream viewing through tasks.
 
-The supported roles are documented separately:
+The source-code roles are documented separately:
 
-- [Developer role](docs/role-developer.md)
-- [Reviewer role](docs/role-reviewer.md)
+- [Source-code developer role](docs/role-developer.md)
+- [Source-code reviewer role](docs/role-reviewer.md)
+- [Issue reviewer role](docs/role-issue-reviewer.md)
+- [Issue creator responsibility](docs/role-issue-creator.md)
 
 Installation and invocation examples are in
 [Development and review cycle](#development-and-review-cycle).
@@ -312,8 +326,10 @@ configuration, process log, and terminal failure is persisted outside the
 worktree. Recoverable jobs continue with the same job ID through the
 [`resume` command](docs/cli.md#resume); terminal replacements can retain lineage
 through [`enqueue-local --supersedes`](docs/cli.md#enqueue-local). Initial
-clean-worktree development, worktree creation, leases, Git provider
-integration, and authorization commands remain subsequent increments.
+clean-worktree development, worktree creation, leases, and remote pull-request
+operations remain subsequent increments. Issue-review feedback can be posted to
+GitHub or GitLab only through the explicit `post-issue-feedback --authorize`
+boundary.
 
 ## Development
 

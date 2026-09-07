@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from agent_orchestra.models import Run, RunState, ScenarioType
+from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState, ScenarioType
 
 LEGACY_REVIEW_STATE = 'awaiting_review'
 
@@ -59,6 +59,34 @@ class RunStore:
                     to_state TEXT NOT NULL,
                     occurred_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS issue_jobs (
+                    id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    remote_url TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    issue_number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    source_updated_at TEXT NOT NULL,
+                    source_digest TEXT NOT NULL,
+                    iteration INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS issue_actions (
+                    job_id TEXT NOT NULL REFERENCES issue_jobs(id),
+                    iteration INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    remote_url TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (job_id, iteration, action)
+                );
                 """
             )
             columns = {
@@ -79,6 +107,163 @@ class RunStore:
                 'UPDATE transitions SET to_state = ? WHERE to_state = ?',
                 (RunState.REVIEWING, LEGACY_REVIEW_STATE),
             )
+
+    def add_issue(self, job: IssueJob) -> None:
+        """Insert one newly captured issue-review job."""
+
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO issue_jobs (
+                    id, state, provider, host, remote_url, namespace, project,
+                    issue_number, title, author, source_updated_at, source_digest,
+                    iteration, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    job.state,
+                    job.provider,
+                    job.host,
+                    job.remote_url,
+                    job.namespace,
+                    job.project,
+                    job.issue_number,
+                    job.title,
+                    job.author,
+                    job.source_updated_at,
+                    job.source_digest,
+                    job.iteration,
+                    job.created_at.isoformat(),
+                    job.updated_at.isoformat(),
+                ),
+            )
+
+    def get_issue(self, job_id: str) -> IssueJob:
+        """Return one issue-review job by identifier."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                row = connection.execute(
+                    'SELECT * FROM issue_jobs WHERE id = ?', (job_id,)
+                ).fetchone()
+        except sqlite3.OperationalError as error:
+            if 'no such table: issue_jobs' not in str(error):
+                raise
+            raise RunNotFoundError(job_id) from error
+        if row is None:
+            raise RunNotFoundError(job_id)
+        return self._issue_from_row(row)
+
+    def list_issues(self) -> tuple[IssueJob, ...]:
+        """Return issue-review jobs ordered newest first."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                rows = connection.execute(
+                    'SELECT * FROM issue_jobs ORDER BY created_at DESC'
+                ).fetchall()
+        except sqlite3.OperationalError as error:
+            if 'no such table: issue_jobs' not in str(error):
+                raise
+            return ()
+        return tuple(self._issue_from_row(row) for row in rows)
+
+    def update_issue(self, job: IssueJob, expected_state: RunState) -> None:
+        """Persist an issue-review job using compare-and-set semantics."""
+
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                """
+                UPDATE issue_jobs SET state = ?, source_updated_at = ?,
+                    source_digest = ?, title = ?, author = ?, iteration = ?,
+                    updated_at = ?
+                WHERE id = ? AND state = ?
+                """,
+                (
+                    job.state,
+                    job.source_updated_at,
+                    job.source_digest,
+                    job.title,
+                    job.author,
+                    job.iteration,
+                    job.updated_at.isoformat(),
+                    job.id,
+                    expected_state,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentUpdateError(job.id)
+
+    def get_issue_action(
+        self, job_id: str, iteration: int, action: str
+    ) -> ProviderAction | None:
+        """Return a previously completed provider action, when present."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                row = connection.execute(
+                    """SELECT * FROM issue_actions
+                    WHERE job_id = ? AND iteration = ? AND action = ?""",
+                    (job_id, iteration, action),
+                ).fetchone()
+        except sqlite3.OperationalError as error:
+            if 'no such table: issue_actions' not in str(error):
+                raise
+            raise RunNotFoundError(job_id) from error
+        if row is None:
+            return None
+        return ProviderAction(
+            job_id=row['job_id'],
+            iteration=row['iteration'],
+            action=row['action'],
+            provider_id=row['provider_id'],
+            remote_url=row['remote_url'],
+            created_at=datetime.fromisoformat(row['created_at']),
+        )
+
+    def add_issue_action(self, action: ProviderAction) -> None:
+        """Persist one idempotent provider-action identity."""
+
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO issue_actions (
+                    job_id, iteration, action, provider_id, remote_url, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    action.job_id,
+                    action.iteration,
+                    action.action,
+                    action.provider_id,
+                    action.remote_url,
+                    action.created_at.isoformat(),
+                ),
+            )
+
+    def list_issue_actions(self, job_id: str) -> tuple[ProviderAction, ...]:
+        """Return provider actions for one job in creation order."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                rows = connection.execute(
+                    'SELECT * FROM issue_actions WHERE job_id = ? ORDER BY created_at',
+                    (job_id,),
+                ).fetchall()
+        except sqlite3.OperationalError as error:
+            if 'no such table: issue_actions' not in str(error):
+                raise
+            return ()
+        return tuple(
+            ProviderAction(
+                job_id=row['job_id'],
+                iteration=row['iteration'],
+                action=row['action'],
+                provider_id=row['provider_id'],
+                remote_url=row['remote_url'],
+                created_at=datetime.fromisoformat(row['created_at']),
+            )
+            for row in rows
+        )
 
     def add(self, run: Run) -> None:
         """Insert a newly created run and its initial transition record."""
@@ -234,6 +419,28 @@ class RunStore:
             supersedes_run_id=(
                 row['supersedes_run_id'] if 'supersedes_run_id' in columns else None
             ),
+            created_at=datetime.fromisoformat(row['created_at']),
+            updated_at=datetime.fromisoformat(row['updated_at']),
+        )
+
+    @staticmethod
+    def _issue_from_row(row: sqlite3.Row) -> IssueJob:
+        """Convert an issue-job row to its domain model."""
+
+        return IssueJob(
+            id=row['id'],
+            state=RunState(row['state']),
+            provider=row['provider'],
+            host=row['host'],
+            remote_url=row['remote_url'],
+            namespace=row['namespace'],
+            project=row['project'],
+            issue_number=row['issue_number'],
+            title=row['title'],
+            author=row['author'],
+            source_updated_at=row['source_updated_at'],
+            source_digest=row['source_digest'],
+            iteration=row['iteration'],
             created_at=datetime.fromisoformat(row['created_at']),
             updated_at=datetime.fromisoformat(row['updated_at']),
         )

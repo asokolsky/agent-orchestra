@@ -9,16 +9,27 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_orchestra.adapter.base import (
+    DeveloperAdapter,
+    IssueReviewerAdapter,
+    IssueReviewExecution,
+    ReviewerAdapter,
+)
 from agent_orchestra.adapter.developer import (
     DeveloperAdapterError,
     developer_prompt,
     read_request,
     write_handoff,
+)
+from agent_orchestra.adapter.issue_reviewer import (
+    IssueReviewerError,
+    issue_review_prompt,
 )
 from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.models import Finding, Review, Severity, Verdict
@@ -29,6 +40,7 @@ from agent_orchestra.runtime_metadata import (
 )
 from agent_orchestra.schemas import (
     DEVELOPER_RESULT_SCHEMA,
+    ISSUE_REVIEW_RESULT_SCHEMA,
     REVIEW_RESULT_SCHEMA,
     SchemaValidationError,
     validate_review_result,
@@ -193,7 +205,7 @@ def _developer_environment(worktree: Path, temporary: Path) -> dict[str, str]:
     )
 
 
-def run_codex_reviewer(
+def _execute_codex_reviewer(
     request_path: Path, response_path: Path, *, model: str | None = None
 ) -> None:
     """Invoke Codex and persist a correlated response plus review artifact."""
@@ -285,7 +297,86 @@ def run_codex_reviewer(
     _write_json_atomic(response_path, response)
 
 
-def run_codex_developer(
+@dataclass(frozen=True, slots=True)
+class CodexIssueReviewerAdapter(IssueReviewerAdapter):
+    """Run issue-readiness reviews through the Codex CLI."""
+
+    model: str | None = None
+
+    def execute(self, request: dict[str, Any], *, timeout: int) -> IssueReviewExecution:
+        """Run a network-disabled issue review and return structured output."""
+
+        executable = shutil.which('codex')
+        if executable is None:
+            raise IssueReviewerError(CODEX_NOT_FOUND)
+        with tempfile.TemporaryDirectory(prefix='.codex-issue-review-') as directory:
+            temporary = Path(directory)
+            schema_path = temporary / 'schema.json'
+            result_path = temporary / 'result.json'
+            schema_path.write_text(
+                json.dumps(ISSUE_REVIEW_RESULT_SCHEMA), encoding='utf-8'
+            )
+            command = [
+                executable,
+                'exec',
+                '--ephemeral',
+                '--ignore-user-config',
+                '--sandbox',
+                'workspace-write',
+                '--cd',
+                str(temporary),
+                '--skip-git-repo-check',
+                '-c',
+                'sandbox_workspace_write.network_access=false',
+                '--output-schema',
+                str(schema_path),
+                '--output-last-message',
+                str(result_path),
+                '--color',
+                'never',
+            ]
+            if self.model:
+                command.extend(['--model', self.model])
+            command.append('-')
+            try:
+                completed = run_streaming_process(
+                    command,
+                    env=reviewer_process_environment(temporary),
+                    input=issue_review_prompt(request),
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                message = 'codex issue review timed out'
+                raise IssueReviewerError(
+                    message,
+                    stdout=str(error.stdout or ''),
+                    stderr=str(error.stderr or ''),
+                    timed_out=True,
+                ) from error
+            if completed.returncode != 0:
+                diagnostic = completed.stderr.strip() or completed.stdout.strip()
+                message = f'codex issue review failed: {diagnostic}'
+                raise IssueReviewerError(
+                    message,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    exit_code=completed.returncode,
+                )
+            try:
+                result = _read_object(result_path)
+            except CodexReviewerError as error:
+                raise IssueReviewerError(
+                    str(error),
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    exit_code=completed.returncode,
+                ) from error
+            return IssueReviewExecution(
+                result, completed.stdout, completed.stderr, completed.returncode
+            )
+
+
+def _execute_codex_developer(
     request_path: Path, response_path: Path, *, model: str | None = None
 ) -> None:
     """Invoke Codex with worktree-write access and persist its handoff."""
@@ -358,6 +449,30 @@ def run_codex_developer(
     write_handoff(response_path, request, result)
 
 
+@dataclass(frozen=True, slots=True)
+class CodexReviewerAdapter(ReviewerAdapter):
+    """Implement canonical code review through the Codex CLI."""
+
+    model: str | None = None
+
+    def execute(self, request_path: Path, response_path: Path) -> None:
+        """Execute a diff-scoped review."""
+
+        _execute_codex_reviewer(request_path, response_path, model=self.model)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexDeveloperAdapter(DeveloperAdapter):
+    """Implement canonical development through the Codex CLI."""
+
+    model: str | None = None
+
+    def execute(self, request_path: Path, response_path: Path) -> None:
+        """Execute one development request."""
+
+        _execute_codex_developer(request_path, response_path, model=self.model)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run a Codex role adapter."""
 
@@ -370,9 +485,9 @@ def main(argv: list[str] | None = None) -> int:
     parsed = parser.parse_args(arguments)
     try:
         if parsed.role == 'reviewer':
-            run_codex_reviewer(parsed.request, parsed.response, model=parsed.model)
+            CodexReviewerAdapter(parsed.model).execute(parsed.request, parsed.response)
         else:
-            run_codex_developer(parsed.request, parsed.response, model=parsed.model)
+            CodexDeveloperAdapter(parsed.model).execute(parsed.request, parsed.response)
     except (CodexReviewerError, DeveloperAdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
