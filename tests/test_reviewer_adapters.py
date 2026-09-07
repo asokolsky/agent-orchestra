@@ -138,15 +138,29 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
     assert isinstance(command, list)
     kwargs = observed['kwargs']
     assert isinstance(kwargs, dict)
+    environment = kwargs['env']
+    assert isinstance(environment, dict)
     if runtime == 'codex':
-        assert command[command.index('--sandbox') + 1] == 'read-only'
-        assert command[command.index('--cd') + 1] == str(worktree)
-        assert 'sandbox_workspace_write.network_access=true' not in command
+        assert command[command.index('--sandbox') + 1] == 'workspace-write'
+        temporary = Path(command[command.index('--cd') + 1])
+        assert temporary.parent == response.parent
+        assert environment['TMPDIR'] == str(temporary)
+        assert 'sandbox_workspace_write.exclude_slash_tmp=true' in command
+        assert 'sandbox_workspace_write.exclude_tmpdir_env_var=true' in command
+        assert 'sandbox_workspace_write.network_access=false' in command
+        assert str(worktree) in str(kwargs['input'])
     else:
         assert command[command.index('--permission-mode') + 1] == 'dontAsk'
         assert kwargs['cwd'] == worktree
-    environment = kwargs['env']
-    assert isinstance(environment, dict)
+        settings = json.loads(command[command.index('--settings') + 1])
+        filesystem = settings['sandbox']['filesystem']
+        temporary = Path(filesystem['allowWrite'][0])
+        assert temporary.parent == response.parent
+        assert filesystem['denyWrite'] == [str(worktree)]
+        assert environment['TMPDIR'] == str(temporary)
+        assert 'Bash(mise run tests)' in command
+    assert environment['PYTHONDONTWRITEBYTECODE'] == '1'
+    assert environment['PYTEST_ADDOPTS'] == '-p no:cacheprovider'
     assert RUNTIME_METADATA_ENV not in environment
     assert command[command.index('--model') + 1] == 'runtime-model'
     document = json.loads(response.read_text())

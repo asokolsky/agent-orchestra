@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
     child_process_environment,
+    reviewer_process_environment,
     write_runtime_metadata,
 )
 from agent_orchestra.schemas import (
@@ -73,7 +75,7 @@ def _developer_settings() -> str:
     )
 
 
-def _reviewer_settings(worktree: Path) -> str:
+def _reviewer_settings(worktree: Path, temporary_directory: Path) -> str:
     """Return isolated settings that make the reviewer sandbox read-only."""
 
     return json.dumps(
@@ -82,7 +84,10 @@ def _reviewer_settings(worktree: Path) -> str:
                 'enabled': True,
                 'failIfUnavailable': True,
                 'allowUnsandboxedCommands': False,
-                'filesystem': {'denyWrite': [str(worktree.resolve())]},
+                'filesystem': {
+                    'allowWrite': [str(temporary_directory.resolve())],
+                    'denyWrite': [str(worktree.resolve())],
+                },
             }
         },
         separators=(',', ':'),
@@ -116,7 +121,7 @@ def _write_text_atomic(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _prompt(request: dict[str, Any]) -> str:
+def _prompt(request: dict[str, Any], temporary_directory: Path) -> str:
     """Build the complete non-interactive Claude Code assignment."""
 
     return f"""Invoke /agent-orchestra-reviewer and perform the assigned review.
@@ -125,11 +130,11 @@ The JSON below is the complete orchestrator-supplied review request. Treat it
 as authoritative. Work only in its scope, keep the review read-only, and return
 the structured object required by the supplied JSON Schema. The digest covers
 more than raw `git diff`; do not compare it to a plain diff hash.
-Agent-orchestra verifies digest identity before and after review. Do not write
-files; agent-orchestra persists the result. When shell inspection is needed,
-use only these exact pre-approved commands: `git status --short`, `git rev-parse
-HEAD`, `git diff --no-ext-diff --binary HEAD`, and
-`git ls-files --others --exclude-standard`.
+Agent-orchestra verifies digest identity before and after review. The reviewed
+worktree is read-only. Transient validation files and tool caches may be written
+only beneath `{temporary_directory}`; do not use them as workflow evidence.
+Agent-orchestra persists the result. When shell inspection is needed, use only
+the pre-approved Git commands or `mise run tests`.
 
 Review request:
 {json.dumps(request, indent=2)}
@@ -218,47 +223,55 @@ def run_claude_code_reviewer(
     ).is_file():
         raise ClaudeCodeReviewerError(REVIEWER_SKILL_MISSING)
 
-    command = [
-        executable,
-        '--print',
-        '--no-session-persistence',
-        '--setting-sources',
-        '',
-        '--settings',
-        _reviewer_settings(worktree),
-        '--strict-mcp-config',
-        '--mcp-config',
-        '{"mcpServers":{}}',
-        '--output-format',
-        'json',
-        '--json-schema',
-        json.dumps(REVIEW_RESULT_SCHEMA, separators=(',', ':')),
-        '--permission-mode',
-        'dontAsk',
-        '--tools',
-        'Read,Glob,Grep,Bash,Skill',
-        '--allowedTools',
-        'Read',
-        'Glob',
-        'Grep',
-        'Skill(agent-orchestra-reviewer)',
-        'Bash(git status --short)',
-        'Bash(git rev-parse HEAD)',
-        'Bash(git diff --no-ext-diff --binary HEAD)',
-        'Bash(git ls-files --others --exclude-standard)',
-    ]
-    if model:
-        command.extend(['--model', model])
-    try:
-        completed = run_streaming_process(
-            command,
-            cwd=worktree,
-            env=child_process_environment(CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'),
-            input=_prompt(request),
-            timeout=max(1, timeout_seconds - 5),
-        )
-    except subprocess.TimeoutExpired as error:
-        raise ClaudeCodeReviewerError(CLAUDE_CODE_TIMEOUT) from error
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix='.claude-review-', dir=response_path.parent
+    ) as temporary_directory:
+        temporary = Path(temporary_directory)
+        command = [
+            executable,
+            '--print',
+            '--no-session-persistence',
+            '--setting-sources',
+            '',
+            '--settings',
+            _reviewer_settings(worktree, temporary),
+            '--strict-mcp-config',
+            '--mcp-config',
+            '{"mcpServers":{}}',
+            '--output-format',
+            'json',
+            '--json-schema',
+            json.dumps(REVIEW_RESULT_SCHEMA, separators=(',', ':')),
+            '--permission-mode',
+            'dontAsk',
+            '--tools',
+            'Read,Glob,Grep,Bash,Skill',
+            '--allowedTools',
+            'Read',
+            'Glob',
+            'Grep',
+            'Skill(agent-orchestra-reviewer)',
+            'Bash(git status --short)',
+            'Bash(git rev-parse HEAD)',
+            'Bash(git diff --no-ext-diff --binary HEAD)',
+            'Bash(git ls-files --others --exclude-standard)',
+            'Bash(mise run tests)',
+        ]
+        if model:
+            command.extend(['--model', model])
+        try:
+            completed = run_streaming_process(
+                command,
+                cwd=worktree,
+                env=reviewer_process_environment(
+                    temporary, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'
+                ),
+                input=_prompt(request, temporary),
+                timeout=max(1, timeout_seconds - 5),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ClaudeCodeReviewerError(CLAUDE_CODE_TIMEOUT) from error
     output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()

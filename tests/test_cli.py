@@ -10,6 +10,8 @@ import sys
 from dataclasses import dataclass, fields
 from importlib.metadata import version
 from pathlib import Path
+from threading import Barrier, Lock, Thread
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -23,7 +25,11 @@ from agent_orchestra.cli import (
     build_parser,
     main,
 )
-from agent_orchestra.invocations import InvocationIdentity
+from agent_orchestra.invocations import (
+    InvocationIdentity,
+    InvocationRecord,
+    write_record,
+)
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.store import RunStore
 from agent_orchestra.worker import (
@@ -268,6 +274,20 @@ def write_loop_reviewer(path: Path) -> None:
     ).replace(
         '[] if "approved" == "approved" else [{',
         '[] if request["iteration"] > 1 else [{',
+    )
+    path.write_text(content)
+
+
+def add_execution_counter(path: Path, counter: Path) -> None:
+    """Make a generated test agent count each process activation."""
+
+    content = path.read_text()
+    content = content.replace(
+        'request_path = Path(sys.argv[1])',
+        f"""counter_path = Path({str(counter)!r})
+counter_path.write_text(counter_path.read_text() + "1\\n" if counter_path.exists() else "1\\n")
+request_path = Path(sys.argv[1])""",
+        1,
     )
     path.write_text(content)
 
@@ -643,7 +663,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 6,
+        'schema_version': 7,
         'directory': str(projects),
         'runs': [
             {'id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -849,7 +869,7 @@ def test_status_lists_persisted_run(
     assert result == 0
     output = capsys.readouterr().out
     assert output.startswith(
-        '{\n  "schema_version": 6,\n'
+        '{\n  "schema_version": 7,\n'
         f'  "runs_directory": "{DEFAULT_RUNS_DIRECTORY.expanduser().resolve()}",\n'
         '  "runs": [\n    {\n'
     )
@@ -861,7 +881,7 @@ def test_status_lists_persisted_run(
     }
     assert set(document['runs'][0]) == expected_fields
     assert document == {
-        'schema_version': 6,
+        'schema_version': 7,
         'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [
             {
@@ -900,7 +920,7 @@ def test_status_filters_json_document_by_run_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 6
+    assert document['schema_version'] == 7
     assert [run['id'] for run in document['runs']] == [str(first.id)]
 
 
@@ -923,7 +943,7 @@ def test_status_reads_legacy_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 6
+    assert document['schema_version'] == 7
     assert document['runs'][0]['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -944,7 +964,7 @@ def test_status_lists_empty_runs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 6,
+        'schema_version': 7,
         'runs_directory': str(DEFAULT_RUNS_DIRECTORY.expanduser().resolve()),
         'runs': [],
     }
@@ -1054,7 +1074,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     assert invocation['exit_code'] == 0
     assert invocation['timed_out'] is False
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 6,
+        'schema_version': 7,
         'run_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1087,7 +1107,15 @@ def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
     invocation = json.loads(
         (run_directory / 'invocations/000001-reviewer.json').read_text()
     )
-    assert invocation['schema_version'] == 3
+    assert invocation['schema_version'] == 4
+    assert invocation['task_id'] == f'{context.run.id}:000001-reviewer'
+    assert invocation['invocation_id'] == (
+        f'{context.run.id}:000001-reviewer:attempt-0001'
+    )
+    assert invocation['status'] == 'completed'
+    assert invocation['conclusion'] == 'succeeded'
+    assert invocation['response_received_at'] is not None
+    assert invocation['validation_started_at'] is not None
     assert invocation['requested_model'] == 'requested-model'
     assert invocation['effective_models'] == ['claude-primary', 'claude-fallback']
     assert invocation['effective_model_status'] == 'reported'
@@ -1124,9 +1152,10 @@ def test_run_preserves_non_utf8_reviewer_output(
 def test_worker_persists_interrupted_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     interrupted_role: str,
 ) -> None:
-    """Keep durable run state aligned with interrupted invocation evidence."""
+    """Keep pre-activation interruption uncertain and non-retryable."""
 
     context = create_worker_run(tmp_path)
     reviewer = tmp_path / 'reviewer.py'
@@ -1159,8 +1188,71 @@ def test_worker_persists_interrupted_state(
     invocation_files = sorted(
         (context.runs_directory / str(context.run.id) / 'invocations').glob('*.json')
     )
+    invocation_names = [path.name for path in invocation_files]
     invocation = json.loads(invocation_files[-1].read_text())
     assert invocation['role'] == interrupted_role
+    assert invocation['status'] == 'pending'
+    assert invocation['conclusion'] is None
+    assert invocation['interrupted'] is False
+
+    assert main(resume_arguments(context)) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert error['error']['code'] == 'resume_activation_uncertain'
+    assert (
+        sorted(
+            path.name
+            for path in (
+                context.runs_directory / str(context.run.id) / 'invocations'
+            ).glob('*.json')
+        )
+        == invocation_names
+    )
+
+
+@pytest.mark.parametrize('interrupted_role', ['reviewer', 'developer'])
+def test_worker_finalizes_interruption_after_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupted_role: str,
+) -> None:
+    """Complete interrupted evidence once process activation is durable."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    write_loop_reviewer(reviewer)
+    original_execute = CommandAgentAdapter.execute
+
+    def interrupt_selected(
+        adapter: CommandAgentAdapter, request: AgentRequest
+    ) -> AgentResult:
+        """Persist activation before interrupting the selected role."""
+
+        if request.role == interrupted_role:
+            assert request.on_started is not None
+            request.on_started()
+            raise KeyboardInterrupt
+        return original_execute(adapter, request)
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', interrupt_selected)
+    with pytest.raises(KeyboardInterrupt):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=('unused-developer',),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            digest_worktree=_working_tree_digest,
+        )
+
+    invocation_files = sorted(
+        (context.runs_directory / str(context.run.id) / 'invocations').glob('*.json')
+    )
+    invocation = json.loads(invocation_files[-1].read_text())
+    assert invocation['role'] == interrupted_role
+    assert invocation['status'] == 'completed'
+    assert invocation['conclusion'] == 'interrupted'
     assert invocation['interrupted'] is True
 
 
@@ -1340,7 +1432,7 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 6,
+        'schema_version': 7,
         'run_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1842,6 +1934,289 @@ def test_resume_interrupted_reviewer_reuses_request(
     )
 
 
+def test_resume_revalidates_reviewer_response_without_relaunching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enqueued_run: CliRunContext,
+) -> None:
+    """Recover a response persisted before its validation milestone."""
+
+    reviewer = tmp_path / 'reviewer.py'
+    counter = tmp_path / 'reviewer-count.txt'
+    write_reviewer(reviewer, 'approved')
+    add_execution_counter(reviewer, counter)
+    original_write_record = write_record
+
+    def fail_validation_record(path: Path, record: InvocationRecord) -> None:
+        """Simulate a crash before the reviewer validation milestone is durable."""
+
+        if (
+            record.role == 'reviewer'
+            and record.status == 'running'
+            and record.validation_started_at is not None
+        ):
+            message = 'simulated validation milestone failure'
+            raise OSError(message)
+        original_write_record(path, record)
+
+    monkeypatch.setattr(worker, 'write_record', fail_validation_record)
+    with pytest.raises(OSError, match='simulated validation milestone failure'):
+        run_queued_review(
+            store=enqueued_run.store,
+            run=enqueued_run.run,
+            objective='Review.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(),
+            runs_directory=enqueued_run.runs_directory,
+            timeout_seconds=30,
+            digest_worktree=_working_tree_digest,
+        )
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
+
+    monkeypatch.setattr(worker, 'write_record', original_write_record)
+    assert main(resume_arguments(enqueued_run)) == 0
+
+    assert counter.read_text().splitlines() == ['1']
+    record = json.loads(
+        (
+            enqueued_run.runs_directory
+            / enqueued_run.run.id
+            / 'invocations/000001-reviewer.json'
+        ).read_text()
+    )
+    assert record['status'] == 'completed'
+    assert record['conclusion'] == 'succeeded'
+    assert record['response_received_at'] is not None
+    assert record['validation_started_at'] is not None
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+
+
+def test_resume_applies_completed_reviewer_conclusion_without_relaunching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enqueued_run: CliRunContext,
+) -> None:
+    """Recover when a completed review predates its workflow transition."""
+
+    reviewer = tmp_path / 'reviewer.py'
+    counter = tmp_path / 'reviewer-count.txt'
+    write_reviewer(reviewer, 'approved')
+    add_execution_counter(reviewer, counter)
+    original_update = enqueued_run.store.update
+
+    def fail_decision(run: Run, *, expected_state: RunState) -> None:
+        """Simulate a crash after completion but before the review decision."""
+
+        if run.state is RunState.APPROVED and expected_state is RunState.REVIEWING:
+            message = 'simulated workflow transition failure'
+            raise OSError(message)
+        original_update(run, expected_state=expected_state)
+
+    monkeypatch.setattr(enqueued_run.store, 'update', fail_decision)
+    with pytest.raises(OSError, match='simulated workflow transition failure'):
+        run_queued_review(
+            store=enqueued_run.store,
+            run=enqueued_run.run,
+            objective='Review.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(),
+            runs_directory=enqueued_run.runs_directory,
+            timeout_seconds=30,
+            digest_worktree=_working_tree_digest,
+        )
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
+
+    monkeypatch.setattr(enqueued_run.store, 'update', original_update)
+    assert main(resume_arguments(enqueued_run)) == 0
+
+    assert counter.read_text().splitlines() == ['1']
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+
+
+def test_resume_advances_persisted_approval_without_relaunching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enqueued_run: CliRunContext,
+) -> None:
+    """Recover after approval persists but its authorization wait does not."""
+
+    reviewer = tmp_path / 'reviewer.py'
+    counter = tmp_path / 'reviewer-count.txt'
+    write_reviewer(reviewer, 'approved')
+    add_execution_counter(reviewer, counter)
+    original_update = enqueued_run.store.update
+
+    def fail_authorization_wait(run: Run, *, expected_state: RunState) -> None:
+        """Simulate a crash immediately after durable approval."""
+
+        if (
+            run.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+            and expected_state is RunState.APPROVED
+        ):
+            message = 'simulated authorization transition failure'
+            raise OSError(message)
+        original_update(run, expected_state=expected_state)
+
+    monkeypatch.setattr(enqueued_run.store, 'update', fail_authorization_wait)
+    with pytest.raises(OSError, match='simulated authorization transition failure'):
+        run_queued_review(
+            store=enqueued_run.store,
+            run=enqueued_run.run,
+            objective='Review.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(),
+            runs_directory=enqueued_run.runs_directory,
+            timeout_seconds=30,
+            digest_worktree=_working_tree_digest,
+        )
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.APPROVED
+
+    monkeypatch.setattr(enqueued_run.store, 'update', original_update)
+    assert main(resume_arguments(enqueued_run)) == 0
+
+    assert counter.read_text().splitlines() == ['1']
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+
+
+def test_resume_starts_persisted_remediation_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recover after a remediation request persists before its active state."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    developer_counter = tmp_path / 'developer-count.txt'
+    write_loop_reviewer(reviewer)
+    write_developer(developer)
+    add_execution_counter(developer, developer_counter)
+    original_update = context.store.update
+
+    def fail_developing(run: Run, *, expected_state: RunState) -> None:
+        """Simulate a crash after the request but before active development."""
+
+        if (
+            run.state is RunState.DEVELOPING
+            and expected_state is RunState.CHANGES_REQUESTED
+        ):
+            message = 'simulated development transition failure'
+            raise OSError(message)
+        original_update(run, expected_state=expected_state)
+
+    monkeypatch.setattr(context.store, 'update', fail_developing)
+    with pytest.raises(OSError, match='simulated development transition failure'):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            digest_worktree=_working_tree_digest,
+        )
+    assert context.store.get(context.run.id).state is RunState.CHANGES_REQUESTED
+    assert (
+        context.runs_directory
+        / context.run.id
+        / 'messages/000003-remediation-request.json'
+    ).is_file()
+
+    monkeypatch.setattr(context.store, 'update', original_update)
+    assert main(resume_arguments(context)) == 0
+
+    assert developer_counter.read_text().splitlines() == ['1']
+    assert (
+        context.store.get(context.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+
+
+def test_resume_recovered_review_survives_pre_attempt_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume again when recovered review acceptance predates attempt evidence."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    developer_counter = tmp_path / 'developer-count.txt'
+    write_loop_reviewer(reviewer)
+    write_developer(developer)
+    add_execution_counter(developer, developer_counter)
+    original_update = context.store.update
+
+    def fail_review_decision(run: Run, *, expected_state: RunState) -> None:
+        """Simulate a crash before the accepted review decision persists."""
+
+        if (
+            run.state is RunState.CHANGES_REQUESTED
+            and expected_state is RunState.REVIEWING
+        ):
+            message = 'simulated review decision failure'
+            raise OSError(message)
+        original_update(run, expected_state=expected_state)
+
+    monkeypatch.setattr(context.store, 'update', fail_review_decision)
+    with pytest.raises(OSError, match='simulated review decision failure'):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            digest_worktree=_working_tree_digest,
+        )
+    assert context.store.get(context.run.id).state is RunState.REVIEWING
+
+    monkeypatch.setattr(context.store, 'update', original_update)
+    original_record = worker._record_invocation
+
+    def fail_developer_record(**kwargs: Any) -> str:
+        """Simulate a crash after activating development but before evidence."""
+
+        if kwargs['role'] == 'developer':
+            message = 'simulated developer record failure'
+            raise OSError(message)
+        return original_record(**kwargs)
+
+    monkeypatch.setattr(worker, '_record_invocation', fail_developer_record)
+    with pytest.raises(OSError, match='simulated developer record failure'):
+        resume_review(
+            store=context.store,
+            run=context.store.get(context.run.id),
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        )
+    assert context.store.get(context.run.id).state is RunState.DEVELOPING
+
+    monkeypatch.setattr(worker, '_record_invocation', original_record)
+    assert main(resume_arguments(context)) == 0
+
+    assert developer_counter.read_text().splitlines() == ['1']
+    assert (
+        context.store.get(context.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+
+
 def test_resume_reports_explicit_execution_failure_code(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1929,6 +2304,7 @@ def test_resume_interrupted_developer_reuses_remediation_request(
         context.runs_directory / context.run.id / 'invocations/000003-developer.json'
     )
     invocation = invocation_path.read_text()
+    first_attempt = json.loads(invocation)
     invocation_path.write_text('{')
     assert main(resume_arguments(context)) == 2
     invalid_invocation = json.loads(capsys.readouterr().out)
@@ -1955,6 +2331,76 @@ def test_resume_interrupted_developer_reuses_remediation_request(
     retry = json.loads((invocations / '000003-developer-attempt-0002.json').read_text())
     assert retry['attempt'] == 2
     assert retry['timed_out'] is False
+    assert retry['task_id'] == first_attempt['task_id']
+    assert first_attempt['invocation_id'] == (
+        f'{context.run.id}:000003-developer:attempt-0001'
+    )
+    assert retry['invocation_id'] == (f'{context.run.id}:000003-developer:attempt-0002')
+    assert first_attempt['conclusion'] == 'timed_out'
+    assert retry['conclusion'] == 'succeeded'
+
+
+def test_resume_revalidates_developer_response_without_relaunching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recover a developer response after edits but before validation is durable."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    counter = tmp_path / 'developer-count.txt'
+    write_loop_reviewer(reviewer)
+    write_developer(developer)
+    add_execution_counter(developer, counter)
+    original_write_record = write_record
+
+    def fail_validation_record(path: Path, record: InvocationRecord) -> None:
+        """Simulate a crash before the developer validation milestone is durable."""
+
+        if (
+            record.role == 'developer'
+            and record.status == 'running'
+            and record.validation_started_at is not None
+        ):
+            message = 'simulated developer validation milestone failure'
+            raise OSError(message)
+        original_write_record(path, record)
+
+    monkeypatch.setattr(worker, 'write_record', fail_validation_record)
+    with pytest.raises(
+        OSError, match='simulated developer validation milestone failure'
+    ):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            max_iterations=3,
+            digest_worktree=_working_tree_digest,
+        )
+    assert context.store.get(context.run.id).state is RunState.DEVELOPING
+
+    monkeypatch.setattr(worker, 'write_record', original_write_record)
+    assert main(resume_arguments(context)) == 0
+
+    assert counter.read_text().splitlines() == ['1']
+    assert (
+        context.store.get(context.run.id).state
+        is RunState.AWAITING_COMMIT_AUTHORIZATION
+    )
+    record = json.loads(
+        (
+            context.runs_directory
+            / context.run.id
+            / 'invocations/000003-developer.json'
+        ).read_text()
+    )
+    assert record['status'] == 'completed'
+    assert record['conclusion'] == 'succeeded'
 
 
 def test_resume_writes_recovery_request_before_activating_developer(
@@ -2001,11 +2447,11 @@ def test_resume_writes_recovery_request_before_activating_developer(
     assert not (messages / '000005-remediation-request.json').exists()
 
 
-def test_resume_reuses_recovery_request_after_activation_failure(
+def test_resume_recovers_request_when_activation_state_did_not_persist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reuse a durable request when activation fails before process launch."""
+    """Launch after a recovery request persists but its active state does not."""
 
     context = create_worker_run(tmp_path)
     reviewer = tmp_path / 'reviewer.py'
@@ -2048,6 +2494,8 @@ def test_resume_reuses_recovery_request_after_activation_failure(
     messages = context.runs_directory / context.run.id / 'messages'
     assert (messages / '000005-remediation-request.json').is_file()
     assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
+    invocations = context.runs_directory / context.run.id / 'invocations'
+    assert not (invocations / '000005-developer.json').exists()
 
     monkeypatch.setattr(context.store, 'update', original_update)
     assert main(resume_arguments(context)) == 0
@@ -2055,6 +2503,123 @@ def test_resume_reuses_recovery_request_after_activation_failure(
         context.store.get(context.run.id).state
         is RunState.AWAITING_COMMIT_AUTHORIZATION
     )
+    assert (invocations / '000005-developer.json').is_file()
+
+
+@pytest.mark.parametrize('role', ['reviewer', 'developer'])
+def test_concurrent_active_resumes_launch_one_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+) -> None:
+    """Let only the atomic first-attempt creator activate the selected role."""
+
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    developer = tmp_path / 'developer.py'
+    if role == 'reviewer':
+        write_reviewer(reviewer, 'approved')
+    else:
+        write_loop_reviewer(reviewer)
+    write_developer(developer)
+    original_record = worker._record_invocation
+
+    def crash_before_attempt(**kwargs: Any) -> str:
+        """Leave the selected role active with a request but no attempt record."""
+
+        if kwargs['role'] == role:
+            message = 'simulated crash before attempt persistence'
+            raise OSError(message)
+        return original_record(**kwargs)
+
+    monkeypatch.setattr(worker, '_record_invocation', crash_before_attempt)
+    with pytest.raises(OSError, match='simulated crash before attempt persistence'):
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            max_iterations=3,
+            digest_worktree=_working_tree_digest,
+        )
+    monkeypatch.setattr(worker, '_record_invocation', original_record)
+    active = context.store.get(context.run.id)
+    expected_state = RunState.REVIEWING if role == 'reviewer' else RunState.DEVELOPING
+    assert active.state is expected_state
+
+    sequence = 1 if role == 'reviewer' else 3
+    target = (
+        context.runs_directory
+        / context.run.id
+        / 'invocations'
+        / f'{sequence:06d}-{role}.json'
+    )
+    path_type = type(target)
+    real_exists = path_type.exists
+    barrier = Barrier(2)
+    lock = Lock()
+    initial_checks = 0
+
+    def synchronized_exists(candidate: Path) -> bool:
+        """Give both resumers the same pre-creation view of the attempt path."""
+
+        nonlocal initial_checks
+        should_wait = False
+        if candidate == target:
+            with lock:
+                if initial_checks < 2:
+                    initial_checks += 1
+                    should_wait = True
+        if should_wait:
+            barrier.wait(timeout=5)
+            return False
+        return real_exists(candidate)
+
+    monkeypatch.setattr(path_type, 'exists', synchronized_exists)
+    original_execute = CommandAgentAdapter.execute
+    activations: list[str] = []
+
+    def count_execute(
+        adapter: CommandAgentAdapter, request: AgentRequest
+    ) -> AgentResult:
+        """Count process activations for the selected role."""
+
+        if request.role == role:
+            activations.append(role)
+        return original_execute(adapter, request)
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', count_execute)
+    outcomes: list[str] = []
+
+    def resume_once() -> None:
+        """Resume through an independent store handle like a separate CLI process."""
+
+        try:
+            resume_review(
+                store=RunStore(context.database),
+                run=active,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            )
+        except WorkerError as error:
+            outcomes.append(error.code or type(error).__name__)
+        except BaseException as error:  # pragma: no cover - assertion reports type
+            outcomes.append(type(error).__name__)
+        else:
+            outcomes.append('success')
+
+    threads = (Thread(target=resume_once), Thread(target=resume_once))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(outcomes) == ['resume_activation_uncertain', 'success']
+    assert activations == [role]
 
 
 @pytest.mark.parametrize(

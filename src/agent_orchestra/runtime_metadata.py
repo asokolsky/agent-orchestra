@@ -23,6 +23,27 @@ def child_process_environment(**overrides: str) -> dict[str, str]:
     return environment
 
 
+def reviewer_process_environment(
+    temporary_directory: Path, **overrides: str
+) -> dict[str, str]:
+    """Confine reviewer validation caches and temporary files outside its worktree."""
+
+    temporary = temporary_directory.resolve()
+    values = {
+        'TMPDIR': str(temporary),
+        'PYTHONDONTWRITEBYTECODE': '1',
+        'PYTEST_ADDOPTS': '-p no:cacheprovider',
+        'MISE_CACHE_DIR': str(temporary / 'mise-cache'),
+        'MISE_STATE_DIR': str(temporary / 'mise-state'),
+        'MYPY_CACHE_DIR': str(temporary / 'mypy-cache'),
+        'RUFF_CACHE_DIR': str(temporary / 'ruff-cache'),
+        'UV_CACHE_DIR': str(temporary / 'uv-cache'),
+        'XDG_CACHE_HOME': str(temporary / 'cache'),
+    }
+    values.update(overrides)
+    return child_process_environment(**values)
+
+
 def write_runtime_metadata(models: tuple[str, ...]) -> None:
     """Write effective model identities to the orchestrator-provided path."""
 

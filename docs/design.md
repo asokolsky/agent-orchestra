@@ -142,7 +142,7 @@ match its repo and worktree in the `runs` array:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "runs_directory": "/home/user/.local/state/agent-orchestra/runs",
   "runs": [
     {
@@ -549,18 +549,29 @@ human decision rather than a failed or endlessly retried run.
 
 Every attempted external process writes one versioned JSON record under the
 run's `invocations/` directory. The record is runtime-neutral and contains the
-run and invocation IDs, role, selected agent vendor, requested model override,
+run, task, and invocation IDs; role; selected agent vendor; requested model override;
 effective model identities and reporting status, adapter runtime, iteration,
 start and finish timestamps, exit code, timeout and interruption flags, attempt
-number, and paths to separate stdout and stderr files under `logs/`.
+number, explicit attempt `status` and `conclusion`, response and validation
+milestones, and paths to separate stdout and stderr files under `logs/`.
+Schema version 4 adds a stable task ID shared by retry attempts and separates
+attempt progress (`pending`, `running`, `completed`) from its terminal conclusion.
+Task IDs use the `<run_id>:<sequence>-<role>` form, such as
+`20260907T090000Z-a7f3c921:000003-developer`; invocation IDs append the attempt
+ordinal, such as `20260907T090000Z-a7f3c921:000003-developer:attempt-0002`.
+These typed layers deliberately reuse familiar values such as `failed`,
+`cancelled`, and `interrupted`: an attempt conclusion describes process execution,
+developer status and reviewer verdict describe protocol messages, and `RunState`
+alone controls workflow progression.
 Schema version 3 separates `requested_model` from the ordered
 `effective_models` collection. `effective_model_status` is `reported` only when
 stable machine-readable runtime metadata supplied at least one identity;
 otherwise it is `unavailable`. The orchestrator never guesses from a runtime
-default or parses human-formatted output. Invocation-record schemas 1 and 2
-remain readable as requested-model evidence with unavailable effective
-identity. Records and streams are finalized atomically. Invocation records
-exclude command arguments and environment snapshots.
+default or parses human-formatted output. Invocation-record schemas 1-3 are no
+longer readable because their lifecycle cannot be established without guessing;
+historical runs that need structured invocation evidence must be recreated.
+Records and streams are written atomically. Invocation records exclude command
+arguments and environment snapshots.
 
 New runs also persist `execution.json` schema version 2 before their first
 agent invocation. It contains the run ID, objective, exact reviewer and
@@ -568,13 +579,35 @@ developer commands, declared agent identities, role-specific timeouts,
 iteration limit, and creation timestamp. These are the durable inputs used by
 `resume`; older execution schemas remain historical evidence but are not
 sufficient to restart an agent safely. A retry keeps the original request
-message and writes a new invocation record and streams with an incremented
-`attempt` value. Recovery validates existing invocation evidence before leaving
-a recoverable state, then persists the next request and pending invocation
-record before activating the role and launching its process. A durable recovery
-request whose activation failed is reused by the next resume attempt. Because
-the configured command is persisted for recovery, callers must not place secrets
-in command-line arguments. Environment snapshots remain excluded.
+message and writes a new invocation record with the same `task_id`, a new
+`invocation_id`, and an incremented `attempt`. A task has no separately persisted
+state: no or pending latest attempt derives `pending`, a running latest attempt
+derives `running`, and a completed latest attempt derives `completed` until a
+new retry attempt is durably created. Recovery validates existing invocation
+evidence before leaving a recoverable state, then persists the next request and
+pending invocation record before activating the role and launching its process.
+A durable recovery request with a persisted `pending` attempt is not relaunched
+because activation cannot be established safely. Because the configured command
+is persisted for recovery, callers must not place secrets in command-line
+arguments. Environment snapshots remain excluded.
+
+Recovery follows durable evidence rather than assuming that a missing update
+means a process never started:
+
+| Boundary | Authoritative evidence | Recovery action | Duplicate-activation rule |
+|---|---|---|---|
+| Request persisted; no attempt | Canonical request and no task attempt | Create and launch attempt 1. | Write `pending` first. |
+| `pending`; activation did not start | `pending`; no durable activation fact | Fail as activation-uncertain. | Do not launch. |
+| Activation started; `running` missing | Indistinguishable durable `pending` evidence | Fail as activation-uncertain. | Do not launch. |
+| `running`; no response | Running attempt without response evidence | Fail as activation-uncertain. | Do not launch. |
+| Response exists; timestamp missing | Response artifact plus running attempt | Persist the response timestamp, then validate. | Never relaunch. |
+| Response timestamp; validation missing | Running attempt with response timestamp | Start validation. | Never relaunch. |
+| Validation started; completion missing | Running attempt with both milestones | Repeat idempotent validation and complete. | Never relaunch. |
+| Completion; run transition missing | Immutable completed attempt | Apply its conclusion to the workflow. | Never relaunch. |
+
+Only a completed prior attempt permits creation of a numbered retry. A pending
+or running latest attempt fails with a stable diagnostic because its activation
+may still be live.
 
 Built-in adapters tee their underlying Codex or Claude process streams through
 the wrapper's stdout and stderr while retaining the text needed for structured
@@ -669,8 +702,15 @@ queued
 Active states may also become `failed`, `interrupted`, `cancelled`, or
 `superseded` where allowed by the workflow contract.
 
-`resume` is accepted only from `interrupted` and `validation_required`. An
-interrupted reviewer or developer repeats the unanswered durable request. A
+`resume` is accepted from `interrupted`, `validation_required`, and conditionally
+from `reviewing`, `developing`, `approved`, and `changes_requested`. Active runs
+recover only when durable task-attempt evidence makes the next action
+unambiguous; uncertain activation fails closed. Intermediate approval advances
+only when its accepted result and exact diff still match. Changes-requested
+recovery requires an accepted result, configured developer, remaining iteration,
+and a durable or safely reconstructible remediation request. An interrupted
+reviewer or developer repeats the unanswered durable request only after the
+prior attempt has a terminal conclusion. A
 validation-required run creates the next correlated remediation request and
 retries the developer. Canonical messages and the run ID are retained; only
 invocation-attempt evidence is appended. Timeout and user interruption enter

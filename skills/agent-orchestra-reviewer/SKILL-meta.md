@@ -10,7 +10,7 @@ tags:
 authors:
   - "asokolsky@gmail.com"
 created-at: "2026-09-02T14:31:12+0200"
-updated-at: "2026-09-03T15:07:00+0200"
+updated-at: "2026-09-07T10:53:05+0200"
 ---
 
 # Agent Orchestra Reviewer Meta
@@ -29,6 +29,8 @@ Meta documentation for the
   workflow.
 - Review remains read-only and subject to the instructions of the repo being
   reviewed and the agent runtime executing the skill.
+- Reviewer adapters may provide an isolated temporary directory for validation
+  output and tool caches while keeping the reviewed worktree read-only.
 
 ## Dependencies
 

@@ -36,7 +36,7 @@ Example command output for an initialized database with no runs:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": []
 }
@@ -171,7 +171,9 @@ not JSON. The command exits 2 when the path is not a usable Git worktree, the
 revision cannot be resolved, files cannot be read, or there are no local
 changes. Those expected failures write `error: MESSAGE` to stderr and nothing
 to stdout. The command does not start an agent or modify the target worktree.
-Use [`resume`](#resume) for `interrupted` or `validation_required` runs. The
+Use [`resume`](#resume) for `interrupted`, `validation_required`, or
+conditionally recoverable `reviewing`, `developing`, `approved`, and
+`changes_requested` runs. The
 `--supersedes` escape hatch accepts only terminal `failed` or `superseded`
 runs, and only when both records identify the same repo and worktree.
 
@@ -209,7 +211,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "directory": "/Users/example/PersonalProjects",
   "runs": [
     {
@@ -233,7 +235,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `7`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `runs` | Array | Successfully enqueued changed repos. |
 | `runs[].id` | String | New opaque [run ID](design.md#run-id-format). |
@@ -287,7 +289,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "runs_directory": "/Users/example/.local/state/agent-orchestra/runs",
   "runs": [
     {
@@ -311,7 +313,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `7`. |
 | `runs_directory` | String | Resolved absolute default evidence root used by `run` and `logs` when `--runs-directory` is omitted. |
 | `runs` | Array | Zero or more complete run objects. |
 | `runs[].id` | String | Permanent opaque [run ID](design.md#run-id-format). |
@@ -404,11 +406,12 @@ Example output:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "20260903T194500Z-a7f3c921",
   "streams": [
     {
-      "invocation_id": "550e8400-e29b-41d4-a716-446655440000",
+      "invocation_id": "20260903T194500Z-a7f3c921:000001-reviewer:attempt-0001",
+      "task_id": "20260903T194500Z-a7f3c921:000001-reviewer",
       "role": "reviewer",
       "agent_vendor": "openai",
       "requested_model": "gpt-5.3-codex",
@@ -422,13 +425,18 @@ Example output:
       "exit_code": 0,
       "timed_out": false,
       "interrupted": false,
+      "status": "completed",
+      "conclusion": "succeeded",
+      "response_received_at": "2026-09-03T19:46:13Z",
+      "validation_started_at": "2026-09-03T19:46:14Z",
       "stream": "stdout",
-      "path": "/home/user/.local/state/agent-orchestra/runs/20260903T194500Z-a7f3c921/logs/550e8400-e29b-41d4-a716-446655440000.stdout.log",
+      "path": "/home/user/.local/state/agent-orchestra/runs/20260903T194500Z-a7f3c921/logs/000001-reviewer.stdout.log",
       "content": "Review completed and the structured result was written successfully.\n",
       "legacy": false
     },
     {
-      "invocation_id": "550e8400-e29b-41d4-a716-446655440000",
+      "invocation_id": "20260903T194500Z-a7f3c921:000001-reviewer:attempt-0001",
+      "task_id": "20260903T194500Z-a7f3c921:000001-reviewer",
       "role": "reviewer",
       "agent_vendor": "openai",
       "requested_model": "gpt-5.3-codex",
@@ -442,8 +450,12 @@ Example output:
       "exit_code": 0,
       "timed_out": false,
       "interrupted": false,
+      "status": "completed",
+      "conclusion": "succeeded",
+      "response_received_at": "2026-09-03T19:46:13Z",
+      "validation_started_at": "2026-09-03T19:46:14Z",
       "stream": "stderr",
-      "path": "/home/user/.local/state/agent-orchestra/runs/20260903T194500Z-a7f3c921/logs/550e8400-e29b-41d4-a716-446655440000.stderr.log",
+      "path": "/home/user/.local/state/agent-orchestra/runs/20260903T194500Z-a7f3c921/logs/000001-reviewer.stderr.log",
       "content": "",
       "legacy": false
     }
@@ -455,10 +467,11 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `7`. |
 | `run_id` | String | Requested opaque [run ID](design.md#run-id-format). |
 | `streams` | Array | Selected, available stream entries. |
-| `streams[].invocation_id` | String | Invocation record ID, or a stable filename-derived ID for legacy evidence. |
+| `streams[].invocation_id` | String | Attempt ID in `<task_id>:attempt-<ordinal>` form, or a stable filename-derived ID for legacy evidence. |
+| `streams[].task_id` | String or null | Stable `<run_id>:<sequence>-<role>` durable-request identity shared by retries; `null` only for filename-only legacy logs. |
 | `streams[].role` | String | `developer` or `reviewer`. |
 | `streams[].agent_vendor` | String or null | Selected agent provider; unavailable for legacy evidence. |
 | `streams[].requested_model` | String or null | Explicit CLI model override; `null` means no override was requested. |
@@ -472,6 +485,10 @@ Example output:
 | `streams[].exit_code` | Integer or null | Process exit code, when available. |
 | `streams[].timed_out` | Boolean or null | Whether the invocation exceeded its timeout; unavailable for legacy evidence. |
 | `streams[].interrupted` | Boolean or null | Whether the invocation was interrupted; unavailable for legacy evidence. |
+| `streams[].status` | String | Attempt progress: `pending`, `running`, `completed`, or `unavailable` for filename-only legacy logs. |
+| `streams[].conclusion` | String or null | Terminal attempt outcome, `null` before completion, or `unavailable` for filename-only legacy logs. |
+| `streams[].response_received_at` | String or null | UTC time when a response artifact was observed. |
+| `streams[].validation_started_at` | String or null | UTC time immediately before response validation began. |
 | `streams[].stream` | String | `stdout` or `stderr`. |
 | `streams[].path` | String | Resolved absolute path of the evidence file. |
 | `streams[].content` | String | Complete UTF-8 text with undecodable bytes replaced. |
@@ -493,9 +510,9 @@ matching stderr entries.
 the process outcome is unavailable. Legacy filename-only entries set `legacy`
 to `true`, use `unavailable` model status with an empty effective-model list,
 and set unavailable agent, runtime, iteration, timing, and outcome fields to
-`null`. Invocation-record schemas 1 and 2 remain readable: their former
-`agent_model` value is rendered as `requested_model`, while effective identity
-is explicitly unavailable.
+`null`. Invocation-record schemas 1-3 are rejected because their lifecycle
+cannot be established without guessing. Filename-only logs remain readable when
+no invocation records exist.
 
 The command is read-only and never uploads logs. It rejects evidence traversal,
 symlink escape, malformed invocation records, mismatched run IDs, and paths
@@ -561,7 +578,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -570,7 +587,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `6`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `7`. |
 | `run_id` | String | Permanent opaque [run ID](design.md#run-id-format). |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -613,7 +630,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -637,12 +654,21 @@ agent-orchestra [--database DATABASE] resume RUN_ID
 
 | Option | Default | Meaning |
 |---|---|---|
-| `RUN_ID` | Required | Existing run in `interrupted` or `validation_required`. |
+| `RUN_ID` | Required | Existing run in `interrupted`, `validation_required`, or a conditionally recoverable active or intermediate state. |
 | `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | Evidence root originally selected for `run`. |
 
 `resume` validates execution metadata, the complete canonical message chain,
-the worktree scope, and the interrupted transition before invoking an agent.
-It reuses an unanswered review or remediation request after an interruption.
+the worktree scope, and durable task-attempt evidence before invoking an agent.
+Runs left in `reviewing` or `developing` by a crash are conditionally
+recoverable: a response is revalidated without relaunching, a completed attempt
+has its conclusion applied, and a pending or running attempt with uncertain
+activation fails closed. An intermediate `approved` run advances to commit
+authorization when its durable result and diff still match. A
+`changes_requested` run resumes only when its accepted result, configured
+developer, iteration limit, and durable remediation evidence make the next step
+unambiguous.
+It reuses an unanswered review or remediation request after an interruption
+only when the prior attempt has a terminal conclusion.
 After a valid developer handoff reports `blocked` or `failed`, it creates the
 next remediation request and retries the developer. The run ID, message
 history, review iteration, and objective remain unchanged. Each retried
@@ -662,7 +688,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -673,7 +699,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "run_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {
@@ -685,8 +711,9 @@ An expected failure also remains JSON on stdout and exits 2:
 
 Stable error codes are `state_database_not_found`, `run_not_found`,
 `run_not_resumable`, `concurrent_update`, `resume_metadata_unsupported`,
-`resume_scope_changed`, `resume_interrupted`, `resume_execution_failed`, and
-`resume_evidence_invalid`. Legacy runs whose
+`resume_scope_changed`, `resume_interrupted`, `resume_execution_failed`,
+`resume_activation_uncertain`, `resume_cancelled`, and `resume_evidence_invalid`.
+Legacy runs whose
 `execution.json` lacks the version 2 resume context fail closed with
 `resume_metadata_unsupported`; start an explicitly linked replacement with
 [`enqueue-local --supersedes`](#enqueue-local) only after the old run is
