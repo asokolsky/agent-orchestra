@@ -316,9 +316,7 @@ def test_initialize_resumes_an_interrupted_transition_migration(
     store.add(run)
     with sqlite3.connect(database) as connection:
         connection.execute('ALTER TABLE transitions RENAME TO run_transitions')
-        connection.execute(
-            'ALTER TABLE run_transitions RENAME COLUMN job_id TO run_id'
-        )
+        connection.execute('ALTER TABLE run_transitions RENAME COLUMN job_id TO run_id')
         connection.execute(
             """CREATE TABLE transitions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
