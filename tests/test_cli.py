@@ -18,6 +18,7 @@ import pytest
 
 from agent_orchestra import cli, worker
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
+from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import (
     DEFAULT_DATABASE,
     DEFAULT_RUNS_DIRECTORY,
@@ -1445,6 +1446,15 @@ def test_worker_remediates_and_reviews_new_digest(
     )
     indexed_types = {
         entry['path']: entry['evidence_type'] for entry in integrity['entries']
+    }
+    assert {
+        path: _canonical_evidence_type(path)
+        for path in indexed_types
+        if path.startswith('messages/')
+    } == {
+        path: evidence_type
+        for path, evidence_type in indexed_types.items()
+        if path.startswith('messages/')
     }
     assert indexed_types['messages/000004-developer-handoff.json'] == (
         'developer_handoff'

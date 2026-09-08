@@ -12,6 +12,7 @@ import pytest
 from agent_orchestra import issue_review
 from agent_orchestra.adapter.base import IssueReviewExecution
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import main
 from agent_orchestra.invocations import read_records
 from agent_orchestra.issue_review import (
@@ -137,6 +138,17 @@ def test_run_issue_review_persists_result_and_feedback(
     integrity = json.loads((runs / job.id / '.integrity.json').read_text())
     indexed_types = {
         entry['path']: entry['evidence_type'] for entry in integrity['entries']
+    }
+    assert {
+        path: _canonical_evidence_type(path)
+        for path in indexed_types
+        if path == 'issue.json'
+        or path.endswith(('/issue.json', '/request.json', '/result.json'))
+    } == {
+        path: evidence_type
+        for path, evidence_type in indexed_types.items()
+        if path == 'issue.json'
+        or path.endswith(('/issue.json', '/request.json', '/result.json'))
     }
     assert indexed_types['iterations/000001/feedback.md'] == 'issue_feedback'
     assert indexed_types['iterations/000001/request.json'] == 'issue_review_request'
