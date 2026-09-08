@@ -1,0 +1,16 @@
+id = "github"
+kind = "provider"
+schema_version = 1
+min_engine_version = 1
+
+[[failure_rules]]
+code = "issue_not_found"
+patterns = ["\\b404\\b", "not found"]
+
+[[failure_rules]]
+code = "issue_inaccessible"
+patterns = ["\\b403\\b", "forbidden"]
+
+[[failure_rules]]
+code = "provider_authentication_required"
+patterns = ["\\b401\\b", "authentication required", "not authenticated", "not logged in", "gh auth login"]

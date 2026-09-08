@@ -1,0 +1,33 @@
+id = "evidence"
+kind = "evidence"
+schema_version = 1
+min_engine_version = 1
+
+[evidence.issue_snapshot]
+root_template = "issue.json"
+template = "iterations/{ordinal:06d}/issue.json"
+pattern = "(?:issue\\.json|iterations/\\d{6}/issue\\.json)"
+
+[evidence.issue_review_request]
+template = "iterations/{ordinal:06d}/request.json"
+pattern = "iterations/\\d{6}/request\\.json"
+
+[evidence.issue_review_result]
+template = "iterations/{ordinal:06d}/result.json"
+pattern = "iterations/\\d{6}/result\\.json"
+
+[evidence.review_request]
+template = "messages/{ordinal:06d}-review-request.json"
+pattern = "messages/\\d{6}-review-request\\.json"
+
+[evidence.review_result]
+template = "messages/{ordinal:06d}-review-result.json"
+pattern = "messages/\\d{6}-review-result\\.json"
+
+[evidence.remediation_request]
+template = "messages/{ordinal:06d}-remediation-request.json"
+pattern = "messages/\\d{6}-remediation-request\\.json"
+
+[evidence.developer_handoff]
+template = "messages/{ordinal:06d}-developer-handoff.json"
+pattern = "messages/\\d{6}-developer-handoff\\.json"

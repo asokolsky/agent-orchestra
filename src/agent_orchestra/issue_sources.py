@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
@@ -15,6 +14,7 @@ from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from agent_orchestra.evidence import finalize_evidence_write
+from agent_orchestra.manifests import ManifestError, classify_provider_failure
 
 PROVIDER_TIMEOUT_SECONDS = 60
 
@@ -190,7 +190,7 @@ def _source_digest(fields: dict[str, object]) -> str:
     return f'sha256:{hashlib.sha256(encoded).hexdigest()}'
 
 
-def _run(command: Sequence[str]) -> dict[str, Any]:
+def _run(command: Sequence[str], *, provider: str) -> dict[str, Any]:
     """Run one provider CLI lookup and parse its JSON object response."""
 
     try:
@@ -207,26 +207,10 @@ def _run(command: Sequence[str]) -> dict[str, Any]:
         _fail('provider_execution_failed', error, diagnostic=str(error))
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or 'issue lookup failed'
-        lowered = diagnostic.lower()
-        code = (
-            'issue_not_found'
-            if re.search(r'\b404\b', lowered) or 'not found' in lowered
-            else 'issue_inaccessible'
-            if re.search(r'\b403\b', lowered) or 'forbidden' in lowered
-            else 'provider_authentication_required'
-            if re.search(r'\b401\b', lowered)
-            or any(
-                phrase in lowered
-                for phrase in (
-                    'authentication required',
-                    'not authenticated',
-                    'not logged in',
-                    'gh auth login',
-                    'glab auth login',
-                )
-            )
-            else 'issue_lookup_failed'
-        )
+        try:
+            code = classify_provider_failure(provider, diagnostic)
+        except ManifestError as error:
+            _fail(error.code, error, diagnostic=error.manifest_id)
         _fail(code, diagnostic=diagnostic)
     try:
         result = json.loads(completed.stdout)
@@ -418,7 +402,8 @@ class GitHubIssueProvider(IssueProvider):
             [
                 *command,
                 f'repos/{locator.namespace}/{locator.project}/issues/{locator.number}',
-            ]
+            ],
+            provider=self.name,
         )
         if 'pull_request' in document:
             _fail('invalid_provider_document', diagnostic='pull request returned')
@@ -490,7 +475,8 @@ class GitLabIssueProvider(IssueProvider):
             [
                 *_provider_command('glab', locator),
                 f'projects/{project}/issues/{locator.number}',
-            ]
+            ],
+            provider=self.name,
         )
         return _normalized_snapshot(
             locator,

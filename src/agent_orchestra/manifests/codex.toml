@@ -1,0 +1,9 @@
+id = "codex"
+kind = "runtime"
+schema_version = 1
+min_engine_version = 1
+
+[profiles]
+reviewer = ["exec", "--ephemeral", "--ignore-user-config", "--sandbox", "workspace-write", "--cd", "{cwd}", "--skip-git-repo-check", "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true", "-c", "sandbox_workspace_write.network_access=false", "--output-schema", "{schema}", "--output-last-message", "{result}", "--color", "never"]
+issue_reviewer = ["exec", "--ephemeral", "--ignore-user-config", "--sandbox", "workspace-write", "--cd", "{cwd}", "--skip-git-repo-check", "-c", "sandbox_workspace_write.network_access=false", "--output-schema", "{schema}", "--output-last-message", "{result}", "--color", "never"]
+developer = ["exec", "--ephemeral", "--ignore-user-config", "--sandbox", "workspace-write", "--config", "sandbox_workspace_write.network_access=true", "--cd", "{cwd}", "--output-schema", "{schema}", "--output-last-message", "{result}", "--color", "never"]

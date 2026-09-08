@@ -1,0 +1,9 @@
+id = "claude-code"
+kind = "runtime"
+schema_version = 1
+min_engine_version = 1
+
+[profiles]
+reviewer = ["--print", "--no-session-persistence", "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config", "--mcp-config", '{{"mcpServers":{{}}}}', "--output-format", "json", "--json-schema", "{schema}", "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Bash,Skill"]
+issue_reviewer = ["--print", "--no-session-persistence", "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config", "--mcp-config", '{{"mcpServers":{{}}}}', "--output-format", "json", "--json-schema", "{schema}", "--permission-mode", "dontAsk", "--tools", ""]
+developer = ["--print", "--no-session-persistence", "--setting-sources", "", "--settings", "{settings}", "--strict-mcp-config", "--mcp-config", '{{"mcpServers":{{}}}}', "--output-format", "json", "--json-schema", "{schema}", "--permission-mode", "acceptEdits", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Skill"]

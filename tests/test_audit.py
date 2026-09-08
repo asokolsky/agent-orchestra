@@ -8,11 +8,12 @@ import sqlite3
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from agent_orchestra import manifests as manifest_module
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import (
     finalize_evidence_write,
@@ -21,13 +22,11 @@ from agent_orchestra.evidence import (
 )
 from agent_orchestra.invocations import AttemptStatus
 from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_snapshot
+from agent_orchestra.manifests import evidence_path, parse_manifest
 from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
 from agent_orchestra.store import RunStore
 from agent_orchestra.workflow import transition
 from tests.test_job_views import add_attempt
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _arguments(database: Path, root: Path, job_id: str, *, verify: bool) -> list[str]:
@@ -230,12 +229,16 @@ def _issue_job(tmp_path: Path) -> tuple[Path, Path, IssueJob]:
     )
     store.add_issue(job)
     write_snapshot(
-        root, job.id, resolve_evidence_path(root, job.id) / 'issue.json', snapshot
+        root,
+        job.id,
+        resolve_evidence_path(root, job.id) / evidence_path('issue_snapshot'),
+        snapshot,
     )
     write_snapshot(
         root,
         job.id,
-        resolve_evidence_path(root, job.id) / 'iterations/000001/issue.json',
+        resolve_evidence_path(root, job.id)
+        / evidence_path('issue_snapshot', ordinal=1),
         snapshot,
     )
     request: dict[str, object] = {
@@ -259,14 +262,14 @@ def _issue_job(tmp_path: Path) -> tuple[Path, Path, IssueJob]:
     _write_json_evidence(
         root,
         job.id,
-        'iterations/000001/request.json',
+        evidence_path('issue_review_request', ordinal=1),
         request,
         'issue_review_request',
     )
     _write_json_evidence(
         root,
         job.id,
-        'iterations/000001/result.json',
+        evidence_path('issue_review_result', ordinal=1),
         result,
         'issue_review_result',
     )
@@ -332,6 +335,86 @@ def test_verify_detects_modified_evidence(
     assert document['result'] == 'failed'
     assert document['evidence'][0]['status'] == 'modified'
     assert [item['code'] for item in document['findings']] == ['evidence_modified']
+
+
+def test_audit_reports_unrecognized_canonical_looking_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Do not silently omit a JSON message absent from the evidence manifest."""
+
+    database, root, job = _source_job(tmp_path)
+    unknown = resolve_evidence_path(root, str(job.id)) / 'messages/000003-future.json'
+    unknown.parent.mkdir()
+    unknown.write_text('{}')
+
+    assert main(_arguments(database, root, str(job.id), verify=True)) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['result'] == 'failed'
+    assert 'unknown_canonical_evidence' in {
+        finding['code'] for finding in document['findings']
+    }
+
+
+def test_audit_rejects_indexed_unrecognized_canonical_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Apply manifest recognition even when an unknown message is indexed."""
+
+    database, root, job = _source_job(tmp_path)
+    unknown = resolve_evidence_path(root, str(job.id)) / 'messages/000003-future.json'
+    unknown.parent.mkdir()
+    unknown.write_text('{}', encoding='utf-8')
+    record_finalized_evidence(root, str(job.id), unknown, 'process_stdout')
+
+    assert main(_arguments(database, root, str(job.id), verify=True)) == 0
+    document = json.loads(capsys.readouterr().out)
+
+    assert document['result'] == 'failed'
+    assert 'unknown_canonical_evidence' in {
+        finding['code'] for finding in document['findings']
+    }
+
+
+def test_audit_rejects_indexed_non_json_in_manifest_namespace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject every indexed file occupying a manifest-owned namespace."""
+
+    database, root, job = _source_job(tmp_path)
+    unknown = resolve_evidence_path(root, str(job.id)) / 'messages/000003-future.log'
+    unknown.parent.mkdir()
+    unknown.write_text('future output\n', encoding='utf-8')
+    record_finalized_evidence(root, str(job.id), unknown, 'process_stdout')
+
+    assert main(_arguments(database, root, str(job.id), verify=True)) == 0
+    document = json.loads(capsys.readouterr().out)
+
+    assert document['result'] == 'failed'
+    assert 'unknown_canonical_evidence' in {
+        finding['code'] for finding in document['findings']
+    }
+
+
+def test_audit_rejects_indexed_canonical_evidence_type_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject an index type that disagrees with a manifest-recognized path."""
+
+    database, root, job = _issue_job(tmp_path)
+    request = resolve_evidence_path(root, str(job.id)) / evidence_path(
+        'issue_review_request', ordinal=2
+    )
+    request.parent.mkdir(parents=True, exist_ok=True)
+    request.write_text('{}', encoding='utf-8')
+    record_finalized_evidence(root, str(job.id), request, 'process_stdout')
+
+    assert main(_arguments(database, root, str(job.id), verify=True)) == 0
+    document = json.loads(capsys.readouterr().out)
+
+    assert document['result'] == 'failed'
+    assert 'evidence_type_mismatch' in {
+        finding['code'] for finding in document['findings']
+    }
 
 
 def test_verify_complete_current_evidence_is_verified(
@@ -774,6 +857,38 @@ def test_verify_completed_issue_job_reports_iterations_and_provider_actions(
     ]
     assert document['history'][-1]['verdict'] == 'ready'
     assert document['provider_actions'][0]['provider_id'] == '42'
+
+
+def test_issue_audit_uses_manifest_template_for_ordinals(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep issue writers, recognition, ordinals, and audit on one path contract."""
+
+    manifest_path = (
+        Path(__file__).parents[1] / 'src/agent_orchestra/manifests/evidence.toml'
+    )
+    custom = parse_manifest(
+        'evidence',
+        manifest_path.read_text(encoding='utf-8').replace('iterations/', 'history/'),
+    )
+    packaged_load = manifest_module.load_manifest
+    monkeypatch.setattr(
+        manifest_module,
+        'load_manifest',
+        lambda manifest_id: (
+            custom if manifest_id == 'evidence' else packaged_load(manifest_id)
+        ),
+    )
+    database, root, job = _issue_job(tmp_path)
+
+    assert (resolve_evidence_path(root, job.id) / 'history/000001/issue.json').is_file()
+    assert main(_arguments(database, root, job.id, verify=True)) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['result'] == 'verified'
+    assert {item['iteration'] for item in document['history']} == {None, 1}
 
 
 def test_audit_is_read_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

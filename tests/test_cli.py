@@ -32,6 +32,7 @@ from agent_orchestra.invocations import (
     InvocationRecord,
     write_record,
 )
+from agent_orchestra.manifests import ENGINE_TOO_OLD, ManifestError
 from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
 from agent_orchestra.settings import load_settings
 from agent_orchestra.store import RunStore
@@ -59,6 +60,25 @@ def evidence_directory(context: CliRunContext) -> Path:
     """Return the canonical evidence directory for one CLI test job."""
 
     return resolve_evidence_path(context.runs_directory, str(context.run.id))
+
+
+def test_cli_rejects_incompatible_manifest_with_stable_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail before argument handling when packaged knowledge is incompatible."""
+
+    def reject_manifests() -> None:
+        raise ManifestError(ENGINE_TOO_OLD, 'codex')
+
+    monkeypatch.setattr(cli, 'validate_packaged_manifests', reject_manifests)
+    assert main(['--help']) == 2
+    assert json.loads(capsys.readouterr().out) == {
+        'schema_version': cli.CLI_SCHEMA_VERSION,
+        'error': {
+            'code': 'manifest_engine_too_old',
+            'message': 'manifest_engine_too_old: codex',
+        },
+    }
 
 
 @pytest.fixture

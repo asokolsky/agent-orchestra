@@ -36,7 +36,7 @@ package-dir = { "" = "src" }
 packages = ["agent_orchestra", "agent_orchestra.adapter"]
 
 [tool.setuptools.package-data]
-agent_orchestra = ["py.typed"]
+agent_orchestra = ["py.typed", "manifests/*.toml"]
 
 [tool.setuptools.data-files]
 "share/agent-orchestra/skills/agent-orchestra-developer" = [

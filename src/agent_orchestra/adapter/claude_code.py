@@ -37,6 +37,7 @@ from agent_orchestra.evidence import (
     evidence_root_for_job,
     finalize_evidence_write,
 )
+from agent_orchestra.manifests import adapter_arguments
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
@@ -262,23 +263,12 @@ def _execute_claude_code_reviewer(
         temporary = Path(temporary_directory)
         command = [
             executable,
-            '--print',
-            '--no-session-persistence',
-            '--setting-sources',
-            '',
-            '--settings',
-            _reviewer_settings(worktree, temporary),
-            '--strict-mcp-config',
-            '--mcp-config',
-            '{"mcpServers":{}}',
-            '--output-format',
-            'json',
-            '--json-schema',
-            json.dumps(REVIEW_RESULT_SCHEMA, separators=(',', ':')),
-            '--permission-mode',
-            'dontAsk',
-            '--tools',
-            'Read,Glob,Grep,Bash,Skill',
+            *adapter_arguments(
+                'claude-code',
+                'reviewer',
+                settings=_reviewer_settings(worktree, temporary),
+                schema=json.dumps(REVIEW_RESULT_SCHEMA, separators=(',', ':')),
+            ),
             '--allowedTools',
             'Read',
             'Glob',
@@ -362,23 +352,14 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
             temporary = Path(directory)
             command = [
                 executable,
-                '--print',
-                '--no-session-persistence',
-                '--setting-sources',
-                '',
-                '--settings',
-                _developer_settings(),
-                '--strict-mcp-config',
-                '--mcp-config',
-                '{"mcpServers":{}}',
-                '--output-format',
-                'json',
-                '--json-schema',
-                json.dumps(ISSUE_REVIEW_RESULT_SCHEMA, separators=(',', ':')),
-                '--permission-mode',
-                'dontAsk',
-                '--tools',
-                '',
+                *adapter_arguments(
+                    'claude-code',
+                    'issue_reviewer',
+                    settings=_developer_settings(),
+                    schema=json.dumps(
+                        ISSUE_REVIEW_RESULT_SCHEMA, separators=(',', ':')
+                    ),
+                ),
             ]
             if self.model:
                 command.extend(['--model', self.model])
@@ -449,23 +430,12 @@ def _execute_claude_code_developer(
         raise DeveloperAdapterError(DEVELOPER_SKILL_MISSING)
     command = [
         executable,
-        '--print',
-        '--no-session-persistence',
-        '--setting-sources',
-        '',
-        '--settings',
-        _developer_settings(),
-        '--strict-mcp-config',
-        '--mcp-config',
-        '{"mcpServers":{}}',
-        '--output-format',
-        'json',
-        '--json-schema',
-        json.dumps(DEVELOPER_RESULT_SCHEMA, separators=(',', ':')),
-        '--permission-mode',
-        'acceptEdits',
-        '--tools',
-        'Read,Glob,Grep,Edit,Write,Bash,Skill',
+        *adapter_arguments(
+            'claude-code',
+            'developer',
+            settings=_developer_settings(),
+            schema=json.dumps(DEVELOPER_RESULT_SCHEMA, separators=(',', ':')),
+        ),
         '--allowedTools',
         'Read',
         'Glob',

@@ -45,6 +45,7 @@ from agent_orchestra.issue_sources import (
     publish_feedback,
     write_snapshot,
 )
+from agent_orchestra.manifests import evidence_path
 from agent_orchestra.models import IssueJob, ProviderAction, RunState
 from agent_orchestra.schemas import (
     IssueReviewRequestSchema,
@@ -414,7 +415,9 @@ def run_issue_review(
     job_directory = _job_directory(root, job.id)
     recover_evidence_index(root, job.id)
     recover_completed_invocation_evidence(job_directory, job.id)
-    captured_path = _evidence_path(job_directory, 'issue.json')
+    captured_path = _evidence_path(
+        job_directory, *Path(evidence_path('issue_snapshot')).parts
+    )
     captured = _read_json(captured_path)
     try:
         captured_source = IssueSourceSchema.model_validate(captured)
@@ -428,7 +431,8 @@ def run_issue_review(
         message = 'issue changed after capture; start a new review iteration'
         raise IssueReviewError(message)
     current_result_path = _evidence_path(
-        job_directory, 'iterations', f'{job.iteration:06d}', 'result.json'
+        job_directory,
+        *Path(evidence_path('issue_review_result', ordinal=job.iteration)).parts,
     )
     current_task_id = f'{job.id}:{job.iteration:06d}-issue_reviewer'
     current_attempts = [
@@ -445,9 +449,7 @@ def run_issue_review(
     ):
         recovery_request_path = _evidence_path(
             job_directory,
-            'iterations',
-            f'{job.iteration:06d}',
-            'request.json',
+            *Path(evidence_path('issue_review_request', ordinal=job.iteration)).parts,
         )
         recovery_request = IssueReviewRequestSchema.model_validate(
             _read_json(recovery_request_path)
@@ -509,7 +511,7 @@ def run_issue_review(
         raise IssueReviewError(message)
     iteration = job.iteration if retry else job.iteration + 1
     source_path = _evidence_path(
-        job_directory, 'iterations', f'{iteration:06d}', 'issue.json'
+        job_directory, *Path(evidence_path('issue_snapshot', ordinal=iteration)).parts
     )
     if retry:
         existing_source = IssueSourceSchema.model_validate(_read_json(source_path))
@@ -519,7 +521,8 @@ def run_issue_review(
     else:
         write_snapshot(root, job.id, source_path, current)
     request_path = _evidence_path(
-        job_directory, 'iterations', f'{iteration:06d}', 'request.json'
+        job_directory,
+        *Path(evidence_path('issue_review_request', ordinal=iteration)).parts,
     )
     if retry:
         request = IssueReviewRequestSchema.model_validate(
@@ -530,9 +533,9 @@ def run_issue_review(
         for prior_iteration in range(job.iteration, 0, -1):
             prior_path = _evidence_path(
                 job_directory,
-                'iterations',
-                f'{prior_iteration:06d}',
-                'result.json',
+                *Path(
+                    evidence_path('issue_review_result', ordinal=prior_iteration)
+                ).parts,
             )
             if prior_path.exists() or prior_path.is_symlink():
                 prior = _read_json(prior_path)
@@ -549,7 +552,8 @@ def run_issue_review(
             }
         ).model_dump(mode='json')
     result_path = _evidence_path(
-        job_directory, 'iterations', f'{iteration:06d}', 'result.json'
+        job_directory,
+        *Path(evidence_path('issue_review_result', ordinal=iteration)).parts,
     )
     if result_path.exists() or result_path.is_symlink():
         message = 'issue review result path already exists'
@@ -679,7 +683,8 @@ def resume_issue_review(
     root = runs_directory.expanduser().resolve()
     job_directory = _job_directory(root, job.id)
     request_path = _evidence_path(
-        job_directory, 'iterations', f'{job.iteration:06d}', 'request.json'
+        job_directory,
+        *Path(evidence_path('issue_review_request', ordinal=job.iteration)).parts,
     )
     try:
         request = IssueReviewRequestSchema.model_validate(_read_json(request_path))

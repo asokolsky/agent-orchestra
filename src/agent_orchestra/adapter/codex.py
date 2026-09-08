@@ -37,6 +37,7 @@ from agent_orchestra.evidence import (
     evidence_root_for_job,
     finalize_evidence_write,
 )
+from agent_orchestra.manifests import adapter_arguments
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
@@ -259,26 +260,13 @@ def _execute_codex_reviewer(
         try:
             command = [
                 codex,
-                'exec',
-                '--ephemeral',
-                '--ignore-user-config',
-                '--sandbox',
-                'workspace-write',
-                '--cd',
-                str(temporary),
-                '--skip-git-repo-check',
-                '-c',
-                'sandbox_workspace_write.exclude_slash_tmp=true',
-                '-c',
-                'sandbox_workspace_write.exclude_tmpdir_env_var=true',
-                '-c',
-                'sandbox_workspace_write.network_access=false',
-                '--output-schema',
-                str(schema_path),
-                '--output-last-message',
-                str(result_path),
-                '--color',
-                'never',
+                *adapter_arguments(
+                    'codex',
+                    'reviewer',
+                    cwd=str(temporary),
+                    schema=str(schema_path),
+                    result=str(result_path),
+                ),
             ]
             if model:
                 command.extend(['--model', model])
@@ -343,22 +331,13 @@ class CodexIssueReviewerAdapter(IssueReviewerAdapter):
             )
             command = [
                 executable,
-                'exec',
-                '--ephemeral',
-                '--ignore-user-config',
-                '--sandbox',
-                'workspace-write',
-                '--cd',
-                str(temporary),
-                '--skip-git-repo-check',
-                '-c',
-                'sandbox_workspace_write.network_access=false',
-                '--output-schema',
-                str(schema_path),
-                '--output-last-message',
-                str(result_path),
-                '--color',
-                'never',
+                *adapter_arguments(
+                    'codex',
+                    'issue_reviewer',
+                    cwd=str(temporary),
+                    schema=str(schema_path),
+                    result=str(result_path),
+                ),
             ]
             if self.model:
                 command.extend(['--model', self.model])
@@ -437,21 +416,13 @@ def _execute_codex_developer(
         schema_path.write_text(json.dumps(DEVELOPER_RESULT_SCHEMA), encoding='utf-8')
         command = [
             codex,
-            'exec',
-            '--ephemeral',
-            '--ignore-user-config',
-            '--sandbox',
-            'workspace-write',
-            '--config',
-            'sandbox_workspace_write.network_access=true',
-            '--cd',
-            str(worktree),
-            '--output-schema',
-            str(schema_path),
-            '--output-last-message',
-            str(result_path),
-            '--color',
-            'never',
+            *adapter_arguments(
+                'codex',
+                'developer',
+                cwd=str(worktree),
+                schema=str(schema_path),
+                result=str(result_path),
+            ),
         ]
         if model:
             command.extend(['--model', model])
