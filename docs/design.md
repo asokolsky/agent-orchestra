@@ -224,6 +224,12 @@ profiles. The evidence manifest pairs each writer template with its audit
 recognition pattern, so producers and consumers share one naming contract.
 Filesystem ordering never affects resolution.
 
+The runtime registry in `adapter/registry.py` owns runtime identity, vendor,
+role capability, adapter implementation, and manifest-placeholder requirements.
+Parser choices, dispatch, skill targets, and runtime-metadata handling derive
+from this ordered registry. Manifest data controls invocation arguments; the
+registry controls which implementation consumes that data for each role.
+
 Manifest schema version `1` is the only accepted document shape;
 `manifest_schema_version_unsupported` rejects any other version.
 `MANIFEST_ENGINE_VERSION` is the interpreter contract. Startup validates every

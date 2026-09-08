@@ -4,11 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agent_orchestra.skill_install import (
-    AgentTarget,
-    SkillInstallError,
-    install_skills,
-)
+from agent_orchestra.skill_install import SkillInstallError, install_skills
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,21 +27,19 @@ def test_install_for_both_agents_is_idempotent(tmp_path: Path) -> None:
     create_skill(source, 'example-skill')
     codex_home = tmp_path / 'codex'
     claude_home = tmp_path / 'claude'
-    agents = (AgentTarget.CODEX, AgentTarget.CLAUDE_CODE)
+    agents = ('codex', 'claude-code')
 
     installed = install_skills(
         ('example-skill',),
         agents,
         source_root=source,
-        codex_home=codex_home,
-        claude_home=claude_home,
+        skill_homes={'codex': codex_home, 'claude-code': claude_home},
     )
     repeated = install_skills(
         ('example-skill',),
         agents,
         source_root=source,
-        codex_home=codex_home,
-        claude_home=claude_home,
+        skill_homes={'codex': codex_home, 'claude-code': claude_home},
     )
 
     assert all(result.installed for result in installed)
@@ -62,17 +56,17 @@ def test_unchanged_managed_skill_is_upgraded(tmp_path: Path) -> None:
     codex_home = tmp_path / 'codex'
     install_skills(
         ('example-skill',),
-        (AgentTarget.CODEX,),
+        ('codex',),
         source_root=source,
-        codex_home=codex_home,
+        skill_homes={'codex': codex_home},
     )
     (skill / 'SKILL.md').write_text('version 2\n')
 
     upgraded = install_skills(
         ('example-skill',),
-        (AgentTarget.CODEX,),
+        ('codex',),
         source_root=source,
-        codex_home=codex_home,
+        skill_homes={'codex': codex_home},
     )
 
     destination = codex_home / 'skills/example-skill/SKILL.md'
@@ -88,9 +82,9 @@ def test_locally_modified_managed_skill_is_not_upgraded(tmp_path: Path) -> None:
     codex_home = tmp_path / 'codex'
     install_skills(
         ('example-skill',),
-        (AgentTarget.CODEX,),
+        ('codex',),
         source_root=source,
-        codex_home=codex_home,
+        skill_homes={'codex': codex_home},
     )
     destination = codex_home / 'skills/example-skill/SKILL.md'
     destination.write_text('local edit\n')
@@ -99,9 +93,9 @@ def test_locally_modified_managed_skill_is_not_upgraded(tmp_path: Path) -> None:
     with pytest.raises(SkillInstallError, match='locally modified'):
         install_skills(
             ('example-skill',),
-            (AgentTarget.CODEX,),
+            ('codex',),
             source_root=source,
-            codex_home=codex_home,
+            skill_homes={'codex': codex_home},
         )
 
     assert destination.read_text() == 'local edit\n'
@@ -119,10 +113,9 @@ def test_modified_destination_blocks_all_installation(tmp_path: Path) -> None:
     with pytest.raises(SkillInstallError, match='locally modified'):
         install_skills(
             ('example-skill',),
-            (AgentTarget.CODEX, AgentTarget.CLAUDE_CODE),
+            ('codex', 'claude-code'),
             source_root=source,
-            codex_home=codex_home,
-            claude_home=claude_home,
+            skill_homes={'codex': codex_home, 'claude-code': claude_home},
         )
 
     assert modified.is_dir()
@@ -138,9 +131,9 @@ def test_rejects_unknown_skill(tmp_path: Path) -> None:
     with pytest.raises(SkillInstallError, match='skill not found'):
         install_skills(
             ('missing',),
-            (AgentTarget.CODEX,),
+            ('codex',),
             source_root=source,
-            codex_home=tmp_path / 'codex',
+            skill_homes={'codex': tmp_path / 'codex'},
         )
 
 
@@ -156,7 +149,7 @@ def test_claude_config_dir_is_used(
 
     install_skills(
         ('example-skill',),
-        (AgentTarget.CLAUDE_CODE,),
+        ('claude-code',),
         source_root=source,
     )
 

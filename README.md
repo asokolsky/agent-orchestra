@@ -95,7 +95,8 @@ unchanged installation but does not overwrite local edits. It uses only the
 Python standard library and installs to
 `$CODEX_HOME/skills` (or `~/.codex/skills`) and
 `$CLAUDE_CONFIG_DIR/skills` (or `~/.claude/skills`) by default. Use
-`--codex-home` or `--claude-home` to override those roots.
+`--skill-home RUNTIME=PATH` to override a registered runtime root; repeat the
+option for multiple runtimes.
 
 ### 2. Develop the change
 

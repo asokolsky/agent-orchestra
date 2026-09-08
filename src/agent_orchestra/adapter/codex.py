@@ -51,7 +51,7 @@ from agent_orchestra.schemas import (
     SchemaValidationError,
     validate_review_result,
 )
-from agent_orchestra.skill_install import AgentTarget, skill_destination
+from agent_orchestra.skill_install import skill_destination
 
 
 class CodexReviewerError(RuntimeError):
@@ -245,7 +245,7 @@ def _execute_codex_reviewer(
     if codex is None:
         raise CodexReviewerError(CODEX_NOT_FOUND)
     if not (
-        skill_destination(AgentTarget.CODEX, 'agent-orchestra-reviewer') / 'SKILL.md'
+        skill_destination('codex', 'agent-orchestra-reviewer') / 'SKILL.md'
     ).is_file():
         raise CodexReviewerError(REVIEWER_SKILL_MISSING)
 
@@ -397,7 +397,7 @@ def _execute_codex_developer(
     if codex is None:
         raise DeveloperAdapterError(CODEX_NOT_FOUND)
     if not (
-        skill_destination(AgentTarget.CODEX, 'agent-orchestra-developer') / 'SKILL.md'
+        skill_destination('codex', 'agent-orchestra-developer') / 'SKILL.md'
     ).is_file():
         raise DeveloperAdapterError(DEVELOPER_SKILL_MISSING)
     response_path.parent.mkdir(parents=True, exist_ok=True)

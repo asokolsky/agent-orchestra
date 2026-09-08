@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.adapter.registry import (
+    DEFAULT_RUNTIME_REGISTRY,
+    RuntimeRegistry,
+    RuntimeRegistryError,
+    RuntimeRole,
+)
 from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import (
     EvidencePathError,
@@ -55,11 +61,7 @@ from agent_orchestra.retention import (
 )
 from agent_orchestra.schemas import SchemaValidationError
 from agent_orchestra.settings import Settings, SettingsError, load_settings
-from agent_orchestra.skill_install import (
-    AgentTarget,
-    SkillInstallError,
-    install_skills,
-)
+from agent_orchestra.skill_install import SkillInstallError, install_skills
 from agent_orchestra.store import (
     ConcurrentUpdateError,
     PersistedEnumError,
@@ -71,13 +73,54 @@ from agent_orchestra.worker import WorkerError, resume_review, run_queued_review
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
 CLI_SCHEMA_VERSION = 13
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
+
+
+def _runtime_argument(
+    registry: RuntimeRegistry,
+    role: RuntimeRole | None = None,
+    *,
+    allow_all: bool = False,
+) -> Callable[[str], str]:
+    """Build an argparse converter with stable registry lookup errors."""
+
+    def resolve(value: str) -> str:
+        if allow_all and value == 'all':
+            return value
+        try:
+            registry.require(value, role)
+        except RuntimeRegistryError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+        return value
+
+    return resolve
+
+
+def _skill_home_argument(
+    registry: RuntimeRegistry,
+) -> Callable[[str], tuple[str, Path]]:
+    """Build an argparse converter for one registry-backed home override."""
+
+    def resolve(value: str) -> tuple[str, Path]:
+        runtime, separator, path = value.partition('=')
+        if not separator or not path:
+            message = 'expected RUNTIME=PATH'
+            raise argparse.ArgumentTypeError(message)
+        try:
+            registry.require(runtime)
+        except RuntimeRegistryError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+        return runtime, Path(path)
+
+    return resolve
+
+
 PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
 
 
@@ -194,15 +237,20 @@ def _working_tree_digest(repo: Path, base_sha: str) -> str | None:
     return f'sha256:{digest.hexdigest()}'
 
 
-def build_parser(settings: Settings | None = None) -> argparse.ArgumentParser:
+def build_parser(
+    settings: Settings | None = None,
+    runtime_registry: RuntimeRegistry | None = None,
+) -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
 
     effective = settings or load_settings(
         default_database=DEFAULT_DATABASE,
         default_runs_directory=DEFAULT_RUNS_DIRECTORY,
     )
+    runtimes = runtime_registry or DEFAULT_RUNTIME_REGISTRY
     runs_default = cast('Path', effective.runs_directory.value)
     parser = argparse.ArgumentParser(prog='agent-orchestra')
+    parser.set_defaults(runtime_registry=runtimes)
     parser.add_argument(
         '--version',
         action='version',
@@ -244,7 +292,10 @@ def build_parser(settings: Settings | None = None) -> argparse.ArgumentParser:
     )
     review_issue.add_argument('--timeout', type=int, default=1800)
     review_issue.add_argument(
-        '--reviewer-agent', choices=('codex', 'claude-code'), default='codex'
+        '--reviewer-agent',
+        type=_runtime_argument(runtimes, RuntimeRole.ISSUE_REVIEWER),
+        choices=runtimes.identifiers(RuntimeRole.ISSUE_REVIEWER),
+        default=runtimes.default(RuntimeRole.ISSUE_REVIEWER).identifier,
     )
     review_issue.add_argument('--reviewer-model')
     review_issue.add_argument('--runs-directory', type=Path, default=runs_default)
@@ -301,11 +352,17 @@ def build_parser(settings: Settings | None = None) -> argparse.ArgumentParser:
     run.add_argument('--developer-timeout', type=int, default=1800)
     run.add_argument('--max-iterations', type=int, default=3)
     run.add_argument(
-        '--developer-agent', choices=('codex', 'claude-code'), default='codex'
+        '--developer-agent',
+        type=_runtime_argument(runtimes, RuntimeRole.DEVELOPER),
+        choices=runtimes.identifiers(RuntimeRole.DEVELOPER),
+        default=runtimes.default(RuntimeRole.DEVELOPER).identifier,
     )
     run.add_argument('--developer-model')
     run.add_argument(
-        '--reviewer-agent', choices=('codex', 'claude-code'), default='codex'
+        '--reviewer-agent',
+        type=_runtime_argument(runtimes, RuntimeRole.REVIEWER),
+        choices=runtimes.identifiers(RuntimeRole.REVIEWER),
+        default=runtimes.default(RuntimeRole.REVIEWER).identifier,
     )
     run.add_argument('--reviewer-model')
     run.add_argument(
@@ -341,12 +398,21 @@ def build_parser(settings: Settings | None = None) -> argparse.ArgumentParser:
         'install', help='install skills for supported local agent runtimes'
     )
     install.add_argument(
-        '--agent', choices=('codex', 'claude-code', 'all'), default='all'
+        '--agent',
+        type=_runtime_argument(runtimes, allow_all=True),
+        choices=(*runtimes.identifiers(), 'all'),
+        default='all',
     )
     install.add_argument('--skill', action='append', required=True)
     install.add_argument('--source', type=Path)
-    install.add_argument('--codex-home', type=Path)
-    install.add_argument('--claude-home', type=Path)
+    install.add_argument(
+        '--skill-home',
+        action='append',
+        default=[],
+        type=_skill_home_argument(runtimes),
+        metavar='RUNTIME=PATH',
+        help='override one registered runtime skill root; repeat as needed',
+    )
     return parser
 
 
@@ -534,6 +600,7 @@ def _review_issue(args: argparse.Namespace, store: RunStore) -> int:
             model=args.reviewer_model,
             timeout=args.timeout,
             command=tuple(args.reviewer_command),
+            registry=args.runtime_registry,
         )
     except (
         RunNotFoundError,
@@ -1142,9 +1209,11 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
         return 2
     if args.reviewer_command and (
         args.reviewer_model
-        or args.reviewer_agent != 'codex'
+        or args.reviewer_agent
+        != args.runtime_registry.default(RuntimeRole.REVIEWER).identifier
         or args.developer_model
-        or args.developer_agent != 'codex'
+        or args.developer_agent
+        != args.runtime_registry.default(RuntimeRole.DEVELOPER).identifier
     ):
         print(
             'error: built-in reviewer options cannot be combined with a custom '
@@ -1161,41 +1230,37 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
                 vendor='unknown', model=None, runtime='custom-command'
             )
         else:
-            module = (
-                'agent_orchestra.adapter.codex'
-                if args.reviewer_agent == 'codex'
-                else 'agent_orchestra.adapter.claude_code'
+            reviewer_runtime = args.runtime_registry.require(
+                args.reviewer_agent, RuntimeRole.REVIEWER
             )
             reviewer_command = [
                 sys.executable,
                 '-m',
-                module,
+                reviewer_runtime.module,
             ]
             if args.reviewer_model:
                 reviewer_command.extend(['--model', args.reviewer_model])
             reviewer_identity = InvocationIdentity(
-                vendor='openai' if args.reviewer_agent == 'codex' else 'anthropic',
+                vendor=reviewer_runtime.vendor,
                 model=args.reviewer_model,
                 runtime=args.reviewer_agent,
             )
         developer_command: list[str] = []
+        developer_runtime = args.runtime_registry.require(
+            args.developer_agent, RuntimeRole.DEVELOPER
+        )
         if not args.reviewer_command:
-            developer_module = (
-                'agent_orchestra.adapter.codex'
-                if args.developer_agent == 'codex'
-                else 'agent_orchestra.adapter.claude_code'
-            )
             developer_command = [
                 sys.executable,
                 '-m',
-                developer_module,
+                developer_runtime.module,
                 '--role',
                 'developer',
             ]
             if args.developer_model:
                 developer_command.extend(['--model', args.developer_model])
         developer_identity = InvocationIdentity(
-            vendor=('openai' if args.developer_agent == 'codex' else 'anthropic'),
+            vendor=developer_runtime.vendor,
             model=args.developer_model,
             runtime=args.developer_agent,
         )
@@ -1212,8 +1277,9 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
             digest_worktree=_working_tree_digest,
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
+            registry=args.runtime_registry,
         )
-    except (OSError, RunNotFoundError, WorkerError) as error:
+    except (OSError, RunNotFoundError, RuntimeRegistryError, WorkerError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
     print(
@@ -1277,6 +1343,7 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
                 store,
                 args.runs_directory,
                 timeout=1800,
+                registry=args.runtime_registry,
             )
         else:
             _require_external_database(args.database, run.worktree_path)
@@ -1285,6 +1352,7 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
                 run=run,
                 runs_directory=args.runs_directory,
                 digest_worktree=_working_tree_digest,
+                registry=args.runtime_registry,
             )
     except RunNotFoundError as error:
         _write_resume_document(
@@ -1326,9 +1394,7 @@ def _install_skills(args: argparse.Namespace) -> int:
     """Install requested bundled skills for one or both agent runtimes."""
 
     agents = (
-        (AgentTarget.CODEX, AgentTarget.CLAUDE_CODE)
-        if args.agent == 'all'
-        else (AgentTarget(args.agent),)
+        args.runtime_registry.identifiers() if args.agent == 'all' else (args.agent,)
     )
     skill_names = tuple(dict.fromkeys(args.skill))
     try:
@@ -1336,8 +1402,8 @@ def _install_skills(args: argparse.Namespace) -> int:
             skill_names,
             agents,
             source_root=args.source,
-            codex_home=args.codex_home,
-            claude_home=args.claude_home,
+            skill_homes=dict(args.skill_home),
+            runtime_registry=args.runtime_registry,
         )
     except (SkillInstallError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)

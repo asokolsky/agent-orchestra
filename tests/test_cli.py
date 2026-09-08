@@ -18,6 +18,7 @@ from uuid import uuid4
 import pytest
 
 from agent_orchestra import cli, worker
+from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
 from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import (
@@ -162,6 +163,81 @@ def create_worker_run(tmp_path: Path, *, job_id: str | None = None) -> CliRunCon
         run=run,
         runs_directory=tmp_path / 'runs',
     )
+
+
+@pytest.mark.parametrize(
+    ('identity', 'registry', 'expected_code'),
+    [
+        (
+            InvocationIdentity(vendor='example', model=None, runtime='unknown'),
+            RuntimeRegistry(
+                (
+                    RuntimeDefinition(
+                        identifier='known',
+                        vendor='example',
+                        module='example',
+                        reviewer_adapter='example.Reviewer',
+                        developer_adapter=None,
+                        issue_reviewer_adapter=None,
+                        manifest_placeholders=frozenset(),
+                        reports_runtime_metadata=False,
+                        skill_home_environment='EXAMPLE_HOME',
+                        skill_home_directory='.example',
+                    ),
+                )
+            ),
+            'runtime_unknown',
+        ),
+        (
+            InvocationIdentity(vendor='example', model=None, runtime='known'),
+            RuntimeRegistry(
+                (
+                    RuntimeDefinition(
+                        identifier='known',
+                        vendor='example',
+                        module='example',
+                        reviewer_adapter=None,
+                        developer_adapter=None,
+                        issue_reviewer_adapter=None,
+                        manifest_placeholders=frozenset(),
+                        reports_runtime_metadata=False,
+                        skill_home_environment='EXAMPLE_HOME',
+                        skill_home_directory='.example',
+                    ),
+                )
+            ),
+            'runtime_role_unsupported',
+        ),
+    ],
+)
+def test_fresh_worker_rejects_invalid_runtime_before_command(
+    tmp_path: Path,
+    identity: InvocationIdentity,
+    registry: RuntimeRegistry,
+    expected_code: str,
+) -> None:
+    """Validate programmatic runtime identities before changing durable state."""
+
+    context = create_worker_run(tmp_path)
+    marker = tmp_path / 'executed'
+
+    with pytest.raises(WorkerError) as raised:
+        run_queued_review(
+            store=context.store,
+            run=context.run,
+            objective='Review the change.',
+            reviewer_command=(sys.executable, '-c', f'open({str(marker)!r}, "w")'),
+            developer_command=(),
+            runs_directory=context.runs_directory,
+            timeout_seconds=30,
+            digest_worktree=_working_tree_digest,
+            reviewer_identity=identity,
+            registry=registry,
+        )
+
+    assert raised.value.code == expected_code
+    assert context.store.get(str(context.run.id)).state is RunState.QUEUED
+    assert not marker.exists()
 
 
 def test_version_reports_installed_distribution(
@@ -3471,10 +3547,10 @@ def test_skills_install_for_both_agents(
             'example-skill',
             '--source',
             str(source),
-            '--codex-home',
-            str(codex_home),
-            '--claude-home',
-            str(claude_home),
+            '--skill-home',
+            f'codex={codex_home}',
+            '--skill-home',
+            f'claude-code={claude_home}',
         ]
     )
 

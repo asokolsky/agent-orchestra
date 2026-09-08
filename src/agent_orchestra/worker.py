@@ -14,6 +14,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
+from agent_orchestra.adapter.registry import (
+    DEFAULT_RUNTIME_REGISTRY,
+    RuntimeRegistry,
+    RuntimeRegistryError,
+    RuntimeRole,
+)
 from agent_orchestra.agents import (
     CommandAgentAdapter,
     DeveloperRequest,
@@ -107,7 +113,6 @@ RESUME_INTERRUPTED_CODE = 'resume_interrupted'
 RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
 RESUME_ACTIVATION_UNCERTAIN_CODE = 'resume_activation_uncertain'
 RESUME_CANCELLED_CODE = 'resume_cancelled'
-RUNTIME_METADATA_RUNTIMES = frozenset({'codex', 'claude-code'})
 
 
 def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
@@ -293,10 +298,18 @@ def _exception_runtime_metadata(
     return (), 'unavailable'
 
 
-def _runtime_metadata_path(identity: InvocationIdentity, path: Path) -> Path | None:
+def _runtime_metadata_path(
+    identity: InvocationIdentity,
+    path: Path,
+    registry: RuntimeRegistry,
+) -> Path | None:
     """Return the sidecar path only for runtimes that report provenance."""
 
-    return path if identity.runtime in RUNTIME_METADATA_RUNTIMES else None
+    try:
+        runtime = registry.require(identity.runtime)
+    except ValueError:
+        return None
+    return path if runtime.reports_runtime_metadata else None
 
 
 def _invocation_stem(sequence: int, role: str, attempt: int) -> str:
@@ -819,6 +832,26 @@ def _identity_from_record(
     return InvocationIdentity(vendor=vendor, model=model, runtime=runtime)
 
 
+def _resolve_resume_identity(
+    identity: InvocationIdentity,
+    role: RuntimeRole,
+    registry: RuntimeRegistry,
+) -> InvocationIdentity:
+    """Validate a persisted runtime role and derive its current vendor."""
+
+    if identity.runtime == 'custom-command':
+        return identity
+    try:
+        runtime = registry.require(identity.runtime, role)
+    except RuntimeRegistryError as error:
+        raise WorkerError(str(error), code=error.code) from error
+    return InvocationIdentity(
+        vendor=runtime.vendor,
+        model=identity.model,
+        runtime=runtime.identifier,
+    )
+
+
 def _latest_task_attempt(
     run_directory: Path, sequence: int, role: str
 ) -> InvocationRecord | None:
@@ -885,6 +918,7 @@ def _run_queued_review(
     digest_worktree: Callable[[Path, str], str | None],
     reviewer_identity: InvocationIdentity,
     developer_identity: InvocationIdentity,
+    registry: RuntimeRegistry,
     continuation_sequence: int | None = None,
     continuation_prior_review_path: Path | None = None,
     retry_review_request: dict[str, Any] | None = None,
@@ -911,6 +945,14 @@ def _run_queued_review(
         raise WorkerError(INVALID_ITERATION_LIMIT)
     if not run.worktree_path.is_dir():
         raise WorkerError(f'worktree not found: {run.worktree_path}')
+
+    reviewer_identity = _resolve_resume_identity(
+        reviewer_identity, RuntimeRole.REVIEWER, registry
+    )
+    if developer_command:
+        developer_identity = _resolve_resume_identity(
+            developer_identity, RuntimeRole.DEVELOPER, registry
+        )
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
@@ -1066,7 +1108,7 @@ def _run_queued_review(
                     stdout_path=logs / f'{reviewer_stem}.stdout.log',
                     stderr_path=logs / f'{reviewer_stem}.stderr.log',
                     runtime_metadata_path=_runtime_metadata_path(
-                        reviewer_identity, reviewer_metadata_path
+                        reviewer_identity, reviewer_metadata_path, registry
                     ),
                     on_started=partial(
                         _record_invocation,
@@ -1403,7 +1445,7 @@ def _run_queued_review(
                     stdout_path=logs / f'{sequence:06d}-developer.stdout.log',
                     stderr_path=logs / f'{sequence:06d}-developer.stderr.log',
                     runtime_metadata_path=_runtime_metadata_path(
-                        developer_identity, developer_metadata_path
+                        developer_identity, developer_metadata_path, registry
                     ),
                     on_started=partial(
                         _record_invocation,
@@ -1707,6 +1749,7 @@ def _resume_developer_request(
     digest_worktree: Callable[[Path, str], str | None],
     reviewer_identity: InvocationIdentity,
     developer_identity: InvocationIdentity,
+    registry: RuntimeRegistry,
     attempt: int,
     resume_expected_state: RunState | None = None,
 ) -> Run:
@@ -1763,7 +1806,7 @@ def _resume_developer_request(
                 stdout_path=logs / f'{developer_stem}.stdout.log',
                 stderr_path=logs / f'{developer_stem}.stderr.log',
                 runtime_metadata_path=_runtime_metadata_path(
-                    developer_identity, developer_metadata_path
+                    developer_identity, developer_metadata_path, registry
                 ),
                 on_started=partial(
                     _record_invocation,
@@ -2035,6 +2078,7 @@ def _resume_developer_request(
         digest_worktree=digest_worktree,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
+        registry=registry,
         continuation_sequence=sequence + 2,
         continuation_prior_review_path=review_result_path,
     )
@@ -2161,6 +2205,7 @@ def _resume_reviewer_validation(
     developer_identity: InvocationIdentity,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
+    registry: RuntimeRegistry,
 ) -> Run:
     """Revalidate a durable reviewer response and continue without relaunching."""
 
@@ -2284,6 +2329,7 @@ def _resume_reviewer_validation(
         digest_worktree=digest_worktree,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
+        registry=registry,
         attempt=1,
         resume_expected_state=RunState.CHANGES_REQUESTED,
     )
@@ -2301,6 +2347,7 @@ def _resume_developer_validation(
     developer_identity: InvocationIdentity,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
+    registry: RuntimeRegistry,
 ) -> Run:
     """Revalidate a durable developer response and continue without relaunching."""
 
@@ -2411,6 +2458,7 @@ def _resume_developer_validation(
         digest_worktree=digest_worktree,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
+        registry=registry,
         continuation_sequence=sequence + 2,
         continuation_prior_review_path=review_result_path,
     )
@@ -2426,6 +2474,7 @@ def _resume_active_attempt(
     developer_identity: InvocationIdentity,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
+    registry: RuntimeRegistry,
 ) -> Run:
     """Recover an active workflow state from its latest durable task evidence."""
 
@@ -2476,6 +2525,7 @@ def _resume_active_attempt(
                 digest_worktree=digest_worktree,
                 reviewer_identity=reviewer_identity,
                 developer_identity=developer_identity,
+                registry=registry,
                 continuation_sequence=sequence,
                 continuation_prior_review_path=None,
                 retry_review_request=request,
@@ -2495,6 +2545,7 @@ def _resume_active_attempt(
             digest_worktree=digest_worktree,
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
+            registry=registry,
             attempt=1,
         )
     if action is RecoveryAction.FAIL_ACTIVATION_UNCERTAIN or latest is None:
@@ -2526,6 +2577,7 @@ def _resume_active_attempt(
         execution=execution,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
+        registry=registry,
         runs_directory=runs_directory,
         digest_worktree=digest_worktree,
     )
@@ -2543,6 +2595,7 @@ def _resume_intermediate_state(
     measured_digest: str,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
+    registry: RuntimeRegistry,
 ) -> Run:
     """Continue one crash-stopped review decision without rerunning review."""
 
@@ -2633,6 +2686,7 @@ def _resume_intermediate_state(
         digest_worktree=digest_worktree,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
+        registry=registry,
         attempt=_next_attempt(
             run_directory,
             int(request['sequence']),
@@ -2649,6 +2703,7 @@ def _resume_review(
     run: Run,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
+    registry: RuntimeRegistry,
 ) -> Run:
     """Resume one recoverable run from its canonical execution evidence."""
 
@@ -2681,6 +2736,14 @@ def _resume_review(
         execution.developer.identity.model,
         execution.developer.identity.runtime,
     )
+    if run.state is not RunState.APPROVED:
+        reviewer_identity = _resolve_resume_identity(
+            reviewer_identity, RuntimeRole.REVIEWER, registry
+        )
+        if execution.developer.command:
+            developer_identity = _resolve_resume_identity(
+                developer_identity, RuntimeRole.DEVELOPER, registry
+            )
     measured_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
     if measured_digest is None:
         raise WorkerError(NO_CHANGES)
@@ -2697,6 +2760,7 @@ def _resume_review(
             measured_digest=measured_digest,
             runs_directory=runs_directory,
             digest_worktree=digest_worktree,
+            registry=registry,
         )
 
     if run.state in {RunState.REVIEWING, RunState.DEVELOPING}:
@@ -2714,6 +2778,7 @@ def _resume_review(
             developer_identity=developer_identity,
             runs_directory=runs_directory,
             digest_worktree=digest_worktree,
+            registry=registry,
         )
 
     if run.state is RunState.INTERRUPTED:
@@ -2757,6 +2822,7 @@ def _resume_review(
                 digest_worktree=digest_worktree,
                 reviewer_identity=reviewer_identity,
                 developer_identity=developer_identity,
+                registry=registry,
                 continuation_sequence=int(request['sequence']),
                 continuation_prior_review_path=None,
                 retry_review_request=request,
@@ -2784,6 +2850,7 @@ def _resume_review(
             digest_worktree=digest_worktree,
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
+            registry=registry,
             attempt=attempt,
             resume_expected_state=RunState.INTERRUPTED,
         )
@@ -2818,6 +2885,7 @@ def _resume_review(
             digest_worktree=digest_worktree,
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
+            registry=registry,
             attempt=attempt,
             resume_expected_state=RunState.VALIDATION_REQUIRED,
         )
@@ -2883,6 +2951,7 @@ def _resume_review(
         digest_worktree=digest_worktree,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
+        registry=registry,
         attempt=1,
         resume_expected_state=RunState.VALIDATION_REQUIRED,
     )
@@ -2894,6 +2963,7 @@ def resume_review(
     run: Run,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Run:
     """Resume one run and persist any recoverable-command failure."""
 
@@ -2904,6 +2974,7 @@ def resume_review(
             run=run,
             runs_directory=runs_directory,
             digest_worktree=digest_worktree,
+            registry=registry,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
@@ -2944,6 +3015,7 @@ def run_queued_review(
     digest_worktree: Callable[[Path, str], str | None],
     reviewer_identity: InvocationIdentity | None = None,
     developer_identity: InvocationIdentity | None = None,
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Run:
     """Run the bounded loop and persist every worker failure as durable evidence."""
 
@@ -2968,6 +3040,7 @@ def run_queued_review(
             digest_worktree=digest_worktree,
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
+            registry=registry,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
