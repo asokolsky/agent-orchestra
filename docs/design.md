@@ -617,6 +617,23 @@ diff, the valid handoff is preserved and the run returns to
 `developer_disagreement` reason makes the reviewer/developer disagreement a
 human decision rather than a failed or endlessly retried run.
 
+## External process contract
+
+Every runtime is launched through one bounded process helper that tees the child
+streams live, applies the invocation deadline, writes the prompt to the child's
+standard input, and then closes it.
+
+Closing standard input is required. A runtime that reads standard input blocks
+until end of file, and Codex reads it whenever it is a non-TTY pipe even when
+the prompt is supplied as a command argument, so leaving the pipe open deadlocks
+the child until its timeout expires rather than failing. The single stderr line
+the runtime prints in that state is also printed on success, so it does not
+distinguish a hang from normal operation. See openai/codex#20919.
+
+A runtime added later inherits this behavior by launching through the same
+helper. Spawning a runtime directly bypasses the closing guarantee together with
+the stream tee, the timeout controller, and attempt evidence capture.
+
 ## Invocation evidence and logs
 
 Every attempted external process writes one versioned JSON record under the

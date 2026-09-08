@@ -118,3 +118,23 @@ def test_streaming_process_writes_complete_large_stdin() -> None:
 
     assert result.returncode == 0
     assert result.stdout == f'{len(content)}\n'
+
+
+def test_streaming_process_closes_child_stdin() -> None:
+    """Deliver end of file so a runtime that reads stdin cannot deadlock."""
+
+    # A child that reads to end of file returns only once stdin is closed. An
+    # implementation that leaves the pipe open would hang here until the
+    # timeout, which is the deadlock described in openai/codex#20919.
+    result = run_streaming_process(
+        [
+            sys.executable,
+            '-c',
+            'import sys; sys.stdin.buffer.read(); print("reached end of file")',
+        ],
+        input='prompt',
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == 'reached end of file\n'
