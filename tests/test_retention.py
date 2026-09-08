@@ -122,7 +122,7 @@ def test_applied_prune_leaves_auditable_expiry_marker_and_is_idempotent(
     )
     audit = json.loads(capsys.readouterr().out)
     assert audit['result'] == 'expired'
-    assert audit['findings'][0]['code'] == 'evidence_expired'
+    assert 'evidence_expired' in {finding['code'] for finding in audit['findings']}
 
 
 def test_orphan_apply_refuses_an_unrelated_database(tmp_path: Path) -> None:

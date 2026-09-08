@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -51,6 +53,9 @@ def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, R
     root = tmp_path / 'runs'
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run([git, 'init', '-q', str(worktree)], check=True)
     store = RunStore(database)
     store.initialize()
     job = Run.create_local(
@@ -110,6 +115,22 @@ def test_audit_retains_unrecognized_transition_values_as_findings(
     assert document['result'] == 'unverifiable'
     assert code in {finding['code'] for finding in document['findings']}
     assert document['transitions'][0][column] == value
+
+
+def test_audit_reports_missing_worktree_without_mutating_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Add a missing-worktree finding while preserving durable job state."""
+
+    database, root, job = _source_job(tmp_path)
+    shutil.rmtree(job.worktree_path)
+    before = database.read_bytes()
+
+    assert main(_arguments(database, root, str(job.id), verify=False)) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert 'worktree_missing' in {item['code'] for item in document['findings']}
+    assert RunStore(database).get(job.id).state is job.state
+    assert database.read_bytes() == before
 
 
 def _write_json_evidence(
@@ -281,7 +302,7 @@ def test_default_audit_is_versioned_deterministic_and_omits_result(
 
     assert first == second
     document = json.loads(first)
-    assert document['schema_version'] == 12
+    assert document['schema_version'] == 13
     assert 'result' not in document
     assert document['job']['scenario'] == 'local_changes'
     assert [item['to_state'] for item in document['transitions']] == [
@@ -788,6 +809,6 @@ def test_audit_reports_missing_job_as_versioned_error(
     assert main(_arguments(database, tmp_path / 'runs', 'missing', verify=True)) == 2
 
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 12
+    assert document['schema_version'] == 13
     assert document['job_id'] == 'missing'
     assert document['error']['code'] == 'job_not_found'

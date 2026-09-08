@@ -701,7 +701,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 12,
+        'schema_version': 13,
         'directory': str(projects),
         'jobs': [
             {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -915,7 +915,7 @@ def test_jobs_lists_persisted_job(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 12,\n  "jobs": [\n    {\n')
+    assert output.startswith('{\n  "schema_version": 13,\n  "jobs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
@@ -928,15 +928,17 @@ def test_jobs_lists_persisted_job(
         else field.name
         for field in fields(Run)
     }
+    expected_fields.add('worktree_status')
     assert set(document['jobs'][0]) == expected_fields
     assert document == {
-        'schema_version': 12,
+        'schema_version': 13,
         'jobs': [
             {
                 'job_id': str(run.id),
                 'scenario': 'local_changes',
                 'repository_path': str(tmp_path),
                 'worktree_path': str(tmp_path),
+                'worktree_status': 'not_git_worktree',
                 'state': 'queued',
                 'base_sha': 'base',
                 'head_sha': 'head',
@@ -1010,8 +1012,11 @@ def test_jobs_attention_selects_exact_human_action_states(
     database = tmp_path / 'state.db'
     store = RunStore(database)
     store.initialize()
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
     for state in [*sorted(HUMAN_ACTION_STATES, key=str), RunState.PUBLISHED]:
-        run = Run.create_local(tmp_path, tmp_path, 'base', 'head', f'digest-{state}')
+        run = Run.create_local(repo, repo, 'base', 'head', f'digest-{state}')
         store.add(run)
         store.update(replace(run, state=state), RunState.QUEUED)
     issue = IssueJob.create(
@@ -1074,13 +1079,187 @@ def test_jobs_rejects_unknown_state_with_stable_error(
 
     assert result == 2
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 12,
+        'schema_version': 13,
         'error': {
             'code': 'invalid_job_state',
             'message': 'unknown durable job state: needs-coffee',
         },
     }
     assert not database.exists()
+
+
+def test_jobs_reports_broken_worktree_and_excludes_it_from_attention(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep unrunnable jobs visible without presenting them as actionable."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    missing = tmp_path / 'missing'
+    run = Run.create_local(missing, missing, 'base', 'head', 'digest')
+    store.add(run)
+    store.update(replace(run, state=RunState.CHANGES_REQUESTED), RunState.QUEUED)
+    before = database.read_bytes()
+
+    assert main(['--database', str(database), 'jobs']) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['jobs'][0]['worktree_status'] == 'missing'
+    assert main(['--database', str(database), 'jobs', '--attention']) == 0
+    assert json.loads(capsys.readouterr().out)['jobs'] == []
+    assert database.read_bytes() == before
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'jobs',
+                '--attention',
+                '--state',
+                'changes_requested',
+            ]
+        )
+        == 0
+    )
+    selected = json.loads(capsys.readouterr().out)
+    assert [job['job_id'] for job in selected['jobs']] == [str(run.id)]
+
+
+def test_cancel_records_reason_without_deleting_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Cancel an unrunnable job and preserve its durable evidence."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    missing = tmp_path / 'missing'
+    run = Run.create_local(missing, missing, 'base', 'head', 'digest')
+    store.add(run)
+    evidence = tmp_path / 'runs' / str(run.id) / '.integrity.json'
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text('keep me')
+    arguments = [
+        '--database',
+        str(database),
+        'cancel',
+        str(run.id),
+        '--reason',
+        'worktree removed',
+    ]
+
+    assert main(arguments) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['state'] == 'cancelled'
+    assert evidence.read_text() == 'keep me'
+    transition = store.list_transitions(str(run.id))[-1]
+    assert transition.to_state is RunState.CANCELLED
+    assert transition.reason == 'worktree removed'
+    assert main(arguments) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert error['error']['code'] == 'job_not_cancellable'
+
+
+def test_cancel_refuses_job_with_available_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require an unrunnable worktree before terminating a source-code job."""
+
+    repository = tmp_path / 'repo'
+    repository.mkdir()
+    initialize_git_repo(repository)
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    run = Run.create_local(repository, repository, 'base', 'head', 'digest')
+    store.add(run)
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'cancel',
+                str(run.id),
+                '--reason',
+                'wrong job',
+            ]
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'job_not_cancellable'
+    assert store.get(run.id).state is RunState.QUEUED
+
+
+def test_cancel_reports_unrecognized_persisted_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Return the established JSON error when a job state cannot be decoded."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    missing = tmp_path / 'missing'
+    run = Run.create_local(missing, missing, 'base', 'head', 'digest')
+    store.add(run)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'future_state' WHERE id = ?", (str(run.id),)
+        )
+
+    assert (
+        main(['--database', str(database), 'cancel', str(run.id), '--reason', 'stale'])
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['job_id'] == str(run.id)
+    assert document['error']['code'] == 'unknown_job_state'
+
+
+def test_cancel_reports_issue_job_as_not_cancellable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Distinguish an existing issue-review job from an unknown identifier."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    issue = IssueJob.create(
+        provider='github',
+        host='github.com',
+        remote_url='https://github.com/acme/widgets/issues/12',
+        namespace='acme',
+        project='widgets',
+        issue_number=12,
+        title='Feature',
+        author='author',
+        source_updated_at='2026-09-08T08:00:00Z',
+        source_digest='sha256:' + 'a' * 64,
+    )
+    store.add_issue(issue)
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'cancel',
+                issue.id,
+                '--reason',
+                'wrong scenario',
+            ]
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['job_id'] == issue.id
+    assert document['error'] == {
+        'code': 'job_not_cancellable',
+        'message': 'cancellation applies to source-code jobs; '
+        'this is an issue-review job',
+    }
 
 
 def test_run_writes_to_identifier_shard_in_non_utc_timezone(
@@ -1139,7 +1318,7 @@ def test_job_selects_one_job_by_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 12
+    assert document['schema_version'] == 13
     assert document['job']['job_id'] == str(first.id)
     assert document['job']['current'] == []
 
@@ -1174,7 +1353,7 @@ def test_job_reads_persisted_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 12
+    assert document['schema_version'] == 13
     assert document['job']['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -1195,7 +1374,7 @@ def test_jobs_lists_empty_jobs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 12,
+        'schema_version': 13,
         'jobs': [],
         'error': None,
     }
@@ -1386,7 +1565,7 @@ def test_read_only_views_report_unrecognized_job_values(
     for command in commands:
         assert main(['--database', str(database), *command]) == 2
         document = json.loads(capsys.readouterr().out)
-        assert document['schema_version'] == 12
+        assert document['schema_version'] == 13
         assert document['error']['code'] == code
         if command[0] == 'jobs':
             listed_ids = {item['job_id'] for item in document['jobs']}
@@ -1512,7 +1691,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
         'logs/000001-reviewer.stderr.log',
     } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 12,
+        'schema_version': 13,
         'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1884,7 +2063,7 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 12,
+        'schema_version': 13,
         'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,

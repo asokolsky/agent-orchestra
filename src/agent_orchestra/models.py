@@ -91,6 +91,10 @@ HUMAN_ACTION_STATES = frozenset(
     }
 )
 
+TERMINAL_STATES = frozenset(
+    {RunState.FAILED, RunState.CANCELLED, RunState.SUPERSEDED, RunState.PUBLISHED}
+)
+
 
 class Verdict(StrEnum):
     """Possible outcomes of a review iteration."""
@@ -250,6 +254,7 @@ class JobTransition:
     to_state: RunState | str
     scope_digest: str | None
     occurred_at: datetime
+    reason: str | None = None
     unrecognized_fields: tuple[str, ...] = ()
 
 

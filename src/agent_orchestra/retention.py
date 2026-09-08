@@ -599,7 +599,7 @@ def plan_document(
     """Render a versioned prune plan and optional outcomes."""
 
     return {
-        'schema_version': 12,
+        'schema_version': 13,
         'database': str(plan.database),
         'runs_directory': str(plan.runs_directory),
         'older_than_days': plan.older_than_days,
