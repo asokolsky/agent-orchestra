@@ -3082,6 +3082,8 @@ def test_run_rejects_state_database_inside_worktree(
             str(run.id),
             '--objective',
             'Review the change.',
+            '--runs-directory',
+            str(tmp_path / 'runs'),
         ]
     )
 
@@ -3128,6 +3130,8 @@ def test_run_handles_digest_failure_before_transition(
             str(enqueued_run.run.id),
             '--objective',
             'Review the change.',
+            '--runs-directory',
+            str(enqueued_run.runs_directory),
             '--',
             '/usr/bin/true',
         ]
