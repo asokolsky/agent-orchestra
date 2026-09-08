@@ -55,7 +55,13 @@ def test_streaming_process_preserves_partial_output_on_timeout(
                 ),
             ],
             input='',
-            timeout=0.1,
+            # The child sleeps five seconds, so any budget well under that
+            # still times out before it could exit. The budget must also cover
+            # interpreter start and two flushes, which takes about 16 ms on an
+            # idle machine but far longer when the suite runs across parallel
+            # workers. A tight budget made this assert on machine load rather
+            # than on draining behaviour.
+            timeout=1.0,
         )
 
     captured = capfd.readouterr()

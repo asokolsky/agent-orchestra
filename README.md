@@ -363,3 +363,9 @@ Continuous integration runs the same gates on every push and pull request,
 substituting `mise run format-check` for `mise run format` so a branch is
 verified rather than rewritten. Run `mise run format-check` locally to see what
 CI will see.
+
+`mise run tests` distributes the suite across one worker per available CPU,
+which takes it from about a minute to about fifteen seconds. Parallel workers
+interleave their output, so use `mise run tests-serial` when reading a single
+failure: it runs everything in one verbose process. Both tasks run the same
+tests and must both pass.

@@ -25,6 +25,7 @@ agent-orchestra-claude-code-developer = "agent_orchestra.adapter.claude_code:dev
 dev = [
     "mypy>=1.16.1",
     "pytest>=8.4",
+    "pytest-xdist>=3.6",
     "ruff>=0.12.1",
 ]
 
