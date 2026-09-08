@@ -334,6 +334,9 @@ def test_claude_developer_confines_writes_to_primary_working_directory(
     assert environment['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'] == '1'
 
 
+UNAVAILABLE_CLI_OUTPUT = 'requires remote managed settings to load'
+
+
 @pytest.mark.skipif(shutil.which('claude') is None, reason='claude is not installed')
 def test_claude_cli_accepts_isolation_options() -> None:
     """Validate isolation options through a non-interactive Claude session."""
@@ -374,6 +377,11 @@ def test_claude_cli_accepts_isolation_options() -> None:
 
     valid = invoke('{"mcpServers":{}}')
     valid_output = valid.stdout + valid.stderr
+    # A CLI that cannot load organization-managed settings refuses before
+    # reaching any isolation option, which says nothing about this project.
+    # Skip that environment; every other refusal still fails the test.
+    if UNAVAILABLE_CLI_OUTPUT in valid_output:
+        pytest.skip('claude cannot load organization-managed settings here')
     assert 'Invalid MCP configuration' not in valid_output
 
     invalid = invoke('{}')

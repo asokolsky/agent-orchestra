@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Keyed by source repository and branch so the push and pull_request events for
+# one branch collapse into a single run instead of building the same commit
+# twice, while a fork branch that shares a name cannot cancel an unrelated run.
+concurrency:
+  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: format, lint, types, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # mise owns the toolchain so CI resolves the same versions as local
+      # development instead of drifting from a runner default.
+      - uses: jdx/mise-action@v2
+        with:
+          version: 2026.9.2
+          cache: true
+
+      - name: Install dependencies
+        run: mise run venv
+
+      # Verifies formatting without rewriting the tree, so a badly formatted
+      # branch fails here instead of during review.
+      - name: Check formatting
+        run: mise run format-check
+
+      - name: Lint
+        run: mise run lint
+
+      - name: Check typing
+        run: mise run mypy
+
+      # test_claude_cli_accepts_isolation_options skips itself when the Claude
+      # CLI is absent, which it is on a runner, and when the CLI cannot load
+      # organization-managed settings. No exclusion list is maintained here.
+      - name: Run tests
+        run: mise run tests
+
+      - name: Build distributions
+        run: mise run build

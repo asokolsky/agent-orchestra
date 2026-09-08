@@ -39,6 +39,15 @@ run = [
     'uv run ruff format -v src/agent_orchestra tests',
 ]
 
+[tasks.format-check]
+description = "Verify python sources are formatted without modifying them"
+run = [
+    # verify import order
+    'uv run ruff check --select I src/agent_orchestra tests',
+    # verify formatting
+    'uv run ruff format --check src/agent_orchestra tests',
+]
+
 [tasks.lint]
 description = "Lint python sources"
 run = [

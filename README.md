@@ -350,3 +350,8 @@ mise run tests
 mise run build
 git diff --check
 ```
+
+Continuous integration runs the same gates on every push and pull request,
+substituting `mise run format-check` for `mise run format` so a branch is
+verified rather than rewritten. Run `mise run format-check` locally to see what
+CI will see.
