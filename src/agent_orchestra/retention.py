@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
+from agent_orchestra.evidence import (
+    EvidencePathError,
+    evidence_root_for_job,
+    resolve_evidence_path,
+)
 from agent_orchestra.models import IssueJob, Run, RunState
 from agent_orchestra.store import RunStore, UnreadableJob
 
@@ -98,30 +102,96 @@ def _directory_size(path: Path) -> int:
     return total
 
 
-def _evidence_directories(root: Path) -> tuple[tuple[str, Path], ...]:
-    """Discover well-formed flat and date-sharded job directories."""
+def _shard_entries(directory: Path, invalid: list[str]) -> list[Path] | None:
+    """Return the sorted contents of a shard, or None when it cannot be read."""
+
+    # A directory can stop being readable between the type check and the walk:
+    # permissions change, or the entry is replaced by a file. Report the shard
+    # and let the remaining evidence be pruned rather than denying the command.
+    try:
+        return sorted(directory.iterdir())
+    except OSError:
+        invalid.append(str(directory))
+        return None
+
+
+def _evidence_directories(
+    root: Path,
+) -> tuple[tuple[tuple[str, Path], ...], tuple[str, ...]]:
+    """Discover contained jobs while reporting malformed candidate paths."""
 
     if not root.exists():
-        return ()
+        return (), ()
     if not root.is_dir() or root.is_symlink():
         raise RetentionError(f'runs directory is not a regular directory: {root}')
     found: list[tuple[str, Path]] = []
-    for candidate in root.glob('*'):
+    invalid: list[str] = []
+    # An unreadable root is different from an unreadable shard: nothing at all
+    # can be discovered, so refusing is honest rather than obstructive.
+    try:
+        root_entries = sorted(root.iterdir())
+    except OSError as error:
+        raise RetentionError(f'runs directory cannot be read: {root}') from error
+    for candidate in root_entries:
         if candidate.is_symlink():
-            raise RetentionError(f'runs directory contains a symlink: {candidate}')
-        if candidate.name.isdigit() and len(candidate.name) == 4:
-            found.extend(
-                (job.name, job)
-                for job in candidate.glob('[01][0-9]/[0-3][0-9]/*')
-                if job.is_dir() and resolve_evidence_path(root, job.name) == job
-            )
+            invalid.append(str(candidate))
             continue
-        if (
-            candidate.is_dir()
-            and resolve_evidence_path(root, candidate.name) == candidate
-        ):
-            found.append((candidate.name, candidate))
-    return tuple(sorted(found))
+        if candidate.name.isdigit() and len(candidate.name) == 4:
+            if not candidate.is_dir():
+                # An ordinary file or other non-directory entry named like a year
+                # is malformed, not a shard. Report it and keep pruning.
+                invalid.append(str(candidate))
+                continue
+            months = _shard_entries(candidate, invalid)
+            if months is None:
+                continue
+            for month in months:
+                if month.is_symlink():
+                    invalid.append(str(month))
+                    continue
+                if (
+                    not month.is_dir()
+                    or len(month.name) != 2
+                    or not month.name.isdigit()
+                ):
+                    invalid.append(str(month))
+                    continue
+                days = _shard_entries(month, invalid)
+                if days is None:
+                    continue
+                for day in days:
+                    if day.is_symlink():
+                        invalid.append(str(day))
+                        continue
+                    if not day.is_dir() or len(day.name) != 2 or not day.name.isdigit():
+                        invalid.append(str(day))
+                        continue
+                    day_jobs = _shard_entries(day, invalid)
+                    if day_jobs is None:
+                        continue
+                    for job in day_jobs:
+                        if job.is_symlink() or not job.is_dir():
+                            invalid.append(str(job))
+                            continue
+                        try:
+                            if resolve_evidence_path(root, job.name) == job:
+                                found.append((job.name, job))
+                            else:
+                                invalid.append(str(job))
+                        except EvidencePathError:
+                            invalid.append(str(job))
+            continue
+        if candidate.is_dir():
+            try:
+                if resolve_evidence_path(root, candidate.name) == candidate:
+                    found.append((candidate.name, candidate))
+                else:
+                    invalid.append(str(candidate))
+            except EvidencePathError:
+                invalid.append(str(candidate))
+        else:
+            invalid.append(str(candidate))
+    return tuple(sorted(found)), tuple(sorted(set(invalid)))
 
 
 def _record_counts(store: RunStore, job: Run | IssueJob) -> dict[str, int]:
@@ -196,15 +266,38 @@ def build_prune_plan(
         message = 'state database contains an unreadable job row'
         raise RetentionError(message)
     jobs = [item for item in records if isinstance(item, (Run, IssueJob))]
-    directories = _evidence_directories(runs_directory.expanduser().resolve())
+    directories, discovered_invalid = _evidence_directories(
+        runs_directory.expanduser().resolve()
+    )
     current = (now or datetime.now(UTC)).astimezone(UTC)
     cutoff = current - timedelta(days=older_than_days)
     selected: list[PruneItem] = []
     skipped: list[PruneItem] = []
-    invalid_paths: list[str] = []
+    invalid_paths = list(discovered_invalid)
     for job in jobs:
         job_id = str(job.id)
-        path = resolve_evidence_path(runs_directory, job_id)
+        try:
+            path = resolve_evidence_path(runs_directory, job_id)
+        except EvidencePathError:
+            # A stored job whose evidence path cannot be resolved is skipped so
+            # one unsafe directory cannot deny pruning every other job. The
+            # offending filesystem path is reported by the discovery walk above;
+            # recording a second, unresolvable path here would be misleading.
+            skipped.append(
+                PruneItem(
+                    job_id,
+                    'job',
+                    str(job.state),
+                    None,
+                    None,
+                    '',
+                    0,
+                    {},
+                    'skip',
+                    'evidence_path_unsafe',
+                )
+            )
+            continue
         transitions = store.list_transitions(job_id)
         completion = next(
             (
@@ -493,7 +586,7 @@ def apply_prune_plan(plan: PrunePlan) -> tuple[dict[str, str], ...]:
                 if plan.delete_database_records:
                     _delete_database_records(connection, item)
             outcomes.append({'job_id': item.job_id, 'status': 'applied'})
-        except (OSError, sqlite3.Error, RetentionError) as error:
+        except (OSError, sqlite3.Error, RetentionError, EvidencePathError) as error:
             outcomes.append(
                 {'job_id': item.job_id, 'status': 'failed', 'error': str(error)}
             )

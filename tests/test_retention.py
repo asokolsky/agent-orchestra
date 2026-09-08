@@ -452,3 +452,143 @@ def test_completed_expiry_reports_unexpected_new_evidence(
     assert 'unexpected_evidence_after_expiry' in {
         finding['code'] for finding in document['findings']
     }
+
+
+def test_symlinked_job_candidate_is_reported_without_blocking_other_jobs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skip a symlinked candidate and retain stable JSON while pruning safe jobs."""
+
+    database, runs, failed = _terminal_source_job(tmp_path)
+    linked_id = '20260908T000000Z-deadbeef'
+    linked = resolve_evidence_path(runs, linked_id)
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / 'outside-evidence'
+    target.mkdir()
+    linked.symlink_to(target, target_is_directory=True)
+    arguments = [
+        '--database',
+        str(database),
+        'prune',
+        '--runs-directory',
+        str(runs),
+        '--older-than',
+        '30d',
+    ]
+
+    assert main(arguments) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview['invalid_paths'] == [str(linked)]
+    assert [item['job_id'] for item in preview['selected']] == [str(failed.id)]
+
+    assert main([*arguments, '--apply']) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied['outcomes'] == [{'job_id': str(failed.id), 'status': 'applied'}]
+    assert linked.is_symlink()
+    assert target.is_dir()
+
+
+def test_stored_job_with_unsafe_evidence_path_is_skipped_not_fatal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skip a stored job whose own evidence path cannot be safely resolved."""
+
+    database, runs, failed = _terminal_source_job(tmp_path)
+    store = RunStore(database)
+    old = datetime.now(UTC) - timedelta(days=100)
+    unsafe = replace(
+        Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
+        state=RunState.FAILED,
+        updated_at=old,
+    )
+    store.add(replace(unsafe, state=RunState.QUEUED))
+    store.update(unsafe, RunState.QUEUED)
+    # The stored job's own evidence directory is a symlink, so resolving it
+    # raises. The other job must still be prunable.
+    linked = resolve_evidence_path(runs, str(unsafe.id))
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / 'outside-stored-evidence'
+    target.mkdir()
+    linked.symlink_to(target, target_is_directory=True)
+    arguments = [
+        '--database',
+        str(database),
+        'prune',
+        '--runs-directory',
+        str(runs),
+        '--older-than',
+        '30d',
+    ]
+
+    assert main(arguments) == 0
+    preview = json.loads(capsys.readouterr().out)
+
+    assert [item['job_id'] for item in preview['selected']] == [str(failed.id)]
+    assert {item['job_id']: item['reason'] for item in preview['skipped']} == {
+        str(unsafe.id): 'evidence_path_unsafe'
+    }
+    assert linked.is_symlink()
+    assert target.is_dir()
+
+
+def test_file_named_like_a_shard_does_not_block_pruning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report a non-directory year entry instead of failing the whole command."""
+
+    database, runs, failed = _terminal_source_job(tmp_path)
+    impostor = runs / '2025'
+    impostor.write_text('not a shard\n')
+    arguments = [
+        '--database',
+        str(database),
+        'prune',
+        '--runs-directory',
+        str(runs),
+        '--older-than',
+        '30d',
+    ]
+
+    assert main(arguments) == 0
+    preview = json.loads(capsys.readouterr().out)
+
+    assert str(impostor) in preview['invalid_paths']
+    assert [item['job_id'] for item in preview['selected']] == [str(failed.id)]
+
+    assert main([*arguments, '--apply']) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied['outcomes'] == [{'job_id': str(failed.id), 'status': 'applied'}]
+    assert impostor.is_file()
+
+
+def test_unreadable_shard_does_not_block_pruning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report a shard that cannot be enumerated and prune everything else."""
+
+    database, runs, failed = _terminal_source_job(tmp_path)
+    blocked = runs / '2024' / '01' / '01'
+    blocked.mkdir(parents=True)
+    unreadable = blocked.parent
+    unreadable.chmod(0o000)
+    try:
+        assert (
+            main(
+                [
+                    '--database',
+                    str(database),
+                    'prune',
+                    '--runs-directory',
+                    str(runs),
+                    '--older-than',
+                    '30d',
+                ]
+            )
+            == 0
+        )
+        preview = json.loads(capsys.readouterr().out)
+    finally:
+        unreadable.chmod(0o755)
+
+    assert str(unreadable) in preview['invalid_paths']
+    assert [item['job_id'] for item in preview['selected']] == [str(failed.id)]
