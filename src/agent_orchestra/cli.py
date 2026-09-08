@@ -701,13 +701,19 @@ def _job_directory(job_id: str, runs_directory: Path) -> Path | None:
 
 
 def _job_tasks(
-    job_id: str, runs_directory: Path, *, include_stream_content: bool
+    job_id: str,
+    runs_directory: Path,
+    *,
+    include_stream_content: bool,
+    allow_missing: bool = False,
 ) -> list[dict[str, object]]:
     """Read task evidence for one job."""
 
     job_directory = _job_directory(job_id, runs_directory)
     if job_directory is None:
-        return []
+        if allow_missing:
+            return []
+        raise InvocationEvidenceError(f'evidence not found for job: {job_id}')
     return _task_documents(
         read_records(job_directory, job_id),
         include_stream_content=include_stream_content,
@@ -801,6 +807,11 @@ def _selected_job(
             str(run.id),
             args.runs_directory,
             include_stream_content=include_stream_content,
+            allow_missing=(
+                isinstance(run, Run)
+                and run.state is RunState.QUEUED
+                and run.iteration == 0
+            ),
         )
     except RunNotFoundError as error:
         _write_job_error('job_not_found', f'job not found: {error}', job_id=args.job_id)

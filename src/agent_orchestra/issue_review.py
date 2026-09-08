@@ -21,6 +21,7 @@ from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
+    evidence_root_for_job,
     finalize_evidence_write,
     record_finalized_evidence,
     recover_evidence_index,
@@ -83,7 +84,7 @@ def _write_json(
             file.flush()
             os.fsync(file.fileno())
         finalize_evidence_write(
-            job_directory.parent,
+            evidence_root_for_job(job_directory),
             job_directory.name,
             temporary,
             path,
@@ -111,7 +112,7 @@ def _write_text(
             os.fsync(file.fileno())
         if evidence_type is not None:
             finalize_evidence_write(
-                job_directory.parent,
+                evidence_root_for_job(job_directory),
                 job_directory.name,
                 temporary,
                 path,
@@ -127,7 +128,9 @@ def _evidence_path(job_directory: Path, *parts: str) -> Path:
     """Resolve one path through the shared job evidence boundary."""
 
     try:
-        return resolve_evidence_path(job_directory.parent, job_directory.name, *parts)
+        return resolve_evidence_path(
+            evidence_root_for_job(job_directory), job_directory.name, *parts
+        )
     except EvidencePathError as error:
         raise IssueReviewError(str(error)) from error
 
@@ -147,7 +150,7 @@ def _record_finalized_path(
     """Record a finalized issue-review artifact in its owning job index."""
 
     record_finalized_evidence(
-        job_directory.parent,
+        evidence_root_for_job(job_directory),
         job_directory.name,
         path,
         evidence_type,
@@ -309,14 +312,14 @@ def _start_invocation(
     write_record(
         record_path,
         pending,
-        evidence_root=job_directory.parent,
+        evidence_root=evidence_root_for_job(job_directory),
         job_id=job_directory.name,
     )
     running = transition_attempt(pending, AttemptStatus.RUNNING)
     write_record(
         record_path,
         running,
-        evidence_root=job_directory.parent,
+        evidence_root=evidence_root_for_job(job_directory),
         job_id=job_directory.name,
     )
     return record_path, running
@@ -387,7 +390,7 @@ def _finish_invocation(
     write_record(
         record_path,
         completed,
-        evidence_root=job_directory.parent,
+        evidence_root=evidence_root_for_job(job_directory),
         job_id=job_directory.name,
     )
     _record_finalized_path(job_directory, Path(record.stdout_path), 'process_stdout')

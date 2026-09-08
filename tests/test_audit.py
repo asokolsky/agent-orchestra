@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from agent_orchestra.cli import main
-from agent_orchestra.evidence import finalize_evidence_write, record_finalized_evidence
+from agent_orchestra.evidence import (
+    finalize_evidence_write,
+    record_finalized_evidence,
+    resolve_evidence_path,
+)
 from agent_orchestra.invocations import AttemptStatus
 from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_snapshot
 from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
@@ -68,7 +72,7 @@ def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, R
             updated = transition(current, target)
             store.update(updated, current.state)
             current = updated
-    artifact = root / str(job.id) / 'failure.json'
+    artifact = resolve_evidence_path(root, str(job.id)) / 'failure.json'
     artifact.parent.mkdir(parents=True)
     temporary = artifact.with_suffix('.tmp')
     temporary.write_text('{}\n')
@@ -85,7 +89,7 @@ def _write_json_evidence(
 ) -> None:
     """Write one JSON fixture through the production finalization protocol."""
 
-    path = root / job_id / relative
+    path = resolve_evidence_path(root, job_id) / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.tmp')
     temporary.write_text(json.dumps(document))
@@ -125,7 +129,8 @@ def _review_request(
             'allowed_actions': ['read_worktree', 'write_review_evidence'],
             'timeout_seconds': 60,
             'artifact_path': str(
-                root / str(job.id) / f'artifacts/{iteration:06d}-review.md'
+                resolve_evidence_path(root, str(job.id))
+                / f'artifacts/{iteration:06d}-review.md'
             ),
             'prior_review_path': None,
         },
@@ -171,11 +176,13 @@ def _issue_job(tmp_path: Path) -> tuple[Path, Path, IssueJob]:
         source_digest=digest,
     )
     store.add_issue(job)
-    write_snapshot(root, job.id, root / job.id / 'issue.json', snapshot)
+    write_snapshot(
+        root, job.id, resolve_evidence_path(root, job.id) / 'issue.json', snapshot
+    )
     write_snapshot(
         root,
         job.id,
-        root / job.id / 'iterations/000001/issue.json',
+        resolve_evidence_path(root, job.id) / 'iterations/000001/issue.json',
         snapshot,
     )
     request: dict[str, object] = {
@@ -264,7 +271,7 @@ def test_verify_detects_modified_evidence(
     """Report altered bytes as a failed verification with stable context."""
 
     database, root, job = _source_job(tmp_path)
-    (root / str(job.id) / 'failure.json').write_text('changed\n')
+    (resolve_evidence_path(root, str(job.id)) / 'failure.json').write_text('changed\n')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
@@ -294,8 +301,12 @@ def test_verify_active_attempt_marks_streams_in_progress(
     """Return incomplete without treating live stream files as failures."""
 
     database, root, job = _source_job(tmp_path, complete=False)
-    add_attempt(job, root / str(job.id), status=AttemptStatus.RUNNING)
-    invocation = next((root / str(job.id) / 'invocations').glob('*.json'))
+    add_attempt(
+        job, resolve_evidence_path(root, str(job.id)), status=AttemptStatus.RUNNING
+    )
+    invocation = next(
+        (resolve_evidence_path(root, str(job.id)) / 'invocations').glob('*.json')
+    )
     record_finalized_evidence(root, str(job.id), invocation, 'invocation_record')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
@@ -316,7 +327,7 @@ def test_verify_reports_unindexed_partial_and_stale_evidence(
     """Distinguish an interrupted temporary from stale finalized evidence."""
 
     database, root, job = _source_job(tmp_path)
-    job_directory = root / str(job.id)
+    job_directory = resolve_evidence_path(root, str(job.id))
     temporary_name = f'.candidate-result-{uuid4()}.json'
     (job_directory / temporary_name).write_text('partial')
     (job_directory / 'stale-result.json').write_text('stale')
@@ -343,7 +354,7 @@ def test_default_audit_does_not_report_canonical_verification_findings(
     """Keep schema and correlation checks additive to --verify."""
 
     database, root, job = _issue_job(tmp_path)
-    result = root / job.id / 'iterations/000001/result.json'
+    result = resolve_evidence_path(root, job.id) / 'iterations/000001/result.json'
     result.write_text('{not-json')
 
     assert main(_arguments(database, root, job.id, verify=False)) == 0
@@ -359,7 +370,7 @@ def test_verify_binds_source_message_scope_to_selected_job(
     """Reject an internally valid message for another diff digest."""
 
     database, root, job = _source_job(tmp_path)
-    artifact = root / str(job.id) / 'artifacts/000001-review.md'
+    artifact = resolve_evidence_path(root, str(job.id)) / 'artifacts/000001-review.md'
     request: dict[str, object] = {
         'schema_version': 1,
         'message_id': str(uuid4()),
@@ -494,7 +505,9 @@ def test_verify_binds_issue_iteration_and_source_digest(
     """Reject an issue request whose ordinal and snapshot digest differ."""
 
     database, root, job = _issue_job(tmp_path)
-    request_path = root / job.id / 'iterations/000001/request.json'
+    request_path = (
+        resolve_evidence_path(root, job.id) / 'iterations/000001/request.json'
+    )
     request = json.loads(request_path.read_text())
     request['iteration'] = 2
     request['source']['source_digest'] = 'sha256:' + 'e' * 64
@@ -520,7 +533,7 @@ def test_verify_binds_root_issue_snapshot_to_first_iteration(
     """Reject a root snapshot replaced by another valid revision."""
 
     database, root, job = _issue_job(tmp_path)
-    root_snapshot_path = root / job.id / 'issue.json'
+    root_snapshot_path = resolve_evidence_path(root, job.id) / 'issue.json'
     root_snapshot = json.loads(root_snapshot_path.read_text())
     root_snapshot['source_digest'] = 'sha256:' + 'e' * 64
     _write_json_evidence(
@@ -547,11 +560,11 @@ def test_verify_aggregates_duplicate_and_missing_evidence(
     """Report independent integrity failures together."""
 
     database, root, job = _source_job(tmp_path)
-    index_path = root / str(job.id) / '.integrity.json'
+    index_path = resolve_evidence_path(root, str(job.id)) / '.integrity.json'
     index = json.loads(index_path.read_text())
     index['entries'].append(dict(index['entries'][0]))
     index_path.write_text(json.dumps(index))
-    (root / str(job.id) / 'failure.json').unlink()
+    (resolve_evidence_path(root, str(job.id)) / 'failure.json').unlink()
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
@@ -569,7 +582,7 @@ def test_verify_rejects_symlinked_evidence_without_following_it(
     """Report an indexed file replaced by a symlink as an escape."""
 
     database, root, job = _source_job(tmp_path)
-    evidence = root / str(job.id) / 'failure.json'
+    evidence = resolve_evidence_path(root, str(job.id)) / 'failure.json'
     outside = tmp_path / 'outside.txt'
     outside.write_text('secret')
     evidence.unlink()
@@ -627,7 +640,7 @@ def test_verify_missing_index_is_unverifiable(
         source_digest='sha256:' + 'd' * 64,
     )
     store.add_issue(job)
-    ordinary = root / job.id / 'pre-index.json'
+    ordinary = resolve_evidence_path(root, job.id) / 'pre-index.json'
     ordinary.parent.mkdir(parents=True)
     ordinary.write_text('{"pre_index": true}\n')
 
@@ -648,12 +661,14 @@ def test_verify_backfilled_index_does_not_treat_omissions_as_tampering(
     """Keep files omitted by a reconciler-built index unverifiable."""
 
     database, root, job = _source_job(tmp_path)
-    index_path = root / str(job.id) / '.integrity.json'
+    index_path = resolve_evidence_path(root, str(job.id)) / '.integrity.json'
     index = json.loads(index_path.read_text())
     index['backfilled_at'] = '2026-09-08T08:00:00Z'
     index_path.write_text(json.dumps(index))
     for ordinal in range(5):
-        (root / str(job.id) / f'pre-index-{ordinal}.log').write_text('legacy')
+        (
+            resolve_evidence_path(root, str(job.id)) / f'pre-index-{ordinal}.log'
+        ).write_text('legacy')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
@@ -674,8 +689,10 @@ def test_verify_missing_index_still_detects_malformed_canonical_evidence(
     """Aggregate detectable tampering even when the integrity index is absent."""
 
     database, root, job = _issue_job(tmp_path)
-    (root / job.id / 'iterations/000001/result.json').write_text('{not-json')
-    (root / job.id / '.integrity.json').unlink()
+    (resolve_evidence_path(root, job.id) / 'iterations/000001/result.json').write_text(
+        '{not-json'
+    )
+    (resolve_evidence_path(root, job.id) / '.integrity.json').unlink()
 
     assert main(_arguments(database, root, job.id, verify=True)) == 0
 

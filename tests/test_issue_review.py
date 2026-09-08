@@ -14,6 +14,7 @@ from agent_orchestra.adapter.base import IssueReviewExecution
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import main
+from agent_orchestra.evidence import resolve_evidence_path
 from agent_orchestra.invocations import read_records
 from agent_orchestra.issue_review import (
     IssueReviewError,
@@ -76,7 +77,12 @@ def setup_job(tmp_path: Path) -> tuple[RunStore, IssueJob, Path]:
     )
     store.add_issue(job)
     runs = tmp_path / 'runs'
-    write_snapshot(runs, job.id, runs / job.id / 'issue.json', source)
+    write_snapshot(
+        runs,
+        job.id,
+        resolve_evidence_path(runs, job.id, 'issue.json'),
+        source,
+    )
     return store, job, runs
 
 
@@ -126,16 +132,18 @@ def test_run_issue_review_persists_result_and_feedback(
         command=(sys.executable, str(reviewer)),
     )
 
-    iteration = runs / job.id / 'iterations' / '000001'
+    iteration = resolve_evidence_path(runs, job.id) / 'iterations' / '000001'
     assert finished.state is RunState.APPROVED
     assert json.loads((iteration / 'result.json').read_text())['verdict'] == 'ready'
     assert '**Verdict:** ready' in (iteration / 'feedback.md').read_text()
-    records = read_records(runs / job.id, job.id)
+    records = read_records(resolve_evidence_path(runs, job.id), job.id)
     assert len(records) == 1
     assert records[0].conclusion == 'succeeded'
     assert Path(records[0].stdout_path).read_text() == ''
     assert records[0].exit_code == 0
-    integrity = json.loads((runs / job.id / '.integrity.json').read_text())
+    integrity = json.loads(
+        (resolve_evidence_path(runs, job.id) / '.integrity.json').read_text()
+    )
     indexed_types = {
         entry['path']: entry['evidence_type'] for entry in integrity['entries']
     }
@@ -244,7 +252,7 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
 
     assert json.loads(capsys.readouterr().out)['state'] == 'approved'
     assert store.get_issue(job.id).state is RunState.APPROVED
-    records = read_records(runs / job.id, job.id)
+    records = read_records(resolve_evidence_path(runs, job.id), job.id)
     assert [record.conclusion for record in records] == ['timed_out', 'succeeded']
     assert records[-1].requested_model == 'codex-test'
 
@@ -296,7 +304,9 @@ def test_run_issue_review_dispatches_claude_code_adapter(
 
     assert finished.state is RunState.APPROVED
     assert len(calls) == 1
-    assert read_records(runs / job.id, job.id)[0].effective_models == ('claude-test',)
+    assert read_records(resolve_evidence_path(runs, job.id), job.id)[
+        0
+    ].effective_models == ('claude-test',)
 
 
 def test_run_issue_review_rejects_change_during_review(
@@ -328,7 +338,7 @@ def test_run_issue_review_rejects_change_during_review(
         )
 
     assert store.get_issue(job.id).state is RunState.FAILED
-    records = read_records(runs / job.id, job.id)
+    records = read_records(resolve_evidence_path(runs, job.id), job.id)
     assert records[0].conclusion == 'failed'
     assert 'changed during review' in Path(records[0].stderr_path).read_text()
 
@@ -368,9 +378,14 @@ def test_run_issue_review_retries_failed_attempt_for_same_snapshot(
     )
 
     request = json.loads(
-        (runs / job.id / 'iterations' / '000001' / 'request.json').read_text()
+        (
+            resolve_evidence_path(runs, job.id)
+            / 'iterations'
+            / '000001'
+            / 'request.json'
+        ).read_text()
     )
-    records = read_records(runs / job.id, job.id)
+    records = read_records(resolve_evidence_path(runs, job.id), job.id)
     assert finished.state is RunState.APPROVED
     assert request['objective'] == 'Review readiness.'
     assert [(record.attempt, record.conclusion) for record in records] == [
@@ -415,7 +430,12 @@ def test_revised_issue_after_failure_starts_without_missing_prior_result(
 
     assert finished.iteration == 2
     request = json.loads(
-        (runs / job.id / 'iterations' / '000002' / 'request.json').read_text()
+        (
+            resolve_evidence_path(runs, job.id)
+            / 'iterations'
+            / '000002'
+            / 'request.json'
+        ).read_text()
     )
     assert request['prior_review'] is None
 
@@ -471,7 +491,7 @@ def test_run_issue_review_recovers_after_terminal_state_write_failure(
     )
 
     assert recovered.state is RunState.APPROVED
-    assert len(read_records(runs / job.id, job.id)) == 1
+    assert len(read_records(resolve_evidence_path(runs, job.id), job.id)) == 1
 
 
 def test_run_issue_review_does_not_relaunch_running_attempt(
@@ -483,7 +503,7 @@ def test_run_issue_review_does_not_relaunch_running_attempt(
     reviewing = replace(job, state=RunState.REVIEWING, iteration=1)
     store.update_issue(reviewing, RunState.QUEUED)
     issue_review._start_invocation(
-        runs / job.id,
+        resolve_evidence_path(runs, job.id),
         reviewing,
         1,
         agent='codex',
@@ -504,7 +524,7 @@ def test_run_issue_review_does_not_relaunch_running_attempt(
             command=(str(tmp_path / 'must-not-run'),),
         )
 
-    assert len(read_records(runs / job.id, job.id)) == 1
+    assert len(read_records(resolve_evidence_path(runs, job.id), job.id)) == 1
 
 
 def test_run_issue_review_rejects_nested_evidence_symlink(
@@ -515,7 +535,7 @@ def test_run_issue_review_rejects_nested_evidence_symlink(
     store, job, runs = setup_job(tmp_path)
     outside = tmp_path / 'outside'
     outside.mkdir()
-    (runs / job.id / 'iterations').symlink_to(outside)
+    (resolve_evidence_path(runs, job.id) / 'iterations').symlink_to(outside)
     monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
 
     with pytest.raises(IssueReviewError, match='contains a symlink'):
@@ -539,7 +559,9 @@ def test_run_issue_review_does_not_accept_preexisting_result(
     """Do not overwrite or reuse a result that predates the invocation."""
 
     store, job, runs = setup_job(tmp_path)
-    result = runs / job.id / 'iterations' / '000001' / 'result.json'
+    result = (
+        resolve_evidence_path(runs, job.id) / 'iterations' / '000001' / 'result.json'
+    )
     result.parent.mkdir(parents=True)
     result.write_text('{"verdict":"ready"}\n')
     monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
@@ -567,7 +589,7 @@ def test_publish_issue_feedback_is_idempotent(
     """Publish current feedback once and retain its provider identity."""
 
     store, job, runs = setup_job(tmp_path)
-    iteration = runs / job.id / 'iterations' / '000001'
+    iteration = resolve_evidence_path(runs, job.id) / 'iterations' / '000001'
     iteration.mkdir(parents=True)
     (iteration / 'feedback.md').write_text('Review feedback.\n')
     reviewed = replace(job, state=RunState.CHANGES_REQUESTED, iteration=1)
@@ -628,7 +650,7 @@ def test_issue_review_records_timeout_truthfully(
             command=('reviewer',),
         )
 
-    record = read_records(runs / job.id, job.id)[0]
+    record = read_records(resolve_evidence_path(runs, job.id), job.id)[0]
     assert record.conclusion == 'timed_out'
     assert record.timed_out is True
     assert Path(record.stdout_path).read_text() == 'partial'

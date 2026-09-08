@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, fields, replace
 from importlib.metadata import version
 from pathlib import Path
@@ -26,6 +27,7 @@ from agent_orchestra.cli import (
     build_parser,
     main,
 )
+from agent_orchestra.evidence import resolve_evidence_path
 from agent_orchestra.invocations import (
     InvocationIdentity,
     InvocationRecord,
@@ -51,6 +53,12 @@ class CliRunContext:
     store: RunStore
     run: Run
     runs_directory: Path
+
+
+def evidence_directory(context: CliRunContext) -> Path:
+    """Return the canonical evidence directory for one CLI test job."""
+
+    return resolve_evidence_path(context.runs_directory, str(context.run.id))
 
 
 @pytest.fixture
@@ -111,7 +119,7 @@ def resume_arguments(context: CliRunContext) -> list[str]:
     ]
 
 
-def create_worker_run(tmp_path: Path) -> CliRunContext:
+def create_worker_run(tmp_path: Path, *, job_id: str | None = None) -> CliRunContext:
     """Create one persisted changed run for direct worker tests."""
 
     repo = tmp_path / 'repo'
@@ -124,6 +132,8 @@ def create_worker_run(tmp_path: Path) -> CliRunContext:
     digest = _working_tree_digest(repo, 'HEAD')
     assert digest is not None
     run = Run.create_local(repo, repo, 'HEAD', 'HEAD', digest)
+    if job_id is not None:
+        run = replace(run, id=job_id)
     store.add(run)
     return CliRunContext(
         repo=repo,
@@ -1073,6 +1083,34 @@ def test_jobs_rejects_unknown_state_with_stable_error(
     assert not database.exists()
 
 
+def test_run_writes_to_identifier_shard_in_non_utc_timezone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep end-to-end placement bound to the ID rather than local time."""
+
+    original_timezone = os.environ.get('TZ')
+    try:
+        monkeypatch.setenv('TZ', 'Pacific/Kiritimati')
+        time.tzset()
+        job_id = '20260909T063000Z-b4517e73'
+        context = create_worker_run(tmp_path, job_id=job_id)
+        reviewer = tmp_path / 'reviewer.py'
+        write_reviewer(reviewer, 'approved')
+
+        result = main(run_arguments(context, reviewer=reviewer))
+    finally:
+        if original_timezone is None:
+            monkeypatch.delenv('TZ', raising=False)
+        else:
+            monkeypatch.setenv('TZ', original_timezone)
+        time.tzset()
+
+    assert result == 0
+    assert evidence_directory(context) == context.runs_directory / '2026/09/09' / job_id
+    assert (evidence_directory(context) / 'execution.json').is_file()
+    assert not (context.runs_directory / job_id).exists()
+
+
 def test_job_selects_one_job_by_id(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1085,8 +1123,19 @@ def test_job_selects_one_job_by_id(
     second = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'second')
     store.add(first)
     store.add(second)
+    runs = tmp_path / 'runs'
+    resolve_evidence_path(runs, str(first.id)).mkdir(parents=True)
 
-    result = main(['--database', str(database), 'job', str(first.id)])
+    result = main(
+        [
+            '--database',
+            str(database),
+            'job',
+            str(first.id),
+            '--runs-directory',
+            str(runs),
+        ]
+    )
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
@@ -1105,12 +1154,23 @@ def test_job_reads_persisted_review_state_without_initializing(
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
+    runs = tmp_path / 'runs'
+    resolve_evidence_path(runs, str(run.id)).mkdir(parents=True)
     with sqlite3.connect(database) as connection:
         connection.execute(
             "UPDATE runs SET state = 'awaiting_review' WHERE id = ?", (str(run.id),)
         )
 
-    result = main(['--database', str(database), 'job', str(run.id)])
+    result = main(
+        [
+            '--database',
+            str(database),
+            'job',
+            str(run.id),
+            '--runs-directory',
+            str(runs),
+        ]
+    )
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
@@ -1156,7 +1216,7 @@ def test_task_commands_share_resolved_default_runs_directory(
 
     job = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     RunStore(database).add(job)
-    (actual_parent / 'runs' / str(job.id)).mkdir(parents=True)
+    resolve_evidence_path(actual_parent / 'runs', str(job.id)).mkdir(parents=True)
 
     for command, identifier in (
         ('job', str(job.id)),
@@ -1215,7 +1275,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
         enqueued_run.store.get(enqueued_run.run.id).state
         is RunState.AWAITING_COMMIT_AUTHORIZATION
     )
-    run_directory = enqueued_run.runs_directory / str(enqueued_run.run.id)
+    run_directory = evidence_directory(enqueued_run)
     assert (run_directory / 'messages/000001-review-request.json').is_file()
     assert (run_directory / 'messages/000002-review-result.json').is_file()
     assert (run_directory / 'artifacts/review-0001.md').is_file()
@@ -1299,7 +1359,7 @@ def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
     )
 
     assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
-    run_directory = context.runs_directory / str(context.run.id)
+    run_directory = evidence_directory(context)
     invocation = json.loads(
         (run_directory / 'invocations/000001-reviewer.json').read_text()
     )
@@ -1336,11 +1396,7 @@ def test_run_preserves_non_utf8_reviewer_output(
     result = main(run_arguments(enqueued_run, reviewer=reviewer))
 
     assert result == 0
-    stdout_log = (
-        enqueued_run.runs_directory
-        / str(enqueued_run.run.id)
-        / 'logs/000001-reviewer.stdout.log'
-    )
+    stdout_log = evidence_directory(enqueued_run) / 'logs/000001-reviewer.stdout.log'
     assert stdout_log.read_bytes() == b'caf\xe9 latin-1 byte\n'
 
 
@@ -1382,7 +1438,7 @@ def test_worker_persists_interrupted_state(
 
     assert context.store.get(context.run.id).state is RunState.INTERRUPTED
     invocation_files = sorted(
-        (context.runs_directory / str(context.run.id) / 'invocations').glob('*.json')
+        (evidence_directory(context) / 'invocations').glob('*.json')
     )
     invocation_names = [path.name for path in invocation_files]
     invocation = json.loads(invocation_files[-1].read_text())
@@ -1397,9 +1453,7 @@ def test_worker_persists_interrupted_state(
     assert (
         sorted(
             path.name
-            for path in (
-                context.runs_directory / str(context.run.id) / 'invocations'
-            ).glob('*.json')
+            for path in (evidence_directory(context) / 'invocations').glob('*.json')
         )
         == invocation_names
     )
@@ -1443,7 +1497,7 @@ def test_worker_finalizes_interruption_after_activation(
         )
 
     invocation_files = sorted(
-        (context.runs_directory / str(context.run.id) / 'invocations').glob('*.json')
+        (evidence_directory(context) / 'invocations').glob('*.json')
     )
     invocation = json.loads(invocation_files[-1].read_text())
     assert invocation['role'] == interrupted_role
@@ -1563,7 +1617,7 @@ def test_worker_remediates_and_reviews_new_digest(
     assert result.state.value == 'awaiting_commit_authorization'
     assert result.iteration == 2
     assert result.diff_digest != digest
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     assert sorted(path.name for path in messages.iterdir()) == [
         '000001-review-request.json',
         '000002-review-result.json',
@@ -1573,7 +1627,7 @@ def test_worker_remediates_and_reviews_new_digest(
         '000006-review-result.json',
     ]
     integrity = json.loads(
-        (context.runs_directory / context.run.id / '.integrity.json').read_text()
+        (evidence_directory(context) / '.integrity.json').read_text()
     )
     indexed_types = {
         entry['path']: entry['evidence_type'] for entry in integrity['entries']
@@ -1620,12 +1674,10 @@ def test_resume_validation_required_continues_same_run(
 
     assert blocked.id == context.run.id
     assert blocked.state is RunState.VALIDATION_REQUIRED
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     assert (messages / '000004-developer-handoff.json').is_file()
     assert not (
-        context.runs_directory
-        / context.run.id
-        / 'logs/000004-rejected-developer-handoff.json'
+        evidence_directory(context) / 'logs/000004-rejected-developer-handoff.json'
     ).exists()
 
     result = main(resume_arguments(context))
@@ -1699,7 +1751,7 @@ def test_resume_retries_an_interrupted_validation_required_recovery(
         context.store.get(context.run.id).state
         is RunState.AWAITING_COMMIT_AUTHORIZATION
     )
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     assert sorted(path.name for path in messages.iterdir()) == [
         '000001-review-request.json',
         '000002-review-result.json',
@@ -1710,7 +1762,7 @@ def test_resume_retries_an_interrupted_validation_required_recovery(
         '000007-review-request.json',
         '000008-review-result.json',
     ]
-    invocations = context.runs_directory / context.run.id / 'invocations'
+    invocations = evidence_directory(context) / 'invocations'
     retry = json.loads((invocations / '000005-developer-attempt-0002.json').read_text())
     assert retry['attempt'] == 2
     assert retry['timed_out'] is False
@@ -1751,8 +1803,7 @@ def test_resume_archives_rejected_developer_handoff_by_attempt(
         'resume_evidence_invalid'
     )
     rejected = (
-        context.runs_directory
-        / context.run.id
+        evidence_directory(context)
         / 'logs/000006-rejected-developer-handoff-attempt-0001.json'
     )
     assert rejected.is_file()
@@ -1780,7 +1831,7 @@ def test_resume_rejects_handoff_with_a_non_remediation_parent(
         digest_worktree=_working_tree_digest,
     )
 
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     review_result = json.loads((messages / '000002-review-result.json').read_text())
     handoff_path = messages / '000004-developer-handoff.json'
     handoff = json.loads(handoff_path.read_text())
@@ -1815,7 +1866,7 @@ def test_resume_rejects_handoff_linked_to_a_different_review_result(
         digest_worktree=_working_tree_digest,
     )
 
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     first_request = json.loads((messages / '000001-review-request.json').read_text())
     first_result = json.loads((messages / '000002-review-result.json').read_text())
     remediation = json.loads((messages / '000003-remediation-request.json').read_text())
@@ -1895,7 +1946,7 @@ def test_resume_rejects_tampered_review_exchange_payload_links(
             digest_worktree=_working_tree_digest,
         )
 
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     first_request_path = messages / '000001-review-request.json'
     first_result_path = messages / '000002-review-result.json'
     repeat_request_path = messages / '000005-review-request.json'
@@ -1952,9 +2003,7 @@ def test_worker_stops_bounded_non_progress(
         )
 
     assert context.store.get(context.run.id).state is RunState.FAILED
-    failure = json.loads(
-        (context.runs_directory / context.run.id / 'failure.json').read_text()
-    )
+    failure = json.loads((evidence_directory(context) / 'failure.json').read_text())
     assert failure['run_id'] == context.run.id
     assert failure['state'] == 'failed'
     assert failure['error'] == {'code': 'worker_error', 'message': expected}
@@ -1985,11 +2034,11 @@ def test_worker_surfaces_developer_disagreement_for_human_decision(
 
     assert result.state.value == 'changes_requested'
     evidence = json.loads(
-        (context.runs_directory / context.run.id / 'decision-required.json').read_text()
+        (evidence_directory(context) / 'decision-required.json').read_text()
     )
     assert evidence['reason']['code'] == 'developer_disagreement'
     assert 'disputed every finding' in evidence['reason']['message']
-    assert not (context.runs_directory / context.run.id / 'failure.json').exists()
+    assert not (evidence_directory(context) / 'failure.json').exists()
 
 
 def test_run_keeps_blocked_review_awaiting_resolution(
@@ -2033,7 +2082,7 @@ def test_run_marks_reviewer_execution_failure(
     assert result == 2
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.FAILED
     failure = json.loads(
-        (enqueued_run.runs_directory / enqueued_run.run.id / 'failure.json').read_text()
+        (evidence_directory(enqueued_run) / 'failure.json').read_text()
     )
     assert failure['error']['code'] == 'resume_execution_failed'
 
@@ -2052,9 +2101,7 @@ def test_run_marks_reviewer_timeout(
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
     invocation = json.loads(
         (
-            enqueued_run.runs_directory
-            / enqueued_run.run.id
-            / 'invocations/000001-reviewer.json'
+            evidence_directory(enqueued_run) / 'invocations/000001-reviewer.json'
         ).read_text()
     )
     assert invocation['exit_code'] is None
@@ -2085,9 +2132,7 @@ def test_resume_interrupted_reviewer_reuses_request(
     )
     capsys.readouterr()
     invocation_path = (
-        enqueued_run.runs_directory
-        / enqueued_run.run.id
-        / 'invocations/000001-reviewer.json'
+        evidence_directory(enqueued_run) / 'invocations/000001-reviewer.json'
     )
     invocation = invocation_path.read_text()
     invocation_path.write_text('{')
@@ -2102,7 +2147,7 @@ def test_resume_interrupted_reviewer_reuses_request(
     assert changed_scope['error']['code'] == 'resume_scope_changed'
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
     (enqueued_run.repo / 'tracked.txt').write_text('changed\n')
-    messages = enqueued_run.runs_directory / enqueued_run.run.id / 'messages'
+    messages = evidence_directory(enqueued_run) / 'messages'
     request_path = messages / '000001-review-request.json'
     gapped_path = messages / '000003-review-request.json'
     request_path.rename(gapped_path)
@@ -2111,9 +2156,7 @@ def test_resume_interrupted_reviewer_reuses_request(
     assert invalid_chain['error']['code'] == 'resume_evidence_invalid'
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
     gapped_path.rename(request_path)
-    execution_path = (
-        enqueued_run.runs_directory / enqueued_run.run.id / 'execution.json'
-    )
+    execution_path = evidence_directory(enqueued_run) / 'execution.json'
     execution = json.loads(execution_path.read_text())
     execution['run_id'] = '20260904T000000Z-00000000'
     execution_path.write_text(json.dumps(execution))
@@ -2140,7 +2183,7 @@ def test_resume_interrupted_reviewer_reuses_request(
         '000001-review-request.json',
         '000002-review-result.json',
     ]
-    invocations = enqueued_run.runs_directory / enqueued_run.run.id / 'invocations'
+    invocations = evidence_directory(enqueued_run) / 'invocations'
     assert sorted(path.name for path in invocations.iterdir()) == [
         '000001-reviewer-attempt-0002.json',
         '000001-reviewer.json',
@@ -2198,9 +2241,7 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
     assert counter.read_text().splitlines() == ['1']
     record = json.loads(
         (
-            enqueued_run.runs_directory
-            / enqueued_run.run.id
-            / 'invocations/000001-reviewer.json'
+            evidence_directory(enqueued_run) / 'invocations/000001-reviewer.json'
         ).read_text()
     )
     assert record['status'] == 'completed'
@@ -2348,9 +2389,7 @@ def test_resume_starts_persisted_remediation_request(
         )
     assert context.store.get(context.run.id).state is RunState.CHANGES_REQUESTED
     assert (
-        context.runs_directory
-        / context.run.id
-        / 'messages/000003-remediation-request.json'
+        evidence_directory(context) / 'messages/000003-remediation-request.json'
     ).is_file()
 
     monkeypatch.setattr(context.store, 'update', original_update)
@@ -2454,7 +2493,7 @@ def test_resume_reports_explicit_execution_failure_code(
     document = json.loads(capsys.readouterr().out)
     assert document['error']['code'] == 'resume_execution_failed'
     failure = json.loads(
-        (enqueued_run.runs_directory / enqueued_run.run.id / 'failure.json').read_text()
+        (evidence_directory(enqueued_run) / 'failure.json').read_text()
     )
     assert failure['error']['code'] == document['error']['code']
 
@@ -2477,7 +2516,7 @@ def test_resume_rejects_stale_artifact_from_interrupted_reviewer(
 
     assert main(run_arguments(enqueued_run, '--timeout', '1', reviewer=reviewer)) == 2
     capsys.readouterr()
-    run_directory = enqueued_run.runs_directory / enqueued_run.run.id
+    run_directory = evidence_directory(enqueued_run)
     artifact_path = run_directory / 'artifacts/review-0001.md'
     archived_path = (
         run_directory / 'logs/000002-rejected-review-artifact-attempt-0001.md'
@@ -2525,9 +2564,7 @@ def test_resume_interrupted_developer_reuses_remediation_request(
         )
 
     assert context.store.get(context.run.id).state is RunState.INTERRUPTED
-    invocation_path = (
-        context.runs_directory / context.run.id / 'invocations/000003-developer.json'
-    )
+    invocation_path = evidence_directory(context) / 'invocations/000003-developer.json'
     invocation = invocation_path.read_text()
     first_attempt = json.loads(invocation)
     invocation_path.write_text('{')
@@ -2542,7 +2579,7 @@ def test_resume_interrupted_developer_reuses_remediation_request(
         context.store.get(context.run.id).state
         is RunState.AWAITING_COMMIT_AUTHORIZATION
     )
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     assert sorted(path.name for path in messages.iterdir()) == [
         '000001-review-request.json',
         '000002-review-result.json',
@@ -2551,7 +2588,7 @@ def test_resume_interrupted_developer_reuses_remediation_request(
         '000005-review-request.json',
         '000006-review-result.json',
     ]
-    invocations = context.runs_directory / context.run.id / 'invocations'
+    invocations = evidence_directory(context) / 'invocations'
     assert (invocations / '000003-developer.json').is_file()
     retry = json.loads((invocations / '000003-developer-attempt-0002.json').read_text())
     assert retry['attempt'] == 2
@@ -2620,11 +2657,7 @@ def test_resume_revalidates_developer_response_without_relaunching(
         is RunState.AWAITING_COMMIT_AUTHORIZATION
     )
     record = json.loads(
-        (
-            context.runs_directory
-            / context.run.id
-            / 'invocations/000003-developer.json'
-        ).read_text()
+        (evidence_directory(context) / 'invocations/000003-developer.json').read_text()
     )
     assert record['status'] == 'completed'
     assert record['conclusion'] == 'succeeded'
@@ -2672,7 +2705,7 @@ def test_resume_writes_recovery_request_before_activating_developer(
     document = json.loads(capsys.readouterr().out)
     assert document['error']['code'] == 'resume_evidence_invalid'
     assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     assert not (messages / '000005-remediation-request.json').exists()
 
 
@@ -2720,10 +2753,10 @@ def test_resume_recovers_request_when_activation_state_did_not_persist(
             runs_directory=context.runs_directory,
             digest_worktree=_working_tree_digest,
         )
-    messages = context.runs_directory / context.run.id / 'messages'
+    messages = evidence_directory(context) / 'messages'
     assert (messages / '000005-remediation-request.json').is_file()
     assert context.store.get(context.run.id).state is RunState.VALIDATION_REQUIRED
-    invocations = context.runs_directory / context.run.id / 'invocations'
+    invocations = evidence_directory(context) / 'invocations'
     assert not (invocations / '000005-developer.json').exists()
 
     monkeypatch.setattr(context.store, 'update', original_update)
@@ -2780,12 +2813,7 @@ def test_concurrent_active_resumes_launch_one_process(
     assert active.state is expected_state
 
     sequence = 1 if role == 'reviewer' else 3
-    target = (
-        context.runs_directory
-        / context.run.id
-        / 'invocations'
-        / f'{sequence:06d}-{role}.json'
-    )
+    target = evidence_directory(context) / 'invocations' / f'{sequence:06d}-{role}.json'
     path_type = type(target)
     real_exists = path_type.exists
     barrier = Barrier(2)

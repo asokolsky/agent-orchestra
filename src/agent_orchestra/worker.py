@@ -22,6 +22,7 @@ from agent_orchestra.agents import (
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
+    evidence_root_for_job,
     finalize_evidence_write,
     record_finalized_evidence,
     recover_evidence_index,
@@ -113,6 +114,7 @@ def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
 
     try:
         path = resolve_evidence_path(runs_directory, run_id)
+        path.mkdir(parents=True, exist_ok=True)
         recover_evidence_index(runs_directory, run_id)
         recover_completed_invocation_evidence(path, run_id)
         return path
@@ -124,7 +126,9 @@ def _run_evidence_path(run_directory: Path, *parts: str) -> Path:
     """Resolve one contained path beneath an established run directory."""
 
     try:
-        return resolve_evidence_path(run_directory.parent, run_directory.name, *parts)
+        return resolve_evidence_path(
+            evidence_root_for_job(run_directory), run_directory.name, *parts
+        )
     except EvidencePathError as error:
         raise WorkerError(str(error)) from error
 
@@ -211,7 +215,7 @@ def _archive_unaccepted_response(
             else destination.parent
         )
         relocate_finalized_evidence(
-            job_directory.parent,
+            evidence_root_for_job(job_directory),
             job_directory.name,
             path,
             destination,
@@ -227,7 +231,7 @@ def _record_finalized_path(path: Path, evidence_type: EvidenceType) -> None:
         path.parent.parent if path.parent.name in structural else path.parent
     )
     record_finalized_evidence(
-        job_directory.parent,
+        evidence_root_for_job(job_directory),
         job_directory.name,
         path,
         evidence_type,
@@ -244,7 +248,7 @@ def _finalize_temporary_path(
         path.parent.parent if path.parent.name in structural else path.parent
     )
     finalize_evidence_write(
-        job_directory.parent,
+        evidence_root_for_job(job_directory),
         job_directory.name,
         temporary,
         path,
@@ -299,7 +303,7 @@ def _persist_attempt_record(path: Path, record: InvocationRecord) -> None:
         write_record(
             path,
             record,
-            evidence_root=job_directory.parent,
+            evidence_root=evidence_root_for_job(job_directory),
             job_id=job_directory.name,
         )
         if record.status == 'completed':

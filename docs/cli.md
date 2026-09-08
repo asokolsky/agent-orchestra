@@ -304,10 +304,11 @@ no process or network access.
 
 The command normalizes provider fields, computes a deterministic digest over
 title, body, labels, and state, writes `issue.json` beneath the selected
-evidence root, persists the queued job, prints its opaque ID, and exits 0. It
-does not run an agent or write to the provider. Invalid URLs, unavailable
-provider CLIs, authentication failures, missing issues, malformed responses,
-and evidence-path violations write a diagnostic to stderr and exit 2.
+evidence root's UTC date shard, persists the queued job, prints its opaque ID,
+and exits 0. It does not run an agent or write to the provider. Invalid URLs,
+unavailable provider CLIs, authentication failures, missing issues, malformed
+responses, and evidence-path violations write a diagnostic to stderr and exit
+2.
 
 ## `review-issue`
 
@@ -539,9 +540,14 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--developer-model MODEL` | Runtime default | Optional model passed to the developer adapter. |
 | `--reviewer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for review. |
 | `--reviewer-model MODEL` | Runtime default | Optional model passed to the reviewer adapter. |
-| `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | External directory for messages, artifacts, invocation records, logs, and failures. |
+| `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | External evidence root; timestamp-shaped job IDs are stored under internal `YYYY/MM/DD` shards. |
 
 The state database and evidence directory must remain outside the target worktree.
+New evidence is stored at `RUNS_DIRECTORY/YYYY/MM/DD/JOB_ID`, where the UTC
+date is derived from the opaque job ID. Evidence written directly beneath the
+runs directory by an older release may be unreachable when its ID has the
+timestamp shape; missing evidence is reported through the command's normal
+error document.
 The command verifies the current diff digest before review, after every
 read-only review, and after remediation. Approval stops at
 `awaiting_commit_authorization`; this command never commits or publishes work.
