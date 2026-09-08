@@ -41,7 +41,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "jobs": [],
   "error": null
 }
@@ -216,7 +216,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -240,7 +240,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `11`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `12`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -361,11 +361,74 @@ to remain unchanged. Repeated calls return the recorded provider message
 identity without creating another comment or note; interrupted persistence is
 recovered by finding the hidden idempotency marker on the provider.
 
+## Global settings
+
+Agent Orchestra reads `$XDG_CONFIG_HOME/agent-orchestra/config.toml`, falling
+back to `~/.config/agent-orchestra/config.toml`. The file is optional; unknown
+fields, malformed TOML, invalid paths, and a non-positive duration fail closed.
+
+```toml
+[storage]
+database = "~/.local/state/agent-orchestra/state.db"
+runs_directory = "~/.local/state/agent-orchestra/runs"
+
+[retention]
+job_evidence_days = 90
+```
+
+Precedence is command-line option, settings file, then built-in default.
+Environment variables select the XDG location but do not override individual
+values. `config show` reports each effective value and source without creating
+or migrating the database:
+
+```shell
+agent-orchestra config show
+agent-orchestra --database /var/lib/orchestra/state.db config show \
+  --runs-directory /var/lib/orchestra/runs
+```
+
+## Persistent evidence retention
+
+`prune` is a dry run unless `--apply` is present. `--older-than` accepts a
+positive whole-day duration such as `30d`; otherwise the configured duration is
+used. Only `failed`, `cancelled`, `superseded`, and `published` jobs are
+eligible, with age taken from the matching terminal transition. Active jobs and
+states requiring human action are always skipped.
+
+```shell
+agent-orchestra prune
+agent-orchestra prune --older-than 30d
+agent-orchestra prune --older-than 30d --apply
+```
+
+The default action expires external evidence only and retains SQLite history.
+It atomically writes `.retention.json` with the policy, expiry time, and prior
+integrity entries and a `pending` status before removing other files, then marks
+the cleanup `completed`. `audit --verify` returns `expired` only for a completed
+marker. An interrupted pending cleanup and a failed database cleanup are
+retryable.
+`--delete-database-records` separately requests transactional deletion of the
+job, transitions, and provider actions after evidence expiry; the job is then
+unavailable to normal queries and audit.
+
+Orphans are never selected by age. `--orphans` explicitly selects unmatched
+directories and reports their count against the chosen database. Application
+is refused when the database has no jobs or every directory is unmatched. A
+partial database read, unreadable job row, symlink, containment failure, or
+non-regular file prevents unsafe deletion. Application rechecks the exact job
+state and terminal transition under a database write transaction before each
+filesystem mutation; a changed plan item is refused.
+
+Evidence can contain source, issue, model, and process-stream content. Inspect
+previewed paths and byte counts, restrict access to both storage locations, and
+back up evidence that must survive expiry. Interrupted cleanup is retryable,
+but deleted content cannot be reconstructed without an independent backup.
+
 ## Job and task views
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 11 JSON views expose
+is one process execution. Four read-only, schema-version 12 JSON views expose
 that hierarchy:
 
 ```text
@@ -397,7 +460,7 @@ stdout and stderr paths and content.
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -454,7 +517,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-11 `job_id`,
+aliases. Callers must use the four commands above and the schema-12 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -478,7 +541,7 @@ agent-orchestra [--database DATABASE] audit JOB_ID [--verify]
 
 The command is read-only. It does not initialize or update the database,
 evidence, worktree, issue provider, or remote repo. It reports source-code and
-issue-review jobs from the same schema-11 document and never contacts GitHub or
+issue-review jobs from the same schema-12 document and never contacts GitHub or
 GitLab.
 
 Without `--verify`, indexed evidence has status `not_verified` and the document
@@ -489,7 +552,7 @@ appear as `in_progress` until their invocation completes.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Audit output contract; currently `11`. |
+| `schema_version` | Integer | Audit output contract; currently `12`. |
 | `job` | Object | Scenario-specific identity, immutable scope, state, and timestamps. |
 | `transitions` | Array | Ordered SQLite state history with the scope digest at each transition. |
 | `operations` | Array | Commit authorization, commit, publish authorization, and publication views derived from transitions. |
@@ -588,7 +651,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -597,7 +660,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `11`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `12`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -640,7 +703,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -704,7 +767,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -715,7 +778,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

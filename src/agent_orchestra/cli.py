@@ -12,7 +12,7 @@ import sys
 from datetime import UTC
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.audit import build_audit_document
@@ -41,7 +41,15 @@ from agent_orchestra.models import (
     Run,
     RunState,
 )
+from agent_orchestra.retention import (
+    RetentionError,
+    apply_prune_plan,
+    build_prune_plan,
+    parse_duration,
+    plan_document,
+)
 from agent_orchestra.schemas import SchemaValidationError
+from agent_orchestra.settings import Settings, SettingsError, load_settings
 from agent_orchestra.skill_install import (
     AgentTarget,
     SkillInstallError,
@@ -61,7 +69,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 11
+CLI_SCHEMA_VERSION = 12
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
@@ -180,16 +188,21 @@ def _working_tree_digest(repo: Path, base_sha: str) -> str | None:
     return f'sha256:{digest.hexdigest()}'
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(settings: Settings | None = None) -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
 
+    effective = settings or load_settings(
+        default_database=DEFAULT_DATABASE,
+        default_runs_directory=DEFAULT_RUNS_DIRECTORY,
+    )
+    runs_default = cast('Path', effective.runs_directory.value)
     parser = argparse.ArgumentParser(prog='agent-orchestra')
     parser.add_argument(
         '--version',
         action='version',
         version=f'%(prog)s {_distribution_version()}',
     )
-    parser.add_argument('--database', type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument('--database', type=Path, default=effective.database.value)
     commands = parser.add_subparsers(dest='command', required=True)
 
     commands.add_parser('init', help='initialize the local state database')
@@ -214,9 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
         'enqueue-issue', help='capture one GitHub or GitLab issue for review'
     )
     enqueue_issue.add_argument('issue_url')
-    enqueue_issue.add_argument(
-        '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
-    )
+    enqueue_issue.add_argument('--runs-directory', type=Path, default=runs_default)
 
     review_issue = commands.add_parser(
         'review-issue', help='review a captured issue for implementation readiness'
@@ -230,9 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--reviewer-agent', choices=('codex', 'claude-code'), default='codex'
     )
     review_issue.add_argument('--reviewer-model')
-    review_issue.add_argument(
-        '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
-    )
+    review_issue.add_argument('--runs-directory', type=Path, default=runs_default)
     review_issue.set_defaults(reviewer_command=())
 
     publish_feedback = commands.add_parser(
@@ -242,9 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_feedback.add_argument(
         '--authorize', action='store_true', help='authorize this provider write'
     )
-    publish_feedback.add_argument(
-        '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
-    )
+    publish_feedback.add_argument('--runs-directory', type=Path, default=runs_default)
 
     jobs = commands.add_parser('jobs', help='list stored jobs')
     jobs.add_argument(
@@ -262,20 +269,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     job = commands.add_parser('job', help='show one stored job')
     job.add_argument('job_id')
-    job.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+    job.add_argument('--runs-directory', type=Path, default=runs_default)
 
     tasks = commands.add_parser('tasks', help='show one job task history')
     tasks.add_argument('job_id')
-    tasks.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+    tasks.add_argument('--runs-directory', type=Path, default=runs_default)
 
     task = commands.add_parser('task', help='show one task and its attempts')
     task.add_argument('task_id')
-    task.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+    task.add_argument('--runs-directory', type=Path, default=runs_default)
 
     audit = commands.add_parser('audit', help='audit one job and its durable evidence')
     audit.add_argument('job_id')
     audit.add_argument('--verify', action='store_true')
-    audit.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+    audit.add_argument('--runs-directory', type=Path, default=runs_default)
 
     run = commands.add_parser('run', help='run a bounded review-remediation loop')
     run.add_argument('job_id')
@@ -294,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         '--runs-directory',
         type=Path,
-        default=DEFAULT_RUNS_DIRECTORY,
+        default=runs_default,
     )
     run.set_defaults(reviewer_command=())
 
@@ -303,8 +310,20 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument(
         '--runs-directory',
         type=Path,
-        default=DEFAULT_RUNS_DIRECTORY,
+        default=runs_default,
     )
+
+    config = commands.add_parser('config', help='show effective global settings')
+    config_commands = config.add_subparsers(dest='config_command', required=True)
+    config_show = config_commands.add_parser('show', help='show effective settings')
+    config_show.add_argument('--runs-directory', type=Path, default=runs_default)
+
+    prune = commands.add_parser('prune', help='preview or apply evidence retention')
+    prune.add_argument('--runs-directory', type=Path, default=runs_default)
+    prune.add_argument('--older-than')
+    prune.add_argument('--orphans', action='store_true')
+    prune.add_argument('--apply', action='store_true')
+    prune.add_argument('--delete-database-records', action='store_true')
 
     skills = commands.add_parser('skills', help='manage bundled agent skills')
     skill_commands = skills.add_subparsers(dest='skill_command', required=True)
@@ -1242,6 +1261,78 @@ def _install_skills(args: argparse.Namespace) -> int:
     return 0
 
 
+def _config_show(
+    args: argparse.Namespace, settings: Settings, arguments: list[str]
+) -> int:
+    """Print deterministic effective settings and their precedence sources."""
+
+    database_source = (
+        'command_line' if '--database' in arguments else settings.database.source
+    )
+    runs_source = (
+        'command_line'
+        if '--runs-directory' in arguments
+        else settings.runs_directory.source
+    )
+    print(
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'config_file': str(settings.path),
+                'settings': {
+                    'storage.database': {
+                        'value': str(args.database),
+                        'source': database_source,
+                    },
+                    'storage.runs_directory': {
+                        'value': str(args.runs_directory),
+                        'source': runs_source,
+                    },
+                    'retention.job_evidence_days': {
+                        'value': settings.job_evidence_days.value,
+                        'source': settings.job_evidence_days.source,
+                    },
+                },
+                'error': None,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _prune(args: argparse.Namespace, store: RunStore, settings: Settings) -> int:
+    """Preview or apply one explicit persistent-evidence retention plan."""
+
+    try:
+        configured_days = cast('int', settings.job_evidence_days.value)
+        days = parse_duration(args.older_than) if args.older_than else configured_days
+        plan = build_prune_plan(
+            store,
+            args.database,
+            args.runs_directory,
+            older_than_days=days,
+            include_orphans=args.orphans,
+            delete_database_records=args.delete_database_records,
+        )
+        outcomes = apply_prune_plan(plan) if args.apply else ()
+    except (OSError, RetentionError) as error:
+        print(
+            json.dumps(
+                {
+                    'schema_version': CLI_SCHEMA_VERSION,
+                    'error': {'code': 'prune_unsafe', 'message': str(error)},
+                },
+                indent=2,
+            )
+        )
+        return 2
+    print(
+        json.dumps(plan_document(plan, applied=args.apply, outcomes=outcomes), indent=2)
+    )
+    return 2 if any(item['status'] == 'failed' for item in outcomes) else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
     """Run the command-line interface."""
 
@@ -1254,7 +1345,23 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         separator = arguments.index('--')
         reviewer_command = arguments[separator + 1 :]
         arguments = arguments[:separator]
-    args = build_parser().parse_args(arguments)
+    try:
+        settings = load_settings(
+            default_database=DEFAULT_DATABASE,
+            default_runs_directory=DEFAULT_RUNS_DIRECTORY,
+        )
+    except SettingsError as error:
+        print(
+            json.dumps(
+                {
+                    'schema_version': CLI_SCHEMA_VERSION,
+                    'error': {'code': 'invalid_settings', 'message': str(error)},
+                },
+                indent=2,
+            )
+        )
+        return 2
+    args = build_parser(settings).parse_args(arguments)
     if args.command in {'run', 'review-issue'}:
         args.reviewer_command = reviewer_command
     store = RunStore(args.database)
@@ -1283,6 +1390,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _task(args, store)
     if args.command == 'audit':
         return _audit(args, store)
+    if args.command == 'config' and args.config_command == 'show':
+        return _config_show(args, settings, arguments)
+    if args.command == 'prune':
+        return _prune(args, store, settings)
     if args.command == 'run':
         return _run(args, store)
     if args.command == 'resume':

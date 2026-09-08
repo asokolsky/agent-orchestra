@@ -700,7 +700,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 11,
+        'schema_version': 12,
         'directory': str(projects),
         'jobs': [
             {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -914,7 +914,7 @@ def test_jobs_lists_persisted_job(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 11,\n  "jobs": [\n    {\n')
+    assert output.startswith('{\n  "schema_version": 12,\n  "jobs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
@@ -929,7 +929,7 @@ def test_jobs_lists_persisted_job(
     }
     assert set(document['jobs'][0]) == expected_fields
     assert document == {
-        'schema_version': 11,
+        'schema_version': 12,
         'jobs': [
             {
                 'job_id': str(run.id),
@@ -1073,7 +1073,7 @@ def test_jobs_rejects_unknown_state_with_stable_error(
 
     assert result == 2
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 11,
+        'schema_version': 12,
         'error': {
             'code': 'invalid_job_state',
             'message': 'unknown durable job state: needs-coffee',
@@ -1138,7 +1138,7 @@ def test_job_selects_one_job_by_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 11
+    assert document['schema_version'] == 12
     assert document['job']['job_id'] == str(first.id)
     assert document['job']['current'] == []
 
@@ -1173,7 +1173,7 @@ def test_job_reads_persisted_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 11
+    assert document['schema_version'] == 12
     assert document['job']['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -1194,7 +1194,7 @@ def test_jobs_lists_empty_jobs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 11,
+        'schema_version': 12,
         'jobs': [],
         'error': None,
     }
@@ -1319,7 +1319,7 @@ def test_read_only_views_report_unrecognized_job_values(
     for command in commands:
         assert main(['--database', str(database), *command]) == 2
         document = json.loads(capsys.readouterr().out)
-        assert document['schema_version'] == 11
+        assert document['schema_version'] == 12
         assert document['error']['code'] == code
         if command[0] == 'jobs':
             listed_ids = {item['job_id'] for item in document['jobs']}
@@ -1445,7 +1445,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
         'logs/000001-reviewer.stderr.log',
     } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 11,
+        'schema_version': 12,
         'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1813,7 +1813,7 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 11,
+        'schema_version': 12,
         'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,

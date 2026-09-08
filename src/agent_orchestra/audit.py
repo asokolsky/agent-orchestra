@@ -9,7 +9,7 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -40,7 +40,10 @@ from agent_orchestra.worker import WorkerError, read_message_chain
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-VerificationResult = Literal['verified', 'failed', 'unverifiable', 'incomplete']
+VerificationResult = Literal[
+    'verified', 'failed', 'unverifiable', 'incomplete', 'expired'
+]
+RETENTION_MARKER = '.retention.json'
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +151,48 @@ def _finding(code: str, message: str, path: str | None = None) -> AuditFinding:
     """Construct one audit finding."""
 
     return AuditFinding(code=code, message=message, path=path)
+
+
+def _read_retention_marker(
+    root: Path, job_id: str
+) -> tuple[dict[str, object] | None, AuditFinding | None]:
+    """Read and validate an intentional evidence-expiry marker."""
+
+    path = resolve_evidence_path(root, job_id, RETENTION_MARKER)
+    if not path.is_file():
+        return None, None
+    try:
+        document = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as error:
+        return None, _finding(
+            'retention_marker_malformed', str(error), RETENTION_MARKER
+        )
+    if (
+        not isinstance(document, dict)
+        or set(document)
+        != {
+            'schema_version',
+            'job_id',
+            'status',
+            'database_cleanup_requested',
+            'expired_at',
+            'policy',
+            'evidence',
+        }
+        or document.get('schema_version') != 1
+        or document.get('job_id') != job_id
+        or document.get('status') not in {'pending', 'completed'}
+        or not isinstance(document.get('database_cleanup_requested'), bool)
+        or not isinstance(document.get('expired_at'), str)
+        or not isinstance(document.get('policy'), dict)
+        or not isinstance(document.get('evidence'), list)
+    ):
+        return None, _finding(
+            'retention_marker_malformed',
+            'retention marker has invalid fields',
+            RETENTION_MARKER,
+        )
+    return document, None
 
 
 def _read_index(
@@ -772,6 +817,8 @@ def _result(
         'role_mismatch',
         'scope_digest_mismatch',
         'unindexed_evidence',
+        'retention_marker_malformed',
+        'unexpected_evidence_after_expiry',
     }
     unverifiable = {
         'integrity_index_missing',
@@ -785,6 +832,8 @@ def _result(
         return 'failed'
     if codes & unverifiable:
         return 'unverifiable'
+    if 'evidence_expired' in codes:
+        return 'expired'
     if in_progress:
         return 'incomplete'
     return 'verified'
@@ -814,6 +863,91 @@ def build_audit_document(
                     f'transitions/{index}/{field}',
                 )
             )
+    retention, retention_error = _read_retention_marker(root, job_id)
+    if retention_error is not None:
+        findings.append(retention_error)
+    if retention is not None and retention['status'] == 'pending':
+        findings.append(
+            _finding(
+                'retention_cleanup_in_progress',
+                'evidence expiry was interrupted and can be retried',
+                RETENTION_MARKER,
+            )
+        )
+        pending_document: dict[str, object] = {
+            'schema_version': 12,
+            'job': _job_document(job),
+            'transitions': [_transition_document(item) for item in transitions],
+            'operations': _derived_operations(transitions),
+            'tasks': [],
+            'evidence': [
+                {**entry, 'status': 'in_progress'}
+                for entry in cast('list[object]', retention['evidence'])
+                if isinstance(entry, dict)
+            ],
+            'integrity': {
+                'schema_version': 1,
+                'backfilled_at': None,
+                'expired_at': None,
+                'policy': retention['policy'],
+            },
+            'history': [],
+            'provider_actions': [_action_document(item) for item in actions],
+            'findings': [asdict(item) for item in findings],
+            'error': None,
+        }
+        if verify:
+            pending_document['result'] = 'incomplete'
+        return pending_document
+    if retention is not None and retention['status'] == 'completed':
+        job_directory = resolve_evidence_path(root, job_id)
+        unexpected = sorted(
+            path.name
+            for path in job_directory.iterdir()
+            if path.name != RETENTION_MARKER
+        )
+        if unexpected:
+            findings.append(
+                _finding(
+                    'unexpected_evidence_after_expiry',
+                    'completed expiry directory contains unexpected entries: '
+                    + ', '.join(unexpected),
+                    unexpected[0],
+                )
+            )
+        findings.append(
+            _finding(
+                'evidence_expired',
+                f'evidence intentionally expired at {retention["expired_at"]}',
+                RETENTION_MARKER,
+            )
+        )
+        expired_evidence = [
+            {**entry, 'status': 'expired'}
+            for entry in cast('list[object]', retention['evidence'])
+            if isinstance(entry, dict)
+        ]
+        expired_document: dict[str, object] = {
+            'schema_version': 12,
+            'job': _job_document(job),
+            'transitions': [_transition_document(item) for item in transitions],
+            'operations': _derived_operations(transitions),
+            'tasks': [],
+            'evidence': expired_evidence,
+            'integrity': {
+                'schema_version': 1,
+                'backfilled_at': None,
+                'expired_at': retention['expired_at'],
+                'policy': retention['policy'],
+            },
+            'history': [],
+            'provider_actions': [_action_document(item) for item in actions],
+            'findings': [asdict(item) for item in findings],
+            'error': None,
+        }
+        if verify:
+            expired_document['result'] = _result(findings, in_progress=False)
+        return expired_document
     entries, backfilled_at, index_findings = _read_index(root, job_id)
     findings.extend(index_findings)
     evidence: list[dict[str, object]] = []
@@ -862,7 +996,7 @@ def build_audit_document(
             if transition.scope_digest is None
         )
     document: dict[str, object] = {
-        'schema_version': 11,
+        'schema_version': 12,
         'job': _job_document(job),
         'transitions': [_transition_document(item) for item in transitions],
         'operations': _derived_operations(transitions),

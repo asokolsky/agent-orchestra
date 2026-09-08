@@ -58,6 +58,10 @@ formatting and linting, mypy checks types, and pytest runs the test suite.
   tasks, attempts, canonical message summaries, and provider actions for either
   workflow. Optional local verification checks the finalized evidence index and
   hashes without reading process-stream contents or contacting a provider.
+- The implemented [settings and retention commands](docs/cli.md#global-settings)
+  provide XDG-aware storage defaults, effective-value inspection, and a
+  dry-run-first policy for expiring terminal job evidence. Database cleanup and
+  unmatched-directory cleanup require separate explicit options.
 - The designed [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
   starts from a pull-request URL and reviews one exact remote head. Remote
   pull-request enqueueing and provider-side review actions are not implemented.
@@ -307,6 +311,8 @@ The current implementation provides:
   directory of repos, and inspect jobs and tasks;
 - commands to capture GitHub and GitLab issues and run digest-bound,
   provider-neutral readiness reviews;
+- XDG-aware persistent settings plus dry-run-first evidence retention with
+  auditable expiry markers and fail-closed orphan handling;
 - a Python-native installer for Codex and Claude Code skills;
 - versioned developer and reviewer skills under `skills/`;
 - built-in Codex and Claude Code adapters for developer and reviewer roles,
