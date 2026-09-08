@@ -15,6 +15,7 @@ from uuid import uuid4
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
+    evidence_root_for_job,
     finalize_evidence_write,
     record_finalized_evidence,
     resolve_evidence_path,
@@ -528,7 +529,9 @@ def _safe_file(root: Path, value: str, *, description: str) -> Path:
         candidate = root / candidate
     try:
         relative = candidate.relative_to(root)
-        resolved = resolve_evidence_path(root.parent, root.name, *relative.parts)
+        resolved = resolve_evidence_path(
+            evidence_root_for_job(root), root.name, *relative.parts
+        )
     except EvidencePathError, ValueError:
         _fail(f'{description} escapes the run directory')
     return resolved.resolve()
@@ -539,7 +542,8 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
 
     root = run_directory.resolve()
     try:
-        manifests = resolve_evidence_path(root.parent, root.name, 'invocations')
+        evidence_root = evidence_root_for_job(root)
+        manifests = resolve_evidence_path(evidence_root, root.name, 'invocations')
     except EvidencePathError:
         _fail(INVOCATION_DIRECTORY_ESCAPE)
     if not manifests.is_dir():
@@ -549,7 +553,7 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
     for candidate_path in sorted(manifests.glob('*.json')):
         try:
             path = resolve_evidence_path(
-                root.parent, root.name, 'invocations', candidate_path.name
+                evidence_root, root.name, 'invocations', candidate_path.name
             )
         except EvidencePathError:
             _fail(INVOCATION_RECORD_ESCAPE)
@@ -623,19 +627,28 @@ def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> N
                 else f'{task_stem}-attempt-{record.attempt:04d}'
             )
         manifest = resolve_evidence_path(
-            run_directory.parent, run_id, 'invocations', f'{stem}.json'
+            evidence_root_for_job(run_directory),
+            run_id,
+            'invocations',
+            f'{stem}.json',
         )
         expected_streams = (
             (
                 resolve_evidence_path(
-                    run_directory.parent, run_id, 'logs', f'{stem}.stdout.log'
+                    evidence_root_for_job(run_directory),
+                    run_id,
+                    'logs',
+                    f'{stem}.stdout.log',
                 ),
                 Path(record.stdout_path),
                 'process_stdout',
             ),
             (
                 resolve_evidence_path(
-                    run_directory.parent, run_id, 'logs', f'{stem}.stderr.log'
+                    evidence_root_for_job(run_directory),
+                    run_id,
+                    'logs',
+                    f'{stem}.stderr.log',
                 ),
                 Path(record.stderr_path),
                 'process_stderr',
@@ -646,7 +659,7 @@ def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> N
         ):
             _fail(f'invocation record does not match evidence filenames: {stem}')
         record_finalized_evidence(
-            run_directory.parent,
+            evidence_root_for_job(run_directory),
             run_id,
             manifest,
             'invocation_record',
@@ -656,7 +669,7 @@ def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> N
             if not expected.is_file():
                 _fail(f'completed invocation stream is missing: {expected.name}')
             record_finalized_evidence(
-                run_directory.parent,
+                evidence_root_for_job(run_directory),
                 run_id,
                 expected,
                 cast('EvidenceType', kind),

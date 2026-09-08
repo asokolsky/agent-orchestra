@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,11 @@ HASH_CHUNK_SIZE = 1024 * 1024
 INTEGRITY_INDEX = '.integrity.json'
 INTEGRITY_LOCK = '.integrity.lock'
 INTEGRITY_PENDING = '.integrity.pending.json'
+SHARDED_JOB_ID = re.compile(
+    r'^(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])'
+    r'(?P<day>0[1-9]|[12]\d|3[01])T'
+    r'(?:[01]\d|2[0-3])(?:[0-5]\d){2}Z-[0-9a-f]{8}$'
+)
 EvidenceType = Literal[
     'decision_required',
     'developer_handoff',
@@ -76,8 +82,27 @@ class IntegrityEntry:
     finalized_at: str
 
 
+def _job_shard(job_id: str) -> tuple[str, str, str] | None:
+    """Return the UTC date shard encoded in a generated job identifier."""
+
+    match = SHARDED_JOB_ID.fullmatch(job_id)
+    if match is None:
+        return None
+    return match.group('year'), match.group('month'), match.group('day')
+
+
+def evidence_root_for_job(job_directory: Path) -> Path:
+    """Return the configured evidence root for an established job directory."""
+
+    directory = job_directory.expanduser().absolute()
+    shard = _job_shard(directory.name)
+    if shard is not None and directory.parent.parts[-3:] == shard:
+        return directory.parents[3]
+    return directory.parent
+
+
 def resolve_evidence_path(root: Path, job_id: str, *parts: str) -> Path:
-    """Return a job-contained path without following symlinked components."""
+    """Return a flat or UTC-sharded job path without following symlinks."""
 
     evidence_root = root.expanduser().resolve()
     if not job_id or Path(job_id).name != job_id or job_id in {'.', '..'}:
@@ -93,7 +118,13 @@ def resolve_evidence_path(root: Path, job_id: str, *parts: str) -> Path:
     ):
         message = 'evidence path escapes the selected job'
         raise EvidencePathError(message)
-    candidate = evidence_root.joinpath(*relative_parts)
+    shard = _job_shard(job_id)
+    job_directory = (
+        evidence_root / job_id
+        if shard is None
+        else evidence_root.joinpath(*shard, job_id)
+    )
+    candidate = job_directory.joinpath(*parts)
     current = evidence_root
     for part in candidate.relative_to(evidence_root).parts:
         current /= part
@@ -102,7 +133,7 @@ def resolve_evidence_path(root: Path, job_id: str, *parts: str) -> Path:
                 f'evidence path contains a symlink and escapes containment: {current}'
             )
             raise EvidencePathError(message)
-    if not candidate.resolve().is_relative_to(evidence_root / job_id):
+    if not candidate.resolve().is_relative_to(job_directory.resolve()):
         message = 'evidence path escapes the selected job'
         raise EvidencePathError(message)
     return candidate

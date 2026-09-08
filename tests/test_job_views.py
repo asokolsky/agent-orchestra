@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from agent_orchestra.cli import main
+from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
@@ -34,7 +35,7 @@ def create_job(tmp_path: Path) -> tuple[Path, Run, Path]:
     worktree.mkdir()
     job = Run.create_local(worktree, worktree, 'a' * 40, 'b' * 40, 'sha256:x')
     store.add(job)
-    job_directory = tmp_path / 'evidence' / str(job.id)
+    job_directory = resolve_evidence_path(tmp_path / 'evidence', str(job.id))
     job_directory.mkdir(parents=True)
     return database, job, job_directory
 
@@ -126,7 +127,7 @@ def test_four_views_use_public_vocabulary_and_current_array(
     pending_id = add_attempt(
         job, job_directory, sequence=2, role='developer', status=AttemptStatus.PENDING
     )
-    root = job_directory.parent
+    root = evidence_root_for_job(job_directory)
 
     assert main(arguments(database, 'jobs', None, root)) == 0
     jobs = json.loads(capsys.readouterr().out)
@@ -194,7 +195,10 @@ def test_task_groups_retries_and_uses_custom_evidence_root(
     task_id = add_attempt(job, job_directory, attempt=1)
     add_attempt(job, job_directory, attempt=2, status=AttemptStatus.RUNNING)
 
-    assert main(arguments(database, 'task', task_id, job_directory.parent)) == 0
+    assert (
+        main(arguments(database, 'task', task_id, evidence_root_for_job(job_directory)))
+        == 0
+    )
 
     task = json.loads(capsys.readouterr().out)['task']
     assert task['job_id'] == str(job.id)
@@ -228,7 +232,14 @@ def test_job_does_not_read_attempt_stream_content(
 
     monkeypatch.setattr(type(job_directory), 'read_text', reject_log_read)
 
-    assert main(arguments(database, 'job', str(job.id), job_directory.parent)) == 0
+    assert (
+        main(
+            arguments(
+                database, 'job', str(job.id), evidence_root_for_job(job_directory)
+            )
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)['job']['current'][0]['status'] == (
         'running'
     )
@@ -240,7 +251,7 @@ def test_task_views_report_structured_lookup_errors(
     """Fail with stable JSON for invalid, unknown, and missing identifiers."""
 
     database, job, job_directory = create_job(tmp_path)
-    root = job_directory.parent
+    root = evidence_root_for_job(job_directory)
 
     assert main(arguments(database, 'task', 'invalid', root)) == 2
     invalid = json.loads(capsys.readouterr().out)
@@ -277,7 +288,14 @@ def test_task_views_are_read_only(
         ('tasks', str(job.id)),
         ('task', task_id),
     ):
-        assert main(arguments(database, command, identifier, job_directory.parent)) == 0
+        assert (
+            main(
+                arguments(
+                    database, command, identifier, evidence_root_for_job(job_directory)
+                )
+            )
+            == 0
+        )
         capsys.readouterr()
     assert database.read_bytes() == before_database
     assert {
@@ -293,7 +311,7 @@ def test_job_view_rejects_symlinked_evidence_directory(
     """Do not follow a selected job directory outside the evidence root."""
 
     database, job, job_directory = create_job(tmp_path)
-    root = job_directory.parent
+    root = evidence_root_for_job(job_directory)
     job_directory.rmdir()
     outside = tmp_path / 'outside'
     outside.mkdir()
@@ -304,3 +322,39 @@ def test_job_view_rejects_symlinked_evidence_directory(
     document = json.loads(capsys.readouterr().out)
     assert document['error']['code'] == 'invalid_evidence'
     assert 'escapes' in document['error']['message']
+
+
+def test_job_view_reports_missing_sharded_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report a stored job whose derived evidence directory is absent."""
+
+    database, job, job_directory = create_job(tmp_path)
+    root = evidence_root_for_job(job_directory)
+    job_directory.rmdir()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'reviewing', iteration = 1 WHERE id = ?",
+            (str(job.id),),
+        )
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+    assert document['job_id'] == str(job.id)
+
+
+def test_queued_job_without_evidence_has_empty_task_views(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Treat a never-started source job as having no task evidence yet."""
+
+    database, job, job_directory = create_job(tmp_path)
+    root = evidence_root_for_job(job_directory)
+    job_directory.rmdir()
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 0
+    assert json.loads(capsys.readouterr().out)['job']['current'] == []
+    assert main(arguments(database, 'tasks', str(job.id), root)) == 0
+    assert json.loads(capsys.readouterr().out)['tasks'] == []

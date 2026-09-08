@@ -97,6 +97,15 @@ traversal, mismatched job identifiers, and symlinks in any existing component.
 The separate workflow check that keeps the runs directory outside the reviewed
 worktree remains authoritative at that boundary.
 
+Timestamp-shaped job identifiers place evidence beneath a UTC date shard
+derived only from the identifier: `YYYYMMDDTHHMMSSZ-*` resolves to
+`RUNS_DIRECTORY/YYYY/MM/DD/JOB_ID/`. The resolver performs no clock, timezone,
+locale, or database lookup. Identifiers without the timestamp shape resolve
+directly beneath the runs directory. The configured runs directory remains the
+evidence root; shards are an internal layout detail. Evidence previously written
+flat under a timestamp-shaped identifier may become unreachable, and commands
+report missing evidence through their normal error contract.
+
 Each job maintains a versioned `.integrity.json` index under its job directory.
 Once an atomic evidence write is renamed into place, the writer hashes the
 regular file without following a final symlink and atomically replaces the

@@ -1,6 +1,8 @@
 """Tests for contained evidence paths and integrity index writes."""
 
 import json
+import os
+import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
@@ -28,6 +30,69 @@ def test_resolve_evidence_path_contains_a_job_path(tmp_path: Path) -> None:
     )
 
 
+def test_resolve_evidence_path_shards_generated_job_id_by_utc_date(
+    tmp_path: Path,
+) -> None:
+    """Derive one deterministic UTC date shard from a generated job ID."""
+
+    job_id = '20260908T235959Z-deadbeef'
+
+    assert resolve_evidence_path(tmp_path, job_id, 'execution.json') == (
+        tmp_path / '2026/09/08' / job_id / 'execution.json'
+    )
+
+
+def test_shard_derivation_is_timezone_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolve an immutable UTC identifier identically across extreme zones."""
+
+    job_id = '20260909T063000Z-b4517e73'
+    original_timezone = os.environ.get('TZ')
+    paths: list[Path] = []
+    try:
+        for timezone in ('UTC', 'Pacific/Kiritimati', 'Etc/GMT+12'):
+            monkeypatch.setenv('TZ', timezone)
+            time.tzset()
+            paths.append(resolve_evidence_path(tmp_path, job_id))
+    finally:
+        if original_timezone is None:
+            monkeypatch.delenv('TZ', raising=False)
+        else:
+            monkeypatch.setenv('TZ', original_timezone)
+        time.tzset()
+
+    assert paths == [tmp_path / '2026/09/09' / job_id] * 3
+
+
+@pytest.mark.parametrize(
+    'job_id',
+    [
+        '20261301T000000Z-deadbeef',
+        '20260932T000000Z-deadbeef',
+        '20260908T240000Z-deadbeef',
+        '20260908T000060Z-deadbeef',
+    ],
+)
+def test_invalid_timestamp_shape_resolves_flat(tmp_path: Path, job_id: str) -> None:
+    """Keep IDs outside the strict generated shape in the flat layout."""
+
+    assert resolve_evidence_path(tmp_path, job_id) == tmp_path / job_id
+
+
+def test_resolve_evidence_path_does_not_probe_old_timestamp_layout(
+    tmp_path: Path,
+) -> None:
+    """Derive timestamp-shaped locations without probing an old flat path."""
+
+    job_id = '20260908T235959Z-deadbeef'
+    flat = tmp_path / job_id
+    flat.mkdir()
+
+    assert resolve_evidence_path(tmp_path, job_id) != flat
+    assert resolve_evidence_path(tmp_path, job_id) == (tmp_path / '2026/09/08' / job_id)
+
+
 @pytest.mark.parametrize('part', ['../other/file', '/absolute/file'])
 def test_resolve_evidence_path_rejects_escape(tmp_path: Path, part: str) -> None:
     """Reject traversal and absolute evidence components."""
@@ -47,6 +112,17 @@ def test_resolve_evidence_path_rejects_symlink_escape(tmp_path: Path) -> None:
 
     with pytest.raises(EvidencePathError):
         resolve_evidence_path(tmp_path, 'job-1', 'messages', 'request.json')
+
+
+def test_resolve_evidence_path_rejects_shard_symlink_escape(tmp_path: Path) -> None:
+    """Reject a symlink in a generated job's shard hierarchy."""
+
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (tmp_path / '2026').symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(EvidencePathError, match='symlink'):
+        resolve_evidence_path(tmp_path, '20260908T235959Z-deadbeef')
 
 
 def test_record_finalized_evidence_writes_job_relative_index(tmp_path: Path) -> None:

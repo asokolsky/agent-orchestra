@@ -32,7 +32,11 @@ from agent_orchestra.adapter.issue_reviewer import (
     issue_review_prompt,
 )
 from agent_orchestra.adapter.process import run_streaming_process
-from agent_orchestra.evidence import EvidenceType, finalize_evidence_write
+from agent_orchestra.evidence import (
+    EvidenceType,
+    evidence_root_for_job,
+    finalize_evidence_write,
+)
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
@@ -139,7 +143,7 @@ def _write_text_atomic(
             temporary.replace(path)
         else:
             finalize_evidence_write(
-                job_directory.parent,
+                evidence_root_for_job(job_directory),
                 job_directory.name,
                 temporary,
                 path,

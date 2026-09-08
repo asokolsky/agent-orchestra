@@ -272,6 +272,8 @@ mise agent-orchestra -- task "$TASK_ID"
 Pass the same `--runs-directory` used by [`run`](docs/cli.md#run) when using a
 non-default evidence root. These views are read-only, never upload process
 output, and reject evidence paths outside the selected job.
+Timestamp-shaped job IDs are stored beneath internal UTC `YYYY/MM/DD` shards;
+the configured runs directory remains the evidence root supplied to commands.
 
 A built-in review that requests changes dispatches the
 selected developer and repeats review after a new digest is produced. Approval
