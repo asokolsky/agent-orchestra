@@ -368,13 +368,21 @@ is one process execution. Four read-only, schema-version 10 JSON views expose
 that hierarchy:
 
 ```text
-agent-orchestra [--database DATABASE] jobs
+agent-orchestra [--database DATABASE] jobs [--state STATE]... [--attention]
 agent-orchestra [--database DATABASE] job JOB_ID [--runs-directory DIRECTORY]
 agent-orchestra [--database DATABASE] tasks JOB_ID [--runs-directory DIRECTORY]
 agent-orchestra [--database DATABASE] task TASK_ID [--runs-directory DIRECTORY]
 ```
 
-`jobs` lists stored jobs newest first. `job` returns one job plus a `current`
+`jobs` lists stored jobs newest first. Repeat `--state` to select the union of
+one or more durable states. `--attention` selects the states requiring human
+action: `changes_requested`, `awaiting_commit_authorization`,
+`awaiting_publish_authorization`, `validation_required`, and `interrupted`.
+Combining `--state` and `--attention` returns their union. An empty match is a
+successful document with an empty `jobs` array. Unknown state text returns the
+stable `invalid_job_state` error.
+
+`job` returns one job plus a `current`
 array of non-terminal tasks; the array is empty when nothing is pending or
 running. `tasks` returns complete task history. `task` derives the parent job
 from the globally unique task ID and returns every attempt, including contained
@@ -431,8 +439,8 @@ the root before use and rejects job-directory and attempt-evidence escapes.
 `job` reads attempt manifests to derive `current`, but does not open stream
 files. `tasks` and `task` include stream content.
 
-Stable query error codes are `state_database_not_found`, `job_not_found`,
-`invalid_task_id`, `task_not_found`, and `invalid_evidence`. Errors from a
+Stable query error codes are `state_database_not_found`, `invalid_job_state`,
+`job_not_found`, `invalid_task_id`, `task_not_found`, and `invalid_evidence`. Errors from a
 single-job query echo `job_id`; task-addressed errors echo `task_id` and also
 echo the derived `job_id` when the task identifier contains one.
 

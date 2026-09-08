@@ -10,7 +10,7 @@ tags:
 authors:
   - "asokolsky@gmail.com"
 created-at: "2026-09-02T14:31:12+0200"
-updated-at: "2026-09-07T10:53:05+0200"
+updated-at: "2026-09-08T09:15:00+0200"
 ---
 
 # Agent Orchestra Reviewer Meta
@@ -55,6 +55,6 @@ the two runtimes from drifting. No other departures are intended.
 
 ## Update Cadence
 
-Review this skill whenever the review request/result contract, diff identity or
-verdict rules, or upstream Agent Skills specification changes. Otherwise,
-review it annually.
+Review this skill whenever the review request/result contract, CLI schema, diff
+identity or verdict rules, or upstream Agent Skills specification changes.
+Otherwise, review it annually.

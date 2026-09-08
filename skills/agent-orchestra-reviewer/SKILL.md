@@ -2,7 +2,7 @@
 name: agent-orchestra-reviewer
 description: Review an exact diff produced by an agent-orchestra development run and return structured, actionable findings without modifying the worktree. Use for the reviewer role, including repeat reviews after fixes.
 metadata:
-  version: "2.1.0"
+  version: "2.1.1"
   source: "https://github.com/asokolsky/agent-orchestra/tree/main/skills/agent-orchestra-reviewer"
 ---
 
@@ -18,6 +18,21 @@ canonical result; the adapter validates, correlates, persists, and renders it.
 
 Invoke this skill for the review role of an agent-orchestra run. Skip it when
 the assignment authorizes implementation or remediation rather than review.
+
+## Discover The CLI Contract
+
+Treat the installed `agent-orchestra` binary as authoritative for command
+syntax. When a task requires CLI inspection outside the adapter-managed role,
+run `agent-orchestra --help` and then `agent-orchestra COMMAND --help`; syntax
+shown in this skill is illustrative. Never probe a potentially mutating command
+by omitting arguments, because defaults may make that invocation valid.
+
+Treat job, task, and attempt identifiers as opaque. Read them from versioned
+command output and never construct them from remembered patterns. In
+particular, `task TASK_ID` derives its job from the supplied identifier, so a
+hand-assembled task ID can produce a misleading `job_not_found` error. Check
+`schema_version` before consuming a document and return `blocked` if the
+installed binary returns a version the caller does not support.
 
 ## 1. Establish The Review Scope
 
@@ -59,6 +74,9 @@ Do not report personal style preferences, speculative concerns without a
 plausible failure mode, or issues outside the assigned diff unless the change
 directly exposes them. Do not modify files, apply fixes, commit, push, post
 comments, or change remote state.
+
+`post-issue-feedback --authorize` performs a provider write. A reviewer must
+never invoke it or supply its authorization flag.
 
 Read-only validation commands may be run when useful. An adapter-provided
 temporary directory may hold transient test files and tool caches, but the

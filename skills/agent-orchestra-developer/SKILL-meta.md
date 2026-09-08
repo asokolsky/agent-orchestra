@@ -10,7 +10,7 @@ tags:
 authors:
   - "asokolsky@gmail.com"
 created-at: "2026-09-02T14:31:12+0200"
-updated-at: "2026-09-03T15:10:00+0200"
+updated-at: "2026-09-08T09:15:00+0200"
 ---
 
 # Agent Orchestra Developer Meta
@@ -53,6 +53,6 @@ the two runtimes from drifting. No other departures are intended.
 
 ## Update Cadence
 
-Review this skill whenever the developer request/result contract, workflow
-states, lifecycle authorization rules, or upstream Agent Skills specification
-changes. Otherwise, review it annually.
+Review this skill whenever the developer request/result contract, CLI schema,
+workflow states, lifecycle authorization rules, or upstream Agent Skills
+specification changes. Otherwise, review it annually.
