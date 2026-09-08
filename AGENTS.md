@@ -13,6 +13,10 @@
   - `mise run build`
 - Run `git diff --check`, inspect the complete diff and untracked-file list, and
   confirm generated build output remains ignored.
+- Continuous integration runs the same tasks on every push and pull request,
+  substituting `mise run format-check` for `mise run format` so a branch is
+  verified rather than rewritten. A pull request description does not need to
+  assert these checks; a red run reports them.
 - Do not commit, push, create or update a pull request, post remotely, merge, or
   remove a worktree without explicit authorization for that exact action.
 
