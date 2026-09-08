@@ -51,6 +51,10 @@ def _tee_stream(source: BinaryIO, sink: BinaryIO, chunks: list[bytes]) -> None:
 def _write_stdin(sink: BinaryIO, content: bytes) -> None:
     """Write and close child stdin without blocking the timeout controller."""
 
+    # Closing is required, not tidiness. A runtime that reads stdin blocks until
+    # EOF, so leaving the pipe open deadlocks the child until its timeout
+    # expires. Codex reads stdin whenever it is a non-TTY pipe, even when the
+    # prompt arrives as an argument; see openai/codex#20919.
     try:
         _write_all(sink, content)
         sink.flush()
