@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from importlib.metadata import version
 from pathlib import Path
 from threading import Barrier, Lock, Thread
@@ -31,7 +31,7 @@ from agent_orchestra.invocations import (
     InvocationRecord,
     write_record,
 )
-from agent_orchestra.models import Run, RunState
+from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
 from agent_orchestra.store import RunStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
@@ -940,6 +940,137 @@ def test_jobs_lists_persisted_job(
         ],
         'error': None,
     }
+
+
+def test_jobs_filters_repeated_states_across_scenarios(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Union repeated durable-state selections for both job scenarios."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    issue = IssueJob.create(
+        provider='github',
+        host='github.com',
+        remote_url='https://github.com/acme/widgets/issues/12',
+        namespace='acme',
+        project='widgets',
+        issue_number=12,
+        title='Feature',
+        author='author',
+        source_updated_at='2026-09-08T08:00:00Z',
+        source_digest='sha256:' + 'd' * 64,
+    )
+    store.add_issue(issue)
+    published = replace(issue, state=RunState.PUBLISHED)
+    store.update_issue(published, RunState.QUEUED)
+
+    result = main(
+        [
+            '--database',
+            str(database),
+            'jobs',
+            '--state',
+            'queued',
+            '--state',
+            'published',
+        ]
+    )
+
+    assert result == 0
+    document = json.loads(capsys.readouterr().out)
+    assert {job['scenario'] for job in document['jobs']} == {
+        'local_changes',
+        'issue_review',
+    }
+    assert {job['state'] for job in document['jobs']} == {'queued', 'published'}
+
+    assert main(['--database', str(database), 'jobs', '--state', 'failed']) == 0
+    assert json.loads(capsys.readouterr().out)['jobs'] == []
+
+
+def test_jobs_attention_selects_exact_human_action_states(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Expose the shared human-action set and union it with explicit states."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    for state in [*sorted(HUMAN_ACTION_STATES, key=str), RunState.PUBLISHED]:
+        run = Run.create_local(tmp_path, tmp_path, 'base', 'head', f'digest-{state}')
+        store.add(run)
+        store.update(replace(run, state=state), RunState.QUEUED)
+    issue = IssueJob.create(
+        provider='gitlab',
+        host='gitlab.com',
+        remote_url='https://gitlab.com/acme/widgets/-/issues/12',
+        namespace='acme',
+        project='widgets',
+        issue_number=12,
+        title='Feature',
+        author='author',
+        source_updated_at='2026-09-08T08:00:00Z',
+        source_digest='sha256:' + 'e' * 64,
+    )
+    store.add_issue(issue)
+    interrupted = replace(issue, state=RunState.INTERRUPTED)
+    store.update_issue(interrupted, RunState.QUEUED)
+    before = database.read_bytes()
+
+    assert main(['--database', str(database), 'jobs', '--attention']) == 0
+
+    attention = json.loads(capsys.readouterr().out)
+    assert {job['state'] for job in attention['jobs']} == {
+        state.value for state in HUMAN_ACTION_STATES
+    }
+    assert {job['scenario'] for job in attention['jobs']} == {
+        'local_changes',
+        'issue_review',
+    }
+    assert database.read_bytes() == before
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'jobs',
+                '--attention',
+                '--state',
+                'published',
+            ]
+        )
+        == 0
+    )
+    combined = json.loads(capsys.readouterr().out)
+    assert {job['state'] for job in combined['jobs']} == {
+        *(state.value for state in HUMAN_ACTION_STATES),
+        'published',
+    }
+
+
+def test_jobs_rejects_unknown_state_with_stable_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject a state typo without modifying or consulting durable state."""
+
+    database = tmp_path / 'missing.db'
+
+    result = main(['--database', str(database), 'jobs', '--state', 'needs-coffee'])
+
+    assert result == 2
+    assert json.loads(capsys.readouterr().out) == {
+        'schema_version': 10,
+        'error': {
+            'code': 'invalid_job_state',
+            'message': 'unknown durable job state: needs-coffee',
+        },
+    }
+    assert not database.exists()
 
 
 def test_job_selects_one_job_by_id(

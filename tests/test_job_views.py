@@ -168,7 +168,7 @@ def test_views_treat_absent_issue_tables_as_empty(
         connection.execute('DROP TABLE issue_actions')
         connection.execute('DROP TABLE issue_jobs')
 
-    assert main(['--database', str(database), 'jobs']) == 0
+    assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 10,
         'jobs': [],

@@ -81,6 +81,17 @@ class RunState(StrEnum):
     SUPERSEDED = 'superseded'
 
 
+HUMAN_ACTION_STATES = frozenset(
+    {
+        RunState.CHANGES_REQUESTED,
+        RunState.AWAITING_COMMIT_AUTHORIZATION,
+        RunState.AWAITING_PUBLISH_AUTHORIZATION,
+        RunState.VALIDATION_REQUIRED,
+        RunState.INTERRUPTED,
+    }
+)
+
+
 class Verdict(StrEnum):
     """Possible outcomes of a review iteration."""
 

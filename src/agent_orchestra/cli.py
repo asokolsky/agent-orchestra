@@ -34,7 +34,13 @@ from agent_orchestra.issue_review import (
     run_issue_review,
 )
 from agent_orchestra.issue_sources import IssueSourceError, fetch_issue, write_snapshot
-from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
+from agent_orchestra.models import (
+    HUMAN_ACTION_STATES,
+    IssueJob,
+    ProviderAction,
+    Run,
+    RunState,
+)
 from agent_orchestra.schemas import SchemaValidationError
 from agent_orchestra.skill_install import (
     AgentTarget,
@@ -234,7 +240,19 @@ def build_parser() -> argparse.ArgumentParser:
         '--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY
     )
 
-    commands.add_parser('jobs', help='list stored jobs')
+    jobs = commands.add_parser('jobs', help='list stored jobs')
+    jobs.add_argument(
+        '--state',
+        action='append',
+        default=[],
+        metavar='STATE',
+        help='include jobs in this durable state; repeat to select more states',
+    )
+    jobs.add_argument(
+        '--attention',
+        action='store_true',
+        help='include jobs in states that require human action',
+    )
 
     job = commands.add_parser('job', help='show one stored job')
     job.add_argument('job_id')
@@ -717,6 +735,17 @@ def _write_job_error(
 def _jobs(args: argparse.Namespace, store: RunStore) -> int:
     """List stored jobs without reading mutable workflow state."""
 
+    known_states = {state.value: state for state in RunState}
+    invalid = next((value for value in args.state if value not in known_states), None)
+    if invalid is not None:
+        _write_job_error(
+            'invalid_job_state',
+            f'unknown durable job state: {invalid}',
+        )
+        return 2
+    selected_states = {known_states[value] for value in args.state}
+    if args.attention:
+        selected_states.update(HUMAN_ACTION_STATES)
     if not args.database.is_file():
         _write_job_error(
             'state_database_not_found',
@@ -728,6 +757,12 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
         _issue_job_summary(job, store.list_issue_actions(job.id))
         for job in store.list_issues()
     )
+    if selected_states:
+        summaries = [
+            summary
+            for summary in summaries
+            if RunState(str(summary['state'])) in selected_states
+        ]
     summaries.sort(key=lambda item: str(item['created_at']), reverse=True)
     print(
         json.dumps(

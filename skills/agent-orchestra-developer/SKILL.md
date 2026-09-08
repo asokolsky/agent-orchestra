@@ -2,7 +2,7 @@
 name: agent-orchestra-developer
 description: Implement an assigned change or address reviewer findings inside an agent-orchestra-managed Git worktree. Use for the development role in an agent-orchestra run; do not use for independent review.
 metadata:
-  version: "2.0.0"
+  version: "2.0.1"
   source: "https://github.com/asokolsky/agent-orchestra/tree/main/skills/agent-orchestra-developer"
 ---
 
@@ -18,6 +18,21 @@ canonical result; the adapter validates, correlates, and persists the envelope.
 
 Invoke this skill for the development role of an agent-orchestra run. Skip it
 when the assignment is an independent or read-only review.
+
+## Discover The CLI Contract
+
+Treat the installed `agent-orchestra` binary as authoritative for command
+syntax. When a task requires CLI interaction outside the adapter-managed role,
+run `agent-orchestra --help` and then `agent-orchestra COMMAND --help`; syntax
+shown in this skill is illustrative. Never probe a potentially mutating command
+by omitting arguments, because defaults may make that invocation valid.
+
+Treat job, task, and attempt identifiers as opaque. Read them from versioned
+command output and never construct them from remembered patterns. In
+particular, `task TASK_ID` derives its job from the supplied identifier, so a
+hand-assembled task ID can produce a misleading `job_not_found` error. Check
+`schema_version` before consuming a document and stop if the installed binary
+returns a version the caller does not support.
 
 ## 1. Establish The Assignment
 
@@ -68,6 +83,9 @@ publishing.
 
 Never discard existing work with reset, restore, checkout, stash, cleaning, or
 equivalent destructive operations.
+
+`post-issue-feedback` performs a provider write and requires `--authorize`.
+Never supply that flag without explicit authorization for that provider write.
 
 Skip condition: none. Lifecycle gates apply to every run and every iteration.
 
