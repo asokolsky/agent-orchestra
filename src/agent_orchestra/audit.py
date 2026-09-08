@@ -778,6 +778,8 @@ def _result(
         'integrity_index_malformed',
         'integrity_index_backfilled',
         'transition_digest_missing',
+        'unknown_transition_scenario',
+        'unknown_transition_state',
     }
     if codes & failed:
         return 'failed'
@@ -801,6 +803,17 @@ def build_audit_document(
     root = runs_directory.expanduser().resolve()
     job_id = str(job.id)
     findings: list[AuditFinding] = []
+    for index, transition in enumerate(transitions):
+        for field in transition.unrecognized_fields:
+            public_field = 'scenario' if field == 'scenario' else 'state'
+            value = getattr(transition, field)
+            findings.append(
+                _finding(
+                    f'unknown_transition_{public_field}',
+                    f'unrecognized persisted transition {field}: {value}',
+                    f'transitions/{index}/{field}',
+                )
+            )
     entries, backfilled_at, index_findings = _read_index(root, job_id)
     findings.extend(index_findings)
     evidence: list[dict[str, object]] = []
@@ -849,7 +862,7 @@ def build_audit_document(
             if transition.scope_digest is None
         )
     document: dict[str, object] = {
-        'schema_version': 10,
+        'schema_version': 11,
         'job': _job_document(job),
         'transitions': [_transition_document(item) for item in transitions],
         'operations': _derived_operations(transitions),

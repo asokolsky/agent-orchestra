@@ -47,7 +47,13 @@ from agent_orchestra.skill_install import (
     SkillInstallError,
     install_skills,
 )
-from agent_orchestra.store import ConcurrentUpdateError, RunNotFoundError, RunStore
+from agent_orchestra.store import (
+    ConcurrentUpdateError,
+    PersistedEnumError,
+    RunNotFoundError,
+    RunStore,
+    UnreadableJob,
+)
 from agent_orchestra.worker import WorkerError, resume_review, run_queued_review
 
 if TYPE_CHECKING:
@@ -55,7 +61,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 10
+CLI_SCHEMA_VERSION = 11
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
@@ -738,6 +744,22 @@ def _write_job_error(
     print(json.dumps(document, indent=2))
 
 
+def _persisted_enum_error(error: PersistedEnumError) -> dict[str, str]:
+    """Return the stable public error object for an unreadable job row."""
+
+    return {'code': error.code, 'message': str(error)}
+
+
+def _unreadable_job_summary(job: UnreadableJob) -> dict[str, object]:
+    """Keep an unreadable row visible in the jobs listing."""
+
+    return {
+        'job_id': job.job_id,
+        'created_at': job.created_at,
+        'error': _persisted_enum_error(job.error),
+    }
+
+
 def _jobs(args: argparse.Namespace, store: RunStore) -> int:
     """List stored jobs without reading mutable workflow state."""
 
@@ -758,29 +780,37 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
             f'state database not found: {args.database}',
         )
         return 2
-    summaries = [*map(_job_summary, store.list_runs())]
+    summaries = [
+        _unreadable_job_summary(job)
+        if isinstance(job, UnreadableJob)
+        else _job_summary(job)
+        for job in store.list_runs_with_errors()
+    ]
     summaries.extend(
-        _issue_job_summary(job, store.list_issue_actions(job.id))
-        for job in store.list_issues()
+        _unreadable_job_summary(job)
+        if isinstance(job, UnreadableJob)
+        else _issue_job_summary(job, store.list_issue_actions(job.id))
+        for job in store.list_issues_with_errors()
     )
     if selected_states:
         summaries = [
             summary
             for summary in summaries
-            if RunState(str(summary['state'])) in selected_states
+            if 'error' in summary or RunState(str(summary['state'])) in selected_states
         ]
     summaries.sort(key=lambda item: str(item['created_at']), reverse=True)
+    unreadable = [summary for summary in summaries if 'error' in summary]
     print(
         json.dumps(
             {
                 'schema_version': CLI_SCHEMA_VERSION,
                 'jobs': summaries,
-                'error': None,
+                'error': unreadable[0]['error'] if unreadable else None,
             },
             indent=2,
         )
     )
-    return 0
+    return 2 if unreadable else 0
 
 
 def _selected_job(
@@ -816,6 +846,9 @@ def _selected_job(
     except RunNotFoundError as error:
         _write_job_error('job_not_found', f'job not found: {error}', job_id=args.job_id)
         return None
+    except PersistedEnumError as error:
+        _write_job_error(error.code, str(error), job_id=args.job_id)
+        return None
     except (InvocationEvidenceError, OSError) as error:
         _write_job_error('invalid_evidence', str(error), job_id=args.job_id)
         return None
@@ -830,6 +863,9 @@ def _job(args: argparse.Namespace, store: RunStore) -> int:
             issue = store.get_issue(args.job_id)
         except RunNotFoundError:
             pass
+        except PersistedEnumError as error:
+            _write_job_error(error.code, str(error), job_id=args.job_id)
+            return 2
         else:
             document = _issue_job_summary(issue, store.list_issue_actions(issue.id))
             try:
@@ -981,6 +1017,9 @@ def _audit(args: argparse.Namespace, store: RunStore) -> int:
         )
     except RunNotFoundError as error:
         _write_job_error('job_not_found', f'job not found: {error}', job_id=args.job_id)
+        return 2
+    except PersistedEnumError as error:
+        _write_job_error(error.code, str(error), job_id=args.job_id)
         return 2
     except (EvidencePathError, OSError) as error:
         _write_job_error('invalid_evidence', str(error), job_id=args.job_id)
@@ -1146,6 +1185,13 @@ def _resume(args: argparse.Namespace, store: RunStore) -> int:
             args.job_id,
             error_code='job_not_found',
             error_message=f'job not found: {error}',
+        )
+        return 2
+    except PersistedEnumError as error:
+        _write_resume_document(
+            args.job_id,
+            error_code=error.code,
+            error_message=str(error),
         )
         return 2
     except ConcurrentUpdateError as error:

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_orchestra.models import (
     IssueJob,
@@ -16,7 +19,76 @@ from agent_orchestra.models import (
     ScenarioType,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 LEGACY_REVIEW_STATE = 'awaiting_review'
+
+
+class PersistedEnumError(ValueError):
+    """Describe one enum value that this installation cannot interpret."""
+
+    def __init__(self, job_id: str, field: str, value: str) -> None:
+        """Create a stable persisted-value diagnostic."""
+
+        self.job_id = job_id
+        self.field = field
+        self.value = value
+        self.code = f'unknown_job_{field}'
+        super().__init__(f'unrecognized persisted {field} for job {job_id}: {value}')
+
+
+@dataclass(frozen=True, slots=True)
+class UnreadableJob:
+    """Retain a list entry whose persisted job row cannot be decoded."""
+
+    job_id: str
+    created_at: str
+    error: PersistedEnumError
+
+
+def _decode_enum[EnumT: StrEnum](
+    enum_type: type[EnumT],
+    value: str,
+    *,
+    job_id: str,
+    field: str,
+    normalize_legacy_state: bool = False,
+) -> EnumT:
+    """Decode one persisted enum value with a stable domain error."""
+
+    normalized = (
+        str(RunState.REVIEWING)
+        if normalize_legacy_state and value == LEGACY_REVIEW_STATE
+        else value
+    )
+    try:
+        return enum_type(normalized)
+    except ValueError:
+        raise PersistedEnumError(job_id, field, value) from None
+
+
+def _decode_transition_enum[EnumT: StrEnum](
+    enum_type: type[EnumT],
+    value: str,
+    *,
+    job_id: str,
+    column: str,
+    unrecognized: list[str],
+) -> EnumT | str:
+    """Decode a transition value while retaining unknown raw text."""
+
+    try:
+        return _decode_enum(
+            enum_type,
+            value,
+            job_id=job_id,
+            field='scenario' if column == 'scenario' else 'state',
+            normalize_legacy_state=column != 'scenario',
+        )
+    except PersistedEnumError:
+        unrecognized.append(column)
+        return value
 
 
 class RunNotFoundError(LookupError):
@@ -192,6 +264,20 @@ class RunStore:
             return ()
         return tuple(self._issue_from_row(row) for row in rows)
 
+    def list_issues_with_errors(self) -> tuple[IssueJob | UnreadableJob, ...]:
+        """Return issue jobs while retaining rows with unknown enum values."""
+
+        try:
+            with closing(self._connect()) as connection, connection:
+                rows = connection.execute(
+                    'SELECT * FROM issue_jobs ORDER BY created_at DESC'
+                ).fetchall()
+        except sqlite3.OperationalError as error:
+            if 'no such table: issue_jobs' not in str(error):
+                raise
+            return ()
+        return tuple(self._decode_job_row(row, self._issue_from_row) for row in rows)
+
     def update_issue(self, job: IssueJob, expected_state: RunState) -> None:
         """Persist an issue-review job using compare-and-set semantics."""
 
@@ -341,6 +427,15 @@ class RunStore:
             ).fetchall()
         return tuple(self._from_row(row) for row in rows)
 
+    def list_runs_with_errors(self) -> tuple[Run | UnreadableJob, ...]:
+        """Return runs while retaining rows with unknown enum values."""
+
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                'SELECT * FROM runs ORDER BY created_at DESC'
+            ).fetchall()
+        return tuple(self._decode_job_row(row, self._from_row) for row in rows)
+
     def update(self, run: Run, expected_state: RunState) -> None:
         """Persist a run when its current stored state matches the expectation."""
 
@@ -422,27 +517,46 @@ class RunStore:
                     'SELECT * FROM transitions WHERE job_id = ? ORDER BY id',
                     (job_id,),
                 ).fetchall()
-        return tuple(
-            JobTransition(
+        transitions: list[JobTransition] = []
+        for row in rows:
+            unrecognized: list[str] = []
+            scenario = _decode_transition_enum(
+                ScenarioType,
+                row['scenario'],
                 job_id=row['job_id'],
-                scenario=ScenarioType(row['scenario']),
-                from_state=(
-                    RunState.REVIEWING
-                    if row['from_state'] == LEGACY_REVIEW_STATE
-                    else RunState(row['from_state'])
-                    if row['from_state'] is not None
-                    else None
-                ),
-                to_state=(
-                    RunState.REVIEWING
-                    if row['to_state'] == LEGACY_REVIEW_STATE
-                    else RunState(row['to_state'])
-                ),
-                scope_digest=row['scope_digest'],
-                occurred_at=datetime.fromisoformat(row['occurred_at']),
+                column='scenario',
+                unrecognized=unrecognized,
             )
-            for row in rows
-        )
+            from_state = (
+                _decode_transition_enum(
+                    RunState,
+                    row['from_state'],
+                    job_id=row['job_id'],
+                    column='from_state',
+                    unrecognized=unrecognized,
+                )
+                if row['from_state'] is not None
+                else None
+            )
+            to_state = _decode_transition_enum(
+                RunState,
+                row['to_state'],
+                job_id=row['job_id'],
+                column='to_state',
+                unrecognized=unrecognized,
+            )
+            transitions.append(
+                JobTransition(
+                    job_id=row['job_id'],
+                    scenario=scenario,
+                    from_state=from_state,
+                    to_state=to_state,
+                    scope_digest=row['scope_digest'],
+                    occurred_at=datetime.fromisoformat(row['occurred_at']),
+                    unrecognized_fields=tuple(unrecognized),
+                )
+            )
+        return tuple(transitions)
 
     def interrupted_origin(self, run_id: str) -> RunState:
         """Return the active state from which a run was interrupted."""
@@ -458,7 +572,13 @@ class RunStore:
             ).fetchone()
         if row is None or row['from_state'] is None:
             raise RunNotFoundError(f'interruption transition for {run_id}')
-        return RunState(row['from_state'])
+        return _decode_enum(
+            RunState,
+            row['from_state'],
+            job_id=run_id,
+            field='state',
+            normalize_legacy_state=True,
+        )
 
     @staticmethod
     def _add_transition(
@@ -584,13 +704,20 @@ class RunStore:
         columns = row.keys()
         return Run(
             id=row['id'],
-            scenario=ScenarioType(row['scenario']),
+            scenario=_decode_enum(
+                ScenarioType,
+                row['scenario'],
+                job_id=row['id'],
+                field='scenario',
+            ),
             repo_path=Path(row['repository_path']),
             worktree_path=Path(row['worktree_path']),
-            state=(
-                RunState.REVIEWING
-                if row['state'] == LEGACY_REVIEW_STATE
-                else RunState(row['state'])
+            state=_decode_enum(
+                RunState,
+                row['state'],
+                job_id=row['id'],
+                field='state',
+                normalize_legacy_state=True,
             ),
             base_sha=row['base_sha'],
             head_sha=row['head_sha'],
@@ -610,7 +737,12 @@ class RunStore:
 
         return IssueJob(
             id=row['id'],
-            state=RunState(row['state']),
+            state=_decode_enum(
+                RunState,
+                row['state'],
+                job_id=row['id'],
+                field='state',
+            ),
             provider=row['provider'],
             host=row['host'],
             remote_url=row['remote_url'],
@@ -625,3 +757,15 @@ class RunStore:
             created_at=datetime.fromisoformat(row['created_at']),
             updated_at=datetime.fromisoformat(row['updated_at']),
         )
+
+    @staticmethod
+    def _decode_job_row[JobT: Run | IssueJob](
+        row: sqlite3.Row,
+        mapper: Callable[[sqlite3.Row], JobT],
+    ) -> JobT | UnreadableJob:
+        """Decode a list row or retain its structured enum error."""
+
+        try:
+            return mapper(row)
+        except PersistedEnumError as error:
+            return UnreadableJob(row['id'], row['created_at'], error)

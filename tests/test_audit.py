@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pytest
+
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import (
     finalize_evidence_write,
@@ -24,8 +26,6 @@ from tests.test_job_views import add_attempt
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def _arguments(database: Path, root: Path, job_id: str, *, verify: bool) -> list[str]:
@@ -78,6 +78,38 @@ def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, R
     temporary.write_text('{}\n')
     finalize_evidence_write(root, str(job.id), temporary, artifact, 'failure')
     return database, root, current
+
+
+@pytest.mark.parametrize(
+    ('column', 'value', 'code'),
+    [
+        ('scenario', 'future_scenario', 'unknown_transition_scenario'),
+        ('from_state', 'future_state', 'unknown_transition_state'),
+        ('to_state', 'future_state', 'unknown_transition_state'),
+    ],
+)
+def test_audit_retains_unrecognized_transition_values_as_findings(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    column: str,
+    value: str,
+    code: str,
+) -> None:
+    """Keep the rest of an audit readable when one transition is unknown."""
+
+    database, root, job = _source_job(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            f'UPDATE transitions SET {column} = ? WHERE job_id = ?',  # noqa: S608
+            (value, str(job.id)),
+        )
+
+    assert main(_arguments(database, root, str(job.id), verify=True)) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['result'] == 'unverifiable'
+    assert code in {finding['code'] for finding in document['findings']}
+    assert document['transitions'][0][column] == value
 
 
 def _write_json_evidence(
@@ -249,7 +281,7 @@ def test_default_audit_is_versioned_deterministic_and_omits_result(
 
     assert first == second
     document = json.loads(first)
-    assert document['schema_version'] == 10
+    assert document['schema_version'] == 11
     assert 'result' not in document
     assert document['job']['scenario'] == 'local_changes'
     assert [item['to_state'] for item in document['transitions']] == [
@@ -756,6 +788,6 @@ def test_audit_reports_missing_job_as_versioned_error(
     assert main(_arguments(database, tmp_path / 'runs', 'missing', verify=True)) == 2
 
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 10
+    assert document['schema_version'] == 11
     assert document['job_id'] == 'missing'
     assert document['error']['code'] == 'job_not_found'

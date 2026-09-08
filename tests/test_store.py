@@ -402,6 +402,29 @@ def test_read_and_update_accept_legacy_awaiting_review_state(tmp_path: Path) -> 
     assert store.get(run.id).state is RunState.APPROVED
 
 
+def test_transition_reads_accept_legacy_awaiting_review_state(tmp_path: Path) -> None:
+    """Preserve legacy normalization for both transition state columns."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
+    store.add(run)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """UPDATE transitions
+            SET from_state = 'awaiting_review', to_state = 'awaiting_review'
+            WHERE job_id = ?""",
+            (str(run.id),),
+        )
+
+    transition_record = store.list_transitions(str(run.id))[0]
+
+    assert transition_record.from_state is RunState.REVIEWING
+    assert transition_record.to_state is RunState.REVIEWING
+    assert transition_record.unrecognized_fields == ()
+
+
 def test_update_detects_stale_state(tmp_path: Path) -> None:
     """Reject an update whose expected state is no longer current."""
 
