@@ -635,3 +635,74 @@ def test_completed_recovery_rejects_miscorrelated_stream_name(tmp_path: Path) ->
 
     with pytest.raises(InvocationEvidenceError, match='evidence filenames'):
         recover_completed_invocation_evidence(run, 'run')
+
+
+def relocatable_attempt(job_directory: Path) -> InvocationRecord:
+    """Return a pending attempt whose streams exist inside one job directory."""
+
+    logs = job_directory / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    stdout = logs / '000001-reviewer.stdout.log'
+    stderr = logs / '000001-reviewer.stderr.log'
+    stdout.write_text('child stdout\n', encoding='utf-8')
+    stderr.write_text('', encoding='utf-8')
+    return replace(
+        pending_attempt(),
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+    )
+
+
+def test_write_record_persists_job_relative_stream_paths(tmp_path: Path) -> None:
+    """Store stream paths relative to the job so evidence stays relocatable."""
+
+    job_directory = tmp_path / 'run'
+    record = relocatable_attempt(job_directory)
+    path = job_directory / 'invocations' / '000001-reviewer.json'
+
+    write_record(path, record)
+
+    document = json.loads(path.read_text(encoding='utf-8'))
+    assert document['stdout_path'] == 'logs/000001-reviewer.stdout.log'
+    assert document['stderr_path'] == 'logs/000001-reviewer.stderr.log'
+    assert read_records(job_directory, 'run')[0].stdout_path == str(
+        job_directory / 'logs/000001-reviewer.stdout.log'
+    )
+
+
+def test_relocated_job_evidence_remains_readable(tmp_path: Path) -> None:
+    """Read one job's attempts after moving it beneath a different root."""
+
+    job_directory = tmp_path / 'first' / 'run'
+    write_record(
+        job_directory / 'invocations' / '000001-reviewer.json',
+        relocatable_attempt(job_directory),
+    )
+    moved = tmp_path / 'second' / 'run'
+    moved.parent.mkdir(parents=True)
+    job_directory.rename(moved)
+
+    records = read_records(moved, 'run')
+
+    relocated_stdout = moved / 'logs/000001-reviewer.stdout.log'
+    assert records[0].stdout_path == str(relocated_stdout)
+    assert relocated_stdout.read_text(encoding='utf-8') == 'child stdout\n'
+
+
+def test_absolute_stream_paths_written_before_this_change_still_transition(
+    tmp_path: Path,
+) -> None:
+    """Advance a legacy record whose stored stream paths are absolute."""
+
+    job_directory = tmp_path / 'run'
+    record = relocatable_attempt(job_directory)
+    path = job_directory / 'invocations' / '000001-reviewer.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(asdict(record)), encoding='utf-8')
+
+    write_record(path, transition_attempt(record, AttemptStatus.RUNNING))
+
+    document = json.loads(path.read_text(encoding='utf-8'))
+    assert document['status'] == 'running'
+    assert document['stdout_path'] == 'logs/000001-reviewer.stdout.log'
+    assert read_records(job_directory, 'run')[0].status == 'running'
