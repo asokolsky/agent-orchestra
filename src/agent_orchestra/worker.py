@@ -43,6 +43,7 @@ from agent_orchestra.invocations import (
     transition_attempt,
     write_record,
 )
+from agent_orchestra.manifests import canonical_message_evidence, evidence_path
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
@@ -131,6 +132,16 @@ def _run_evidence_path(run_directory: Path, *parts: str) -> Path:
         )
     except EvidencePathError as error:
         raise WorkerError(str(error)) from error
+
+
+def _manifest_evidence_path(
+    run_directory: Path, evidence_type: str, ordinal: int
+) -> Path:
+    """Resolve one manifest-rendered path through the run boundary."""
+
+    return _run_evidence_path(
+        run_directory, *Path(evidence_path(evidence_type, ordinal=ordinal)).parts
+    )
 
 
 def _contained_job_reference(
@@ -543,11 +554,14 @@ def _validate_review_request(document: dict[str, Any], *, run_directory: Path) -
             raise WorkerError(INVALID_REVIEW_REQUEST)
 
 
-def _require_unique_message_id(document: dict[str, Any], messages: Path) -> None:
+def _require_unique_message_id(document: dict[str, Any], run_directory: Path) -> None:
     """Reject a response identifier already present in durable messages."""
 
     candidate = document.get('message_id')
-    for path in messages.glob('*.json'):
+    for path in run_directory.rglob('*.json'):
+        relative = path.relative_to(run_directory).as_posix()
+        if canonical_message_evidence(relative) is None:
+            continue
         try:
             existing = json.loads(path.read_text(encoding='utf-8'))
         except OSError, json.JSONDecodeError:
@@ -623,10 +637,6 @@ def read_message_chain(
 ) -> list[tuple[Path, dict[str, Any]]]:
     """Read and correlate every canonical message for recovery."""
 
-    messages = _run_evidence_path(run_directory, 'messages')
-    if messages.is_symlink() or not messages.is_dir():
-        message = 'resume message directory is missing or unsafe'
-        raise WorkerError(message)
     documents: list[tuple[Path, dict[str, Any]]] = []
     identities: dict[str, tuple[Path, dict[str, Any]]] = {}
     schemas: dict[str, type[BaseModel]] = {
@@ -635,20 +645,49 @@ def read_message_chain(
         'remediation_request': RemediationRequestMessageSchema,
         'developer_handoff': DeveloperHandoffMessageSchema,
     }
-    for expected_sequence, path in enumerate(sorted(messages.glob('*.json')), start=1):
+    candidates: list[tuple[int, str, Path]] = []
+    message_directory = run_directory / 'messages'
+    unsafe_namespace = 'resume message namespace is unsafe'
+    if message_directory.is_symlink():
+        raise WorkerError(unsafe_namespace)
+    if message_directory.exists() and not message_directory.is_dir():
+        raise WorkerError(unsafe_namespace)
+    if message_directory.is_dir():
+        try:
+            with os.scandir(message_directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+        except OSError as error:
+            message = 'resume message namespace is unreadable'
+            raise WorkerError(message) from error
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(run_directory).as_posix()
+            try:
+                unsafe_entry = entry.is_symlink() or not entry.is_file(
+                    follow_symlinks=False
+                )
+            except OSError as error:
+                message = f'unreadable canonical message path: {relative}'
+                raise WorkerError(message) from error
+            if unsafe_entry:
+                raise WorkerError(f'unsafe canonical message path: {relative}')
+            identity = canonical_message_evidence(relative)
+            if identity is None:
+                raise WorkerError(f'unknown canonical message path: {relative}')
+            path_message_type, sequence = identity
+            candidates.append((sequence, path_message_type, path))
+    for expected_sequence, (sequence, expected_type, path) in enumerate(
+        sorted(candidates), start=1
+    ):
         _contained_job_reference(
             run_directory, path, 'resume message path escapes the run directory'
         )
-        try:
-            sequence = int(path.name.split('-', 1)[0])
-        except ValueError as error:
-            raise WorkerError(f'invalid message filename: {path.name}') from error
         if sequence != expected_sequence:
             message = 'resume message sequence is not contiguous'
             raise WorkerError(message)
         document = _read_object(path)
         message_type = document.get('message_type')
-        if not isinstance(message_type, str):
+        if not isinstance(message_type, str) or message_type != expected_type:
             raise WorkerError(f'invalid canonical message: {path.name}')
         schema = schemas.get(message_type)
         if schema is None:
@@ -880,7 +919,6 @@ def _run_queued_review(
     current_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
     if current_digest is None:
         raise WorkerError(NO_CHANGES)
-    messages = _run_evidence_path(run_directory, 'messages')
     artifacts = _run_evidence_path(run_directory, 'artifacts')
     logs = _run_evidence_path(run_directory, 'logs')
     invocations = _run_evidence_path(run_directory, 'invocations')
@@ -944,7 +982,9 @@ def _run_queued_review(
     while True:
         if retry_review_request is None:
             artifact_path = artifacts / f'review-{reviewing.iteration:04d}.md'
-            request_path = messages / f'{sequence:06d}-review-request.json'
+            request_path = _manifest_evidence_path(
+                run_directory, 'review_request', sequence
+            )
             request: dict[str, Any] = {
                 'schema_version': 1,
                 'message_id': str(uuid4()),
@@ -981,7 +1021,9 @@ def _run_queued_review(
             retry_review_request = None
             sequence = int(request['sequence'])
             artifact_path = Path(request['payload']['artifact_path'])
-            request_path = messages / f'{sequence:06d}-review-request.json'
+            request_path = _manifest_evidence_path(
+                run_directory, 'review_request', sequence
+            )
             _validate_review_request(request, run_directory=run_directory)
         response_path = _run_evidence_path(run_directory, '.review-result.json')
         reviewer_stem = _invocation_stem(sequence, 'reviewer', reviewer_attempt)
@@ -1184,7 +1226,9 @@ def _run_queued_review(
             )
 
         response_valid = False
-        review_result_path = messages / f'{sequence + 1:06d}-review-result.json'
+        review_result_path = _manifest_evidence_path(
+            run_directory, 'review_result', sequence + 1
+        )
         response_received_at = timestamp() if response_path.is_file() else None
         validation_started_at = timestamp()
         _record_invocation(
@@ -1210,7 +1254,7 @@ def _run_queued_review(
         )
         try:
             response = _read_object(response_path)
-            _require_unique_message_id(response, messages)
+            _require_unique_message_id(response, run_directory)
             verdict = _validate_review_response(
                 response, request=request, artifact_path=artifact_path
             )
@@ -1299,7 +1343,9 @@ def _run_queued_review(
             return decided
 
         sequence += 2
-        remediation_path = messages / f'{sequence:06d}-remediation-request.json'
+        remediation_path = _manifest_evidence_path(
+            run_directory, 'remediation_request', sequence
+        )
         handoff_temporary = _run_evidence_path(run_directory, '.developer-handoff.json')
         remediation: dict[str, Any] = {
             'schema_version': 1,
@@ -1497,7 +1543,9 @@ def _run_queued_review(
                 code=RESUME_EXECUTION_FAILED_CODE,
             )
         handoff_valid = False
-        handoff_path = messages / f'{sequence + 1:06d}-developer-handoff.json'
+        handoff_path = _manifest_evidence_path(
+            run_directory, 'developer_handoff', sequence + 1
+        )
         response_received_at = timestamp() if handoff_temporary.is_file() else None
         validation_started_at = timestamp()
         _record_invocation(
@@ -1525,7 +1573,7 @@ def _run_queued_review(
         )
         try:
             handoff = _read_object(handoff_temporary)
-            _require_unique_message_id(handoff, messages)
+            _require_unique_message_id(handoff, run_directory)
             parsed_handoff = _validate_developer_handoff(
                 handoff, request=remediation, finding_ids=finding_ids
             )
@@ -1665,12 +1713,13 @@ def _resume_developer_request(
     """Retry one durable remediation request and continue the same run."""
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
-    messages = _run_evidence_path(run_directory, 'messages')
     logs = _run_evidence_path(run_directory, 'logs')
     invocations = _run_evidence_path(run_directory, 'invocations')
     sequence = int(request['sequence'])
     response_path = _run_evidence_path(run_directory, '.developer-handoff.json')
-    handoff_path = messages / f'{sequence + 1:06d}-developer-handoff.json'
+    handoff_path = _manifest_evidence_path(
+        run_directory, 'developer_handoff', sequence + 1
+    )
     review_result_path = Path(request['payload']['review_result_path']).resolve()
     review_result = _read_object(review_result_path)
     finding_ids = tuple(
@@ -1707,7 +1756,9 @@ def _resume_developer_request(
                 iteration=run.iteration,
                 allowed_actions=(),
                 timeout_seconds=developer_timeout_seconds,
-                request_path=messages / f'{sequence:06d}-remediation-request.json',
+                request_path=_manifest_evidence_path(
+                    run_directory, 'remediation_request', sequence
+                ),
                 response_path=response_path,
                 stdout_path=logs / f'{developer_stem}.stdout.log',
                 stderr_path=logs / f'{developer_stem}.stderr.log',
@@ -1877,7 +1928,7 @@ def _resume_developer_request(
     )
     try:
         handoff = _read_object(response_path)
-        _require_unique_message_id(handoff, messages)
+        _require_unique_message_id(handoff, run_directory)
         parsed = _validate_developer_handoff(
             handoff, request=request, finding_ids=finding_ids
         )
@@ -2114,10 +2165,9 @@ def _resume_reviewer_validation(
     """Revalidate a durable reviewer response and continue without relaunching."""
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
-    messages = _run_evidence_path(run_directory, 'messages')
     sequence = int(request['sequence'])
     temporary = _run_evidence_path(run_directory, '.review-result.json')
-    canonical = messages / f'{sequence + 1:06d}-review-result.json'
+    canonical = _manifest_evidence_path(run_directory, 'review_result', sequence + 1)
     response_path, is_temporary = _recovery_response_path(temporary, canonical)
     if action is not RecoveryAction.APPLY_CONCLUSION:
         record = _prepare_recovered_validation(
@@ -2135,7 +2185,7 @@ def _resume_reviewer_validation(
     try:
         response = _read_object(response_path)
         if is_temporary:
-            _require_unique_message_id(response, messages)
+            _require_unique_message_id(response, run_directory)
         verdict = _validate_review_response(
             response, request=request, artifact_path=artifact_path
         )
@@ -2193,7 +2243,9 @@ def _resume_reviewer_validation(
         return decided
     next_sequence = sequence + 2
     review_artifact_path = Path(request['payload']['artifact_path'])
-    remediation_path = messages / f'{next_sequence:06d}-remediation-request.json'
+    remediation_path = _manifest_evidence_path(
+        run_directory, 'remediation_request', next_sequence
+    )
     remediation: dict[str, Any] = {
         'schema_version': 1,
         'message_id': str(uuid4()),
@@ -2253,10 +2305,11 @@ def _resume_developer_validation(
     """Revalidate a durable developer response and continue without relaunching."""
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
-    messages = _run_evidence_path(run_directory, 'messages')
     sequence = int(request['sequence'])
     temporary = _run_evidence_path(run_directory, '.developer-handoff.json')
-    canonical = messages / f'{sequence + 1:06d}-developer-handoff.json'
+    canonical = _manifest_evidence_path(
+        run_directory, 'developer_handoff', sequence + 1
+    )
     response_path, is_temporary = _recovery_response_path(temporary, canonical)
     if action is not RecoveryAction.APPLY_CONCLUSION:
         record = _prepare_recovered_validation(
@@ -2278,7 +2331,7 @@ def _resume_developer_validation(
     try:
         handoff = _read_object(response_path)
         if is_temporary:
-            _require_unique_message_id(handoff, messages)
+            _require_unique_message_id(handoff, run_directory)
         parsed = _validate_developer_handoff(
             handoff, request=request, finding_ids=finding_ids
         )
@@ -2397,12 +2450,10 @@ def _resume_active_attempt(
         run_directory,
         '.review-result.json' if role == 'reviewer' else '.developer-handoff.json',
     )
-    canonical = _run_evidence_path(
+    canonical = _manifest_evidence_path(
         run_directory,
-        'messages',
-        f'{sequence + 1:06d}-review-result.json'
-        if role == 'reviewer'
-        else f'{sequence + 1:06d}-developer-handoff.json',
+        'review_result' if role == 'reviewer' else 'developer_handoff',
+        sequence + 1,
     )
     response_present = temporary.is_file() or canonical.is_file()
     action = recovery_action(
@@ -2557,7 +2608,8 @@ def _resume_intermediate_state(
         _validate_remediation_request(request, run_directory=run_directory)
         _write_json_atomic(
             _run_evidence_path(
-                run_directory, 'messages', f'{sequence:06d}-remediation-request.json'
+                run_directory,
+                *Path(evidence_path('remediation_request', ordinal=sequence)).parts,
             ),
             request,
             'remediation_request',
@@ -2790,7 +2842,8 @@ def _resume_review(
         raise WorkerError(message)
     sequence = len(chain) + 1
     request_path = _run_evidence_path(
-        run_directory, 'messages', f'{sequence:06d}-remediation-request.json'
+        run_directory,
+        *Path(evidence_path('remediation_request', ordinal=sequence)).parts,
     )
     recovery_request: dict[str, Any] = {
         'schema_version': 1,

@@ -34,6 +34,11 @@ from agent_orchestra.issue_review import (
     run_issue_review,
 )
 from agent_orchestra.issue_sources import IssueSourceError, fetch_issue, write_snapshot
+from agent_orchestra.manifests import (
+    ManifestError,
+    evidence_path,
+    validate_packaged_manifests,
+)
 from agent_orchestra.models import (
     HUMAN_ACTION_STATES,
     IssueJob,
@@ -499,7 +504,9 @@ def _enqueue_issue(args: argparse.Namespace, store: RunStore) -> int:
             source_digest=snapshot.digest,
         )
         root = args.runs_directory.expanduser().resolve()
-        snapshot_path = resolve_evidence_path(root, job.id, 'issue.json')
+        snapshot_path = resolve_evidence_path(
+            root, job.id, *Path(evidence_path('issue_snapshot')).parts
+        )
         write_snapshot(root, job.id, snapshot_path, snapshot)
         store.initialize()
         store.add_issue(job)
@@ -1417,6 +1424,19 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
     """Run the command-line interface."""
 
     arguments = list(argv) if argv is not None else sys.argv[1:]
+    try:
+        validate_packaged_manifests()
+    except ManifestError as error:
+        print(
+            json.dumps(
+                {
+                    'schema_version': CLI_SCHEMA_VERSION,
+                    'error': {'code': error.code, 'message': str(error)},
+                },
+                indent=2,
+            )
+        )
+        return 2
     reviewer_command: list[str] = []
     command_name = next(
         (name for name in ('run', 'review-issue') if name in arguments), None

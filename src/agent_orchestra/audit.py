@@ -19,6 +19,13 @@ from agent_orchestra.evidence import (
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import InvocationEvidenceError, read_records
+from agent_orchestra.manifests import (
+    canonical_evidence_type,
+    canonical_message_evidence,
+    evidence_ordinal,
+    evidence_path,
+    manifest_owns_evidence_namespace,
+)
 from agent_orchestra.models import (
     IssueJob,
     JobTransition,
@@ -409,19 +416,19 @@ def _validate_canonical_json(
             findings.append(
                 _finding('job_id_mismatch', 'evidence job ID differs', relative)
             )
-        path_iteration: int | None = None
-        parts = Path(relative).parts
-        if len(parts) >= 3 and parts[0] == 'iterations':
-            try:
-                path_iteration = int(parts[1])
-            except ValueError:
-                findings.append(
-                    _finding(
-                        'iteration_mismatch',
-                        'iteration evidence path has an invalid ordinal',
-                        relative,
-                    )
+        path_iteration = evidence_ordinal(evidence_type, relative)
+        is_root_issue_snapshot = (
+            evidence_type == 'issue_snapshot'
+            and relative == evidence_path('issue_snapshot')
+        )
+        if path_iteration is None and not is_root_issue_snapshot:
+            findings.append(
+                _finding(
+                    'iteration_mismatch',
+                    'iteration evidence path has an invalid ordinal',
+                    relative,
                 )
+            )
         if evidence_type in _MESSAGE_SCHEMAS and isinstance(job, Run):
             scope = document['scope']
             expected_digest = reviewing_digests.get(document['iteration'])
@@ -477,9 +484,9 @@ def _validate_canonical_json(
                     )
                 )
         if evidence_type == 'issue_snapshot':
-            if path_iteration is None:
+            if is_root_issue_snapshot:
                 root_issue_digest = document['source_digest']
-            else:
+            elif path_iteration is not None:
                 issue_snapshot_digests[path_iteration] = document['source_digest']
         elif evidence_type == 'issue_review_request':
             if document['iteration'] != path_iteration:
@@ -545,7 +552,7 @@ def _validate_canonical_json(
                     _finding(
                         'source_digest_mismatch',
                         'root issue snapshot does not match the first iteration',
-                        'issue.json',
+                        evidence_path('issue_snapshot'),
                     )
                 )
             if issue_snapshot_digests[latest_iteration] != job.source_digest:
@@ -553,7 +560,7 @@ def _validate_canonical_json(
                     _finding(
                         'source_digest_mismatch',
                         'latest issue snapshot does not match the selected job',
-                        f'iterations/{latest_iteration:06d}/issue.json',
+                        evidence_path('issue_snapshot', ordinal=latest_iteration),
                     )
                 )
         elif root_issue_digest is not None and root_issue_digest != job.source_digest:
@@ -561,7 +568,7 @@ def _validate_canonical_json(
                 _finding(
                     'source_digest_mismatch',
                     'root issue snapshot does not match the selected job',
-                    'issue.json',
+                    evidence_path('issue_snapshot'),
                 )
             )
     return history, findings
@@ -571,8 +578,11 @@ def _validate_source_message_chain(root: Path, job: Run) -> list[AuditFinding]:
     """Apply the workflow's exact source-message correlation rules."""
 
     job_directory = resolve_evidence_path(root, str(job.id))
-    messages = resolve_evidence_path(root, str(job.id), 'messages')
-    if not messages.is_dir():
+    if not job_directory.is_dir() or not any(
+        canonical_message_evidence(path.relative_to(job_directory).as_posix())
+        is not None
+        for path in job_directory.rglob('*.json')
+    ):
         return []
     try:
         read_message_chain(job_directory, str(job.id))
@@ -738,10 +748,11 @@ def _inventory_unindexed(
                 if index_usable
                 else 'unverifiable'
             )
+            evidence_type = _canonical_evidence_type(relative)
             evidence.append(
                 {
                     'job_id': job_id,
-                    'evidence_type': _canonical_evidence_type(relative),
+                    'evidence_type': evidence_type,
                     'path': relative,
                     'size': item.stat(follow_symlinks=False).st_size,
                     'sha256': None,
@@ -749,6 +760,14 @@ def _inventory_unindexed(
                     'status': status,
                 }
             )
+            if evidence_type is None and manifest_owns_evidence_namespace(relative):
+                findings.append(
+                    _finding(
+                        'unknown_canonical_evidence',
+                        'canonical-looking evidence path is not declared by the manifest',
+                        relative,
+                    )
+                )
             if index_usable and not temporary:
                 findings.append(
                     _finding(
@@ -762,23 +781,42 @@ def _inventory_unindexed(
     return evidence, findings
 
 
-def _canonical_evidence_type(relative: str) -> str | None:
-    """Infer the schema type of one canonical path independently of the index."""
+def _validate_indexed_manifest_paths(
+    entries: Iterable[dict[str, object]],
+) -> list[AuditFinding]:
+    """Validate indexed paths against manifest-owned evidence namespaces."""
 
-    if relative == 'issue.json' or re.fullmatch(
-        r'iterations/\d{6}/issue\.json', relative
-    ):
-        return 'issue_snapshot'
-    iteration_match = re.fullmatch(r'iterations/\d{6}/(request|result)\.json', relative)
-    if iteration_match is not None:
-        return f'issue_review_{iteration_match.group(1)}'
-    message_match = re.fullmatch(
-        r'messages/\d{6}-(review-request|review-result|remediation-request|developer-handoff)\.json',
-        relative,
-    )
-    if message_match is not None:
-        return message_match.group(1).replace('-', '_')
-    return None
+    findings: list[AuditFinding] = []
+    for entry in entries:
+        relative = str(entry['path'])
+        indexed_type = str(entry['evidence_type'])
+        canonical_type = _canonical_evidence_type(relative)
+        if canonical_type is None and manifest_owns_evidence_namespace(relative):
+            findings.append(
+                _finding(
+                    'unknown_canonical_evidence',
+                    'canonical-looking evidence path is not declared by the manifest',
+                    relative,
+                )
+            )
+        elif canonical_type is not None and canonical_type != indexed_type:
+            findings.append(
+                _finding(
+                    'evidence_type_mismatch',
+                    (
+                        f'integrity evidence type {indexed_type!r} differs from '
+                        f'manifest type {canonical_type!r}'
+                    ),
+                    relative,
+                )
+            )
+    return findings
+
+
+def _canonical_evidence_type(relative: str) -> str | None:
+    """Infer canonical schema type through the packaged evidence manifest."""
+
+    return canonical_evidence_type(relative)
 
 
 def _is_known_temporary(relative: str) -> bool:
@@ -805,6 +843,7 @@ def _result(
         'evidence_missing',
         'evidence_modified',
         'evidence_path_escape',
+        'evidence_type_mismatch',
         'evidence_unreadable',
         'invalid_canonical_json',
         'invalid_invocation_evidence',
@@ -819,6 +858,7 @@ def _result(
         'role_mismatch',
         'scope_digest_mismatch',
         'unindexed_evidence',
+        'unknown_canonical_evidence',
         'retention_marker_malformed',
         'unexpected_evidence_after_expiry',
     }
@@ -966,6 +1006,8 @@ def build_audit_document(
         return expired_document
     entries, backfilled_at, index_findings = _read_index(root, job_id)
     findings.extend(index_findings)
+    if verify:
+        findings.extend(_validate_indexed_manifest_paths(entries))
     evidence: list[dict[str, object]] = []
     for entry in entries:
         if verify:

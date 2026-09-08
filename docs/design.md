@@ -204,6 +204,35 @@ as `20260902T130000Z-a7f3c921`. The timestamp makes IDs sortable, and the random
 suffix avoids collisions. Consumers treat IDs as opaque strings so older
 UUID-based runs remain readable.
 
+## Packaged knowledge manifests
+
+Volatile provider, runtime-adapter, and canonical evidence naming knowledge is
+stored as TOML under `agent_orchestra/manifests`. Every manifest has this
+required header:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | String | Stable identifier matching the packaged filename. |
+| `kind` | String | `provider`, `runtime`, or `evidence`. |
+| `schema_version` | Integer | Version of the manifest document schema. |
+| `min_engine_version` | Integer | Lowest manifest engine able to interpret it. |
+
+Provider manifests contain ordered `failure_rules`; the first matching regular
+expression determines the public error code. Runtime manifests contain the
+ordered argument arrays for `reviewer`, `issue_reviewer`, and `developer`
+profiles. The evidence manifest pairs each writer template with its audit
+recognition pattern, so producers and consumers share one naming contract.
+Filesystem ordering never affects resolution.
+
+Manifest schema version `1` is the only accepted document shape;
+`manifest_schema_version_unsupported` rejects any other version.
+`MANIFEST_ENGINE_VERSION` is the interpreter contract. Startup validates every
+packaged manifest. Invalid TOML, missing or mistyped fields, invalid patterns,
+and incomplete profiles fail with `manifest_malformed`. A manifest whose
+`min_engine_version` exceeds the running engine fails with
+`manifest_engine_too_old`. Neither error permits partial application. Manifests
+ship with the Python package and are never fetched remotely.
+
 ## Job and task output
 
 CLI output schema version 10 uses the public `job` -> `task` -> `attempt`

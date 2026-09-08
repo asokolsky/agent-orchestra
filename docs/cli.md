@@ -27,6 +27,15 @@ agent-orchestra COMMAND [OPTIONS]
 Both forms accept the same arguments. Examples below use the installed entry
 point for brevity.
 
+Before parsing or running a command, the CLI validates its packaged provider,
+runtime-adapter, and evidence-name manifests. An invalid manifest exits 2 with
+a schema-versioned JSON error whose code is `manifest_malformed`,
+`manifest_schema_version_unsupported`, or `manifest_engine_too_old`. These failures
+indicate an invalid or incompatible installation; reinstall or upgrade
+`agent-orchestra` rather than editing installed package data. The manifest
+schema and compatibility contract are documented in
+[Design and protocol](design.md#packaged-knowledge-manifests).
+
 Examples:
 
 ```shell
@@ -599,7 +608,7 @@ Stable finding codes are `integrity_index_missing`,
 `integrity_index_malformed`, `integrity_index_backfilled`,
 `duplicate_evidence_identity`, `evidence_missing`, `evidence_modified`,
 `evidence_unreadable`, `evidence_path_escape`, `unindexed_evidence`,
-`invalid_canonical_json`,
+`unknown_canonical_evidence`, `evidence_type_mismatch`, `invalid_canonical_json`,
 `invalid_invocation_evidence`, `job_id_mismatch`,
 `iteration_mismatch`, `scope_digest_mismatch`, `source_digest_mismatch`,
 `message_sequence_mismatch`,

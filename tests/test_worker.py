@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra.manifests import evidence_path
 from agent_orchestra.schemas import CHANGES_REQUESTED_WITHOUT_FINDINGS
 from agent_orchestra.worker import (
     APPROVED_WITH_FINDINGS,
@@ -31,6 +32,7 @@ from agent_orchestra.worker import (
     _validate_remediation_request,
     _validate_review_request,
     _validate_review_response,
+    read_message_chain,
 )
 
 if TYPE_CHECKING:
@@ -405,9 +407,125 @@ def test_rejects_duplicate_persisted_message_id(tmp_path: Path) -> None:
     """Reject a response identity already used by durable evidence."""
 
     message_id = str(uuid4())
-    (tmp_path / '000001-request.json').write_text(
-        json.dumps({'message_id': message_id})
-    )
+    duplicate = tmp_path / evidence_path('review_request', ordinal=1)
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_text(json.dumps({'message_id': message_id}))
 
     with pytest.raises(WorkerError, match=DUPLICATE_MESSAGE_ID):
         _require_unique_message_id({'message_id': message_id}, tmp_path)
+
+
+def test_manifest_message_paths_are_written_and_recovered(tmp_path: Path) -> None:
+    """Discover, order, correlate, and recover every manifest message type."""
+
+    artifact = tmp_path / 'artifacts/review.md'
+    artifact.parent.mkdir()
+    artifact.write_text('# Review\n', encoding='utf-8')
+    request, result = review_documents(artifact)
+    request.update(
+        {
+            'schema_version': 1,
+            'in_reply_to': None,
+            'message_type': 'review_request',
+            'sender': 'orchestrator',
+            'recipient': 'reviewer',
+            'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+            'payload': {
+                'objective': 'Review.',
+                'allowed_actions': [],
+                'timeout_seconds': 30,
+                'artifact_path': str(artifact),
+                'prior_review_path': None,
+            },
+        }
+    )
+    finding = {
+        'finding_id': 'F-001',
+        'severity': 'medium',
+        'title': 'Finding',
+        'path': 'example.py',
+        'line': 1,
+        'explanation': 'Explanation.',
+        'acceptance_criterion': 'Fix it.',
+    }
+    result['payload']['verdict'] = 'changes_requested'
+    result['payload']['findings'] = [finding]
+    result_path = tmp_path / evidence_path('review_result', ordinal=2)
+    remediation = {
+        'schema_version': 1,
+        'message_id': str(uuid4()),
+        'in_reply_to': result['message_id'],
+        'run_id': request['run_id'],
+        'sequence': 3,
+        'iteration': 1,
+        'message_type': 'remediation_request',
+        'sender': 'orchestrator',
+        'recipient': 'developer',
+        'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+        'scope': request['scope'],
+        'payload': {
+            'objective': 'Fix it.',
+            'allowed_actions': [],
+            'timeout_seconds': 30,
+            'review_result_path': str(result_path),
+            'review_artifact_path': str(artifact),
+        },
+    }
+    _, handoff = developer_documents()
+    handoff.update(
+        {
+            'in_reply_to': remediation['message_id'],
+            'run_id': request['run_id'],
+            'scope': request['scope'],
+        }
+    )
+    handoff['payload']['dispositions'] = [
+        {
+            'finding_id': 'F-001',
+            'disposition': 'addressed',
+            'rationale': 'Fixed.',
+        }
+    ]
+    documents = [request, result, remediation, handoff]
+    message_types = [
+        'review_request',
+        'review_result',
+        'remediation_request',
+        'developer_handoff',
+    ]
+    for sequence, (message_type, document) in enumerate(
+        zip(message_types, documents, strict=True), start=1
+    ):
+        path = tmp_path / evidence_path(message_type, ordinal=sequence)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document), encoding='utf-8')
+
+    recovered = read_message_chain(tmp_path, str(request['run_id']))
+
+    assert [document['message_type'] for _, document in recovered] == message_types
+
+
+def test_read_message_chain_rejects_unknown_message(tmp_path: Path) -> None:
+    """Fail closed when an undeclared JSON file occupies the message namespace."""
+
+    messages = tmp_path / 'messages'
+    messages.mkdir()
+    (messages / '000002-future.json').write_text('{}', encoding='utf-8')
+
+    with pytest.raises(WorkerError, match='unknown canonical message path'):
+        read_message_chain(tmp_path, str(uuid4()))
+
+
+def test_read_message_chain_rejects_symlinked_message_directory(
+    tmp_path: Path,
+) -> None:
+    """Fail closed without traversing a symlinked canonical message namespace."""
+
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    run_directory = tmp_path / 'run'
+    run_directory.mkdir()
+    (run_directory / 'messages').symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkerError, match='message namespace is unsafe'):
+        read_message_chain(run_directory, str(uuid4()))
