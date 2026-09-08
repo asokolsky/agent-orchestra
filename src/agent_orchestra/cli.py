@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import (
     EvidencePathError,
     resolve_evidence_path,
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 9
+CLI_SCHEMA_VERSION = 10
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
@@ -246,6 +247,11 @@ def build_parser() -> argparse.ArgumentParser:
     task = commands.add_parser('task', help='show one task and its attempts')
     task.add_argument('task_id')
     task.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
+
+    audit = commands.add_parser('audit', help='audit one job and its durable evidence')
+    audit.add_argument('job_id')
+    audit.add_argument('--verify', action='store_true')
+    audit.add_argument('--runs-directory', type=Path, default=DEFAULT_RUNS_DIRECTORY)
 
     run = commands.add_parser('run', help='run a bounded review-remediation loop')
     run.add_argument('job_id')
@@ -904,6 +910,39 @@ def _task(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
+def _audit(args: argparse.Namespace, store: RunStore) -> int:
+    """Reconstruct and optionally verify one job's durable local history."""
+
+    if not args.database.is_file():
+        _write_job_error(
+            'state_database_not_found',
+            f'state database not found: {args.database}',
+            job_id=args.job_id,
+        )
+        return 2
+    try:
+        try:
+            job: Run | IssueJob = store.get(args.job_id)
+        except RunNotFoundError:
+            job = store.get_issue(args.job_id)
+        actions = () if isinstance(job, Run) else store.list_issue_actions(job.id)
+        document = build_audit_document(
+            job,
+            store.list_transitions(str(job.id)),
+            actions,
+            args.runs_directory,
+            verify=args.verify,
+        )
+    except RunNotFoundError as error:
+        _write_job_error('job_not_found', f'job not found: {error}', job_id=args.job_id)
+        return 2
+    except (EvidencePathError, OSError) as error:
+        _write_job_error('invalid_evidence', str(error), job_id=args.job_id)
+        return 2
+    print(json.dumps(document, indent=2))
+    return 0
+
+
 def _run(args: argparse.Namespace, store: RunStore) -> int:
     """Consume one queued local run through its bounded agent loop."""
 
@@ -1150,6 +1189,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _tasks(args, store)
     if args.command == 'task':
         return _task(args, store)
+    if args.command == 'audit':
+        return _audit(args, store)
     if args.command == 'run':
         return _run(args, store)
     if args.command == 'resume':

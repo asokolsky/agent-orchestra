@@ -18,6 +18,7 @@ import pytest
 
 from agent_orchestra import cli, worker
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
+from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import (
     DEFAULT_DATABASE,
     DEFAULT_RUNS_DIRECTORY,
@@ -690,7 +691,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 9,
+        'schema_version': 10,
         'directory': str(projects),
         'jobs': [
             {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -904,7 +905,7 @@ def test_jobs_lists_persisted_job(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 9,\n  "jobs": [\n    {\n')
+    assert output.startswith('{\n  "schema_version": 10,\n  "jobs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
@@ -919,7 +920,7 @@ def test_jobs_lists_persisted_job(
     }
     assert set(document['jobs'][0]) == expected_fields
     assert document == {
-        'schema_version': 9,
+        'schema_version': 10,
         'jobs': [
             {
                 'job_id': str(run.id),
@@ -958,7 +959,7 @@ def test_job_selects_one_job_by_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 9
+    assert document['schema_version'] == 10
     assert document['job']['job_id'] == str(first.id)
     assert document['job']['current'] == []
 
@@ -982,7 +983,7 @@ def test_job_reads_persisted_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 9
+    assert document['schema_version'] == 10
     assert document['job']['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -1003,7 +1004,7 @@ def test_jobs_lists_empty_jobs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 9,
+        'schema_version': 10,
         'jobs': [],
         'error': None,
     }
@@ -1138,7 +1139,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
         'logs/000001-reviewer.stderr.log',
     } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 9,
+        'schema_version': 10,
         'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1446,6 +1447,15 @@ def test_worker_remediates_and_reviews_new_digest(
     indexed_types = {
         entry['path']: entry['evidence_type'] for entry in integrity['entries']
     }
+    assert {
+        path: _canonical_evidence_type(path)
+        for path in indexed_types
+        if path.startswith('messages/')
+    } == {
+        path: evidence_type
+        for path, evidence_type in indexed_types.items()
+        if path.startswith('messages/')
+    }
     assert indexed_types['messages/000004-developer-handoff.json'] == (
         'developer_handoff'
     )
@@ -1505,7 +1515,7 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 9,
+        'schema_version': 10,
         'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
