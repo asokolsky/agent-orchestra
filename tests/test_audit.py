@@ -627,7 +627,7 @@ def test_verify_missing_index_is_unverifiable(
         source_digest='sha256:' + 'd' * 64,
     )
     store.add_issue(job)
-    ordinary = root / job.id / 'issue.json'
+    ordinary = root / job.id / 'pre-index.json'
     ordinary.parent.mkdir(parents=True)
     ordinary.write_text('{"pre_index": true}\n')
 
@@ -640,6 +640,49 @@ def test_verify_missing_index_is_unverifiable(
     assert document['findings'][0]['code'] == 'integrity_index_missing'
     assert document['evidence'][0]['status'] == 'unverifiable'
     assert all(item['code'] != 'unindexed_evidence' for item in document['findings'])
+
+
+def test_verify_backfilled_index_does_not_treat_omissions_as_tampering(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep files omitted by a reconciler-built index unverifiable."""
+
+    database, root, job = _source_job(tmp_path)
+    index_path = root / str(job.id) / '.integrity.json'
+    index = json.loads(index_path.read_text())
+    index['backfilled_at'] = '2026-09-08T08:00:00Z'
+    index_path.write_text(json.dumps(index))
+    for ordinal in range(5):
+        (root / str(job.id) / f'pre-index-{ordinal}.log').write_text('legacy')
+
+    assert main(_arguments(database, root, str(job.id), verify=True)) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['result'] == 'unverifiable'
+    assert 'integrity_index_backfilled' in {
+        item['code'] for item in document['findings']
+    }
+    assert all(item['code'] != 'unindexed_evidence' for item in document['findings'])
+    omitted = [item for item in document['evidence'] if item['path'].startswith('pre-')]
+    assert len(omitted) == 5
+    assert {item['status'] for item in omitted} == {'unverifiable'}
+
+
+def test_verify_missing_index_still_detects_malformed_canonical_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Aggregate detectable tampering even when the integrity index is absent."""
+
+    database, root, job = _issue_job(tmp_path)
+    (root / job.id / 'iterations/000001/result.json').write_text('{not-json')
+    (root / job.id / '.integrity.json').unlink()
+
+    assert main(_arguments(database, root, job.id, verify=True)) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    codes = {item['code'] for item in document['findings']}
+    assert document['result'] == 'failed'
+    assert {'integrity_index_missing', 'invalid_canonical_json'} <= codes
 
 
 def test_verify_completed_issue_job_reports_iterations_and_provider_actions(

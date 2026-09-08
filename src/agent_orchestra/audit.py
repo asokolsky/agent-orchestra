@@ -694,7 +694,7 @@ def _inventory_unindexed(
             evidence.append(
                 {
                     'job_id': job_id,
-                    'evidence_type': None,
+                    'evidence_type': _canonical_evidence_type(relative),
                     'path': relative,
                     'size': item.stat(follow_symlinks=False).st_size,
                     'sha256': None,
@@ -713,6 +713,25 @@ def _inventory_unindexed(
 
     visit(job_directory)
     return evidence, findings
+
+
+def _canonical_evidence_type(relative: str) -> str | None:
+    """Infer the schema type of one canonical path independently of the index."""
+
+    if relative == 'issue.json' or re.fullmatch(
+        r'iterations/\d{6}/issue\.json', relative
+    ):
+        return 'issue_snapshot'
+    iteration_match = re.fullmatch(r'iterations/\d{6}/(request|result)\.json', relative)
+    if iteration_match is not None:
+        return f'issue_review_{iteration_match.group(1)}'
+    message_match = re.fullmatch(
+        r'messages/\d{6}-(review-request|review-result|remediation-request|developer-handoff)\.json',
+        relative,
+    )
+    if message_match is not None:
+        return message_match.group(1).replace('-', '_')
+    return None
 
 
 def _is_known_temporary(relative: str) -> bool:
@@ -796,21 +815,26 @@ def build_audit_document(
     tasks, in_progress, task_findings = _tasks(root, job_id)
     findings.extend(task_findings)
     evidence.extend(in_progress)
+    index_usable = not any(
+        finding.code in {'integrity_index_missing', 'integrity_index_malformed'}
+        for finding in index_findings
+    )
     inventory, inventory_findings = _inventory_unindexed(
         root,
         job_id,
         {str(entry['path']) for entry in entries},
         {str(entry['path']) for entry in in_progress},
-        index_usable=not any(
-            finding.code in {'integrity_index_missing', 'integrity_index_malformed'}
-            for finding in index_findings
-        ),
+        index_usable=index_usable and backfilled_at is None,
     )
     evidence.extend(inventory)
     if verify:
         findings.extend(inventory_findings)
+    canonical_entries = [
+        *entries,
+        *(item for item in inventory if item['evidence_type'] is not None),
+    ]
     history, canonical_findings = _validate_canonical_json(
-        root, job, entries, transitions
+        root, job, canonical_entries, transitions
     )
     if verify:
         findings.extend(canonical_findings)
