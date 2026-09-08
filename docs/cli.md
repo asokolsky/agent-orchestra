@@ -458,9 +458,10 @@ Terminate an unrunnable source-code job explicitly with:
 agent-orchestra [--database DATABASE] cancel JOB_ID --reason TEXT
 ```
 
-Cancellation refuses an available worktree and any job already in a terminal
-state. It records the reason on the transition to `cancelled` and never removes
-evidence or integrity metadata.
+Cancellation applies only to source-code jobs. It refuses an issue-review job,
+an available worktree, and any job already in a terminal state. It records the
+reason on the transition to `cancelled` and never removes evidence or integrity
+metadata.
 
 If a stored job contains a state or scenario unknown to this installation,
 `jobs` keeps the row in the array as `job_id`, `created_at`, and a stable

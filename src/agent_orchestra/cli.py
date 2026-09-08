@@ -866,9 +866,20 @@ def _cancel(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
         store.initialize()
         run = store.get(args.job_id)
     except RunNotFoundError:
-        _write_job_error(
-            'job_not_found', f'job not found: {args.job_id}', job_id=args.job_id
-        )
+        try:
+            store.get_issue(args.job_id)
+        except RunNotFoundError:
+            _write_job_error(
+                'job_not_found', f'job not found: {args.job_id}', job_id=args.job_id
+            )
+        except PersistedEnumError as error:
+            _write_job_error(error.code, str(error), job_id=args.job_id)
+        else:
+            _write_job_error(
+                'job_not_cancellable',
+                'cancellation applies to source-code jobs; this is an issue-review job',
+                job_id=args.job_id,
+            )
         return 2
     except PersistedEnumError as error:
         _write_job_error(error.code, str(error), job_id=args.job_id)

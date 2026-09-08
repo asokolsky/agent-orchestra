@@ -1217,6 +1217,50 @@ def test_cancel_reports_unrecognized_persisted_state(
     assert document['error']['code'] == 'unknown_job_state'
 
 
+def test_cancel_reports_issue_job_as_not_cancellable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Distinguish an existing issue-review job from an unknown identifier."""
+
+    database = tmp_path / 'state.db'
+    store = RunStore(database)
+    store.initialize()
+    issue = IssueJob.create(
+        provider='github',
+        host='github.com',
+        remote_url='https://github.com/acme/widgets/issues/12',
+        namespace='acme',
+        project='widgets',
+        issue_number=12,
+        title='Feature',
+        author='author',
+        source_updated_at='2026-09-08T08:00:00Z',
+        source_digest='sha256:' + 'a' * 64,
+    )
+    store.add_issue(issue)
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'cancel',
+                issue.id,
+                '--reason',
+                'wrong scenario',
+            ]
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['job_id'] == issue.id
+    assert document['error'] == {
+        'code': 'job_not_cancellable',
+        'message': 'cancellation applies to source-code jobs; '
+        'this is an issue-review job',
+    }
+
+
 def test_run_writes_to_identifier_shard_in_non_utc_timezone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
