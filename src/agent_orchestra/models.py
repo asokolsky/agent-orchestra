@@ -245,11 +245,12 @@ class JobTransition:
     """One ordered persistent state transition for any job scenario."""
 
     job_id: str
-    scenario: ScenarioType
-    from_state: RunState | None
-    to_state: RunState
+    scenario: ScenarioType | str
+    from_state: RunState | str | None
+    to_state: RunState | str
     scope_digest: str | None
     occurred_at: datetime
+    unrecognized_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

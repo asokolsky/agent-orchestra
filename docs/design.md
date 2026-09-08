@@ -213,7 +213,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-10 CLI. This
+column and field names. Those names are not exposed by the schema-11 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -228,6 +228,16 @@ Schema version history:
   provider actions to the job and task views.
 - Version 10 adds deterministic audit documents, ordered transitions, integrity
   verification, aggregated findings, and the optional verification result.
+- Version 11 reports unrecognized persisted job enum values through stable
+  query errors and retains unrecognized transition values as unverifiable audit
+  findings.
+
+Persisted state and scenario strings are widened through shared defensive
+decoders. A job row with an unrecognized value produces a stable query error;
+list views retain that row as an error entry. Transition history retains raw
+unrecognized values so audit can report the affected entry without discarding
+the rest of the history. The historical `awaiting_review` state is normalized
+to `reviewing` only at the read sites that already accepted it.
 
 ## Batch enqueue output
 
