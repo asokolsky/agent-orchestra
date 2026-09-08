@@ -213,7 +213,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-11 CLI. This
+column and field names. Those names are not exposed by the schema-12 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -231,6 +231,8 @@ Schema version history:
 - Version 11 reports unrecognized persisted job enum values through stable
   query errors and retains unrecognized transition values as unverifiable audit
   findings.
+- Version 12 adds effective global settings, explicit retention planning and
+  application documents, and the `expired` audit result.
 
 Persisted state and scenario strings are widened through shared defensive
 decoders. A job row with an unrecognized value produces a stable query error;
