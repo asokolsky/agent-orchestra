@@ -36,6 +36,7 @@ from agent_orchestra.schemas import (
     ReviewResultMessageSchema,
 )
 from agent_orchestra.worker import WorkerError, read_message_chain
+from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -110,6 +111,7 @@ def _transition_document(transition: JobTransition) -> dict[str, object]:
         'to_state': str(transition.to_state),
         'scope_digest': transition.scope_digest,
         'occurred_at': _timestamp(transition.occurred_at),
+        'reason': transition.reason,
     }
 
 
@@ -852,6 +854,20 @@ def build_audit_document(
     root = runs_directory.expanduser().resolve()
     job_id = str(job.id)
     findings: list[AuditFinding] = []
+    if isinstance(job, Run):
+        status = worktree_status(job.worktree_path)
+        if status is not WorktreeStatus.AVAILABLE:
+            findings.append(
+                _finding(
+                    f'worktree_{status}',
+                    (
+                        'recorded worktree directory is absent'
+                        if status is WorktreeStatus.MISSING
+                        else 'recorded path is not a Git worktree'
+                    ),
+                    str(job.worktree_path),
+                )
+            )
     for index, transition in enumerate(transitions):
         for field in transition.unrecognized_fields:
             public_field = 'scenario' if field == 'scenario' else 'state'
@@ -875,7 +891,7 @@ def build_audit_document(
             )
         )
         pending_document: dict[str, object] = {
-            'schema_version': 12,
+            'schema_version': 13,
             'job': _job_document(job),
             'transitions': [_transition_document(item) for item in transitions],
             'operations': _derived_operations(transitions),
@@ -928,7 +944,7 @@ def build_audit_document(
             if isinstance(entry, dict)
         ]
         expired_document: dict[str, object] = {
-            'schema_version': 12,
+            'schema_version': 13,
             'job': _job_document(job),
             'transitions': [_transition_document(item) for item in transitions],
             'operations': _derived_operations(transitions),
@@ -996,7 +1012,7 @@ def build_audit_document(
             if transition.scope_digest is None
         )
     document: dict[str, object] = {
-        'schema_version': 12,
+        'schema_version': 13,
         'job': _job_document(job),
         'transitions': [_transition_document(item) for item in transitions],
         'operations': _derived_operations(transitions),

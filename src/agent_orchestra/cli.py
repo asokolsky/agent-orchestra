@@ -63,13 +63,14 @@ from agent_orchestra.store import (
     UnreadableJob,
 )
 from agent_orchestra.worker import WorkerError, resume_review, run_queued_review
+from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 12
+CLI_SCHEMA_VERSION = 13
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 PUBLIC_WORKER_ERROR_CODES = {'run_not_resumable': 'job_not_resumable'}
@@ -261,6 +262,10 @@ def build_parser(settings: Settings | None = None) -> argparse.ArgumentParser:
         metavar='STATE',
         help='include jobs in this durable state; repeat to select more states',
     )
+
+    cancel = commands.add_parser('cancel', help='cancel one unrunnable source-code job')
+    cancel.add_argument('job_id')
+    cancel.add_argument('--reason', required=True)
     jobs.add_argument(
         '--attention',
         action='store_true',
@@ -577,6 +582,7 @@ def _job_summary(run: Run) -> dict[str, object]:
         'scenario': str(run.scenario),
         'repository_path': str(run.repo_path),
         'worktree_path': str(run.worktree_path),
+        'worktree_status': str(worktree_status(run.worktree_path)),
         'state': str(run.state),
         'base_sha': run.base_sha,
         'head_sha': run.head_sha,
@@ -790,7 +796,8 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
             f'unknown durable job state: {invalid}',
         )
         return 2
-    selected_states = {known_states[value] for value in args.state}
+    explicit_states = {known_states[value] for value in args.state}
+    selected_states = set(explicit_states)
     if args.attention:
         selected_states.update(HUMAN_ACTION_STATES)
     if not args.database.is_file():
@@ -817,6 +824,19 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
             for summary in summaries
             if 'error' in summary or RunState(str(summary['state'])) in selected_states
         ]
+    if args.attention:
+        summaries = [
+            summary
+            for summary in summaries
+            if (
+                summary.get('worktree_status', WorktreeStatus.AVAILABLE)
+                == WorktreeStatus.AVAILABLE
+                or (
+                    'error' not in summary
+                    and RunState(str(summary['state'])) in explicit_states
+                )
+            )
+        ]
     summaries.sort(key=lambda item: str(item['created_at']), reverse=True)
     unreadable = [summary for summary in summaries if 'error' in summary]
     print(
@@ -830,6 +850,55 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
         )
     )
     return 2 if unreadable else 0
+
+
+def _cancel(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
+    """Cancel one source-code job whose recorded worktree is unrunnable."""
+
+    if not args.database.is_file():
+        _write_job_error(
+            'state_database_not_found',
+            f'state database not found: {args.database}',
+            job_id=args.job_id,
+        )
+        return 2
+    try:
+        store.initialize()
+        run = store.get(args.job_id)
+    except RunNotFoundError:
+        _write_job_error(
+            'job_not_found', f'job not found: {args.job_id}', job_id=args.job_id
+        )
+        return 2
+    except PersistedEnumError as error:
+        _write_job_error(error.code, str(error), job_id=args.job_id)
+        return 2
+    if worktree_status(run.worktree_path) is WorktreeStatus.AVAILABLE:
+        _write_job_error(
+            'job_not_cancellable', 'job worktree is available', job_id=args.job_id
+        )
+        return 2
+    try:
+        cancelled = store.cancel(args.job_id, args.reason)
+    except PersistedEnumError as error:
+        _write_job_error(error.code, str(error), job_id=args.job_id)
+        return 2
+    except (ConcurrentUpdateError, ValueError) as error:
+        _write_job_error('job_not_cancellable', str(error), job_id=args.job_id)
+        return 2
+    print(
+        json.dumps(
+            {
+                'schema_version': CLI_SCHEMA_VERSION,
+                'job_id': str(cancelled.id),
+                'state': str(cancelled.state),
+                'reason': args.reason.strip(),
+                'error': None,
+            },
+            indent=2,
+        )
+    )
+    return 0
 
 
 def _selected_job(
@@ -1382,6 +1451,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _post_issue_feedback(args, store)
     if args.command == 'jobs':
         return _jobs(args, store)
+    if args.command == 'cancel':
+        return _cancel(args, store)
     if args.command == 'job':
         return _job(args, store)
     if args.command == 'tasks':

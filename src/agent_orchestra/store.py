@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_orchestra.models import (
+    TERMINAL_STATES,
     IssueJob,
     JobTransition,
     ProviderAction,
     Run,
     RunState,
     ScenarioType,
+    utc_now,
 )
 
 if TYPE_CHECKING:
@@ -138,6 +140,7 @@ class RunStore:
                     from_state TEXT,
                     to_state TEXT NOT NULL,
                     scope_digest TEXT,
+                    reason TEXT,
                     occurred_at TEXT NOT NULL
                 );
 
@@ -171,6 +174,12 @@ class RunStore:
                 """
             )
             self._migrate_transitions(connection)
+            transition_columns = {
+                row['name']
+                for row in connection.execute('PRAGMA table_info(transitions)')
+            }
+            if 'reason' not in transition_columns:
+                connection.execute('ALTER TABLE transitions ADD COLUMN reason TEXT')
             connection.execute(
                 'CREATE INDEX IF NOT EXISTS transitions_job_id_id '
                 'ON transitions(job_id, id)'
@@ -486,6 +495,40 @@ class RunStore:
                 occurred_at=run.updated_at,
             )
 
+    def cancel(self, run_id: str, reason: str) -> Run:
+        """Atomically cancel one non-terminal source-code job with a reason."""
+
+        if not reason.strip():
+            message = 'cancellation reason must not be empty'
+            raise ValueError(message)
+        with closing(self._connect()) as connection, connection:
+            row = connection.execute(
+                'SELECT * FROM runs WHERE id = ?', (run_id,)
+            ).fetchone()
+            if row is None:
+                raise RunNotFoundError(run_id)
+            run = self._from_row(row)
+            if run.state in TERMINAL_STATES:
+                raise ValueError(f'job is already terminal: {run.state}')
+            cancelled = replace(run, state=RunState.CANCELLED, updated_at=utc_now())
+            cursor = connection.execute(
+                'UPDATE runs SET state = ?, updated_at = ? WHERE id = ? AND state = ?',
+                (cancelled.state, cancelled.updated_at.isoformat(), run_id, run.state),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentUpdateError(run_id)
+            self._add_transition(
+                connection,
+                job_id=run_id,
+                scenario=run.scenario,
+                from_state=run.state,
+                to_state=RunState.CANCELLED,
+                scope_digest=run.diff_digest,
+                occurred_at=cancelled.updated_at,
+                reason=reason.strip(),
+            )
+        return cancelled
+
     def list_transitions(self, job_id: str) -> tuple[JobTransition, ...]:
         """Return one job's state transitions in persistent order."""
 
@@ -520,6 +563,10 @@ class RunStore:
         transitions: list[JobTransition] = []
         for row in rows:
             unrecognized: list[str] = []
+            try:
+                reason = row['reason']
+            except IndexError:
+                reason = None
             scenario = _decode_transition_enum(
                 ScenarioType,
                 row['scenario'],
@@ -553,6 +600,7 @@ class RunStore:
                     to_state=to_state,
                     scope_digest=row['scope_digest'],
                     occurred_at=datetime.fromisoformat(row['occurred_at']),
+                    reason=reason,
                     unrecognized_fields=tuple(unrecognized),
                 )
             )
@@ -590,19 +638,21 @@ class RunStore:
         to_state: RunState,
         scope_digest: str | None,
         occurred_at: datetime,
+        reason: str | None = None,
     ) -> None:
         """Insert one transition with its immutable scope correlation."""
 
         connection.execute(
             """INSERT INTO transitions (
-                job_id, scenario, from_state, to_state, scope_digest, occurred_at
-            ) VALUES (?, ?, ?, ?, ?, ?)""",
+                job_id, scenario, from_state, to_state, scope_digest, reason, occurred_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id,
                 scenario,
                 from_state,
                 to_state,
                 scope_digest,
+                reason,
                 occurred_at.isoformat(),
             ),
         )
