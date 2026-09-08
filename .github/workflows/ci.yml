@@ -4,11 +4,14 @@ on:
   push:
   pull_request:
 
-# Keyed by source repository and branch so the push and pull_request events for
-# one branch collapse into a single run instead of building the same commit
-# twice, while a fork branch that shares a name cannot cancel an unrelated run.
+# Superseded runs of the same branch are cancelled, so only the newest commit is
+# built. The event name is part of the key because a push and its pull request
+# are distinct required checks: sharing one group made the push run cancel
+# itself against the pull_request run and report a cancelled check. The source
+# repository is part of the key so a fork branch that shares a name cannot
+# cancel an unrelated run.
 concurrency:
-  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
