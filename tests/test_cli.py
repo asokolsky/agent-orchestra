@@ -22,7 +22,6 @@ from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapte
 from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import (
     DEFAULT_DATABASE,
-    DEFAULT_RUNS_DIRECTORY,
     _working_tree_digest,
     build_parser,
     main,
@@ -1239,8 +1238,30 @@ def test_run_and_task_share_default_runs_directory() -> None:
     run_args = parser.parse_args(['run', 'run-id', '--objective', 'Review.'])
     task_args = parser.parse_args(['task', 'job-id:000001-reviewer'])
 
-    assert run_args.runs_directory == DEFAULT_RUNS_DIRECTORY
-    assert task_args.runs_directory == DEFAULT_RUNS_DIRECTORY
+    assert run_args.runs_directory == cli.DEFAULT_RUNS_DIRECTORY
+    assert task_args.runs_directory == cli.DEFAULT_RUNS_DIRECTORY
+
+
+def test_default_runs_directory_is_session_owned(
+    isolated_default_runs_directory: Path,
+) -> None:
+    """Keep the session default off the live root so concurrency cannot leak in."""
+
+    assert isolated_default_runs_directory == cli.DEFAULT_RUNS_DIRECTORY
+    live_root = Path('~/.local/state/agent-orchestra/runs').expanduser()
+    assert isolated_default_runs_directory != live_root
+    assert not isolated_default_runs_directory.is_relative_to(live_root)
+
+
+def test_unrelated_evidence_activity_does_not_reach_the_session_default(
+    isolated_default_runs_directory: Path, tmp_path: Path
+) -> None:
+    """Ignore job directories another process creates while the session runs."""
+
+    concurrent_root = tmp_path / 'other-process-runs'
+    (concurrent_root / '2026' / '09' / '08' / 'job-id').mkdir(parents=True)
+
+    assert not any(isolated_default_runs_directory.rglob('*'))
 
 
 def test_job_reports_unknown_job(
