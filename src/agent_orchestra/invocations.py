@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Never, cast
+from typing import Any, Literal, Never, cast
 from uuid import uuid4
 
 from agent_orchestra.evidence import (
@@ -394,6 +394,30 @@ def timestamp() -> str:
     return datetime.now(UTC).isoformat().replace('+00:00', 'Z')
 
 
+def _job_relative_stream(value: str, job_directory: Path) -> str:
+    """Return one stream path relative to its job, or the value unchanged."""
+
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        return value
+    try:
+        return candidate.resolve().relative_to(job_directory.resolve()).as_posix()
+    except OSError, ValueError:
+        return value
+
+
+def _job_relative_streams(
+    document: dict[str, Any], job_directory: Path
+) -> dict[str, Any]:
+    """Return one record document with job-relative stream paths."""
+
+    return {
+        **document,
+        'stdout_path': _job_relative_stream(document['stdout_path'], job_directory),
+        'stderr_path': _job_relative_stream(document['stderr_path'], job_directory),
+    }
+
+
 def write_record(
     path: Path,
     record: InvocationRecord,
@@ -404,7 +428,7 @@ def write_record(
     """Write an invocation record atomically."""
 
     validate_attempt_record(record)
-    document = asdict(record)
+    document = _job_relative_streams(asdict(record), path.parent.parent)
     new_record = not path.exists()
     if new_record and record.status != 'pending':
         _fail('new attempt must start pending')
@@ -434,7 +458,7 @@ def write_record(
         if new_status not in ATTEMPT_TRANSITIONS.get(existing_status, frozenset()):
             _fail(f'invalid attempt transition from {existing_status} to {new_status}')
         normalized_existing = {
-            **existing,
+            **_job_relative_streams(existing, path.parent.parent),
             'effective_models': tuple(existing.get('effective_models', ())),
         }
         normalized_document = {
