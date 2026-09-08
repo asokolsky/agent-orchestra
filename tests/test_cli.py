@@ -988,9 +988,7 @@ def test_jobs_filters_repeated_states_across_scenarios(
     }
     assert {job['state'] for job in document['jobs']} == {'queued', 'published'}
 
-    assert (
-        main(['--database', str(database), 'jobs', '--state', 'failed']) == 0
-    )
+    assert main(['--database', str(database), 'jobs', '--state', 'failed']) == 0
     assert json.loads(capsys.readouterr().out)['jobs'] == []
 
 
