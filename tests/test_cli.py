@@ -33,6 +33,7 @@ from agent_orchestra.invocations import (
     write_record,
 )
 from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
+from agent_orchestra.settings import load_settings
 from agent_orchestra.store import RunStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
@@ -1264,6 +1265,72 @@ def test_unrelated_evidence_activity_does_not_reach_the_session_default(
     assert not any(isolated_default_runs_directory.rglob('*'))
 
 
+def test_default_database_is_session_owned(
+    isolated_default_database: Path,
+) -> None:
+    """Keep the session default off the live database in the home directory."""
+
+    assert isolated_default_database == cli.DEFAULT_DATABASE
+    live_database = Path('~/.local/state/agent-orchestra/state.db').expanduser()
+    assert isolated_default_database != live_database
+    assert not isolated_default_database.exists()
+
+
+def test_command_without_database_reaches_the_session_default(
+    isolated_default_database: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove the redirect is load-bearing rather than incidentally unused."""
+
+    opened: list[Path] = []
+
+    class RecordingStore:
+        """Record the resolved database instead of creating one."""
+
+        def __init__(self, database: Path) -> None:
+            opened.append(database)
+
+        def initialize(self) -> None:
+            return None
+
+    # `init` is the cheapest command that resolves a database, so running it
+    # without --database shows exactly where an omission lands. Recording the
+    # path rather than letting the real store create the file keeps this test
+    # from writing and then deleting the very file the session guard inspects,
+    # which would let an unrelated test's leak pass unnoticed.
+    monkeypatch.setattr(cli, 'RunStore', RecordingStore)
+
+    assert main(['init']) == 0
+    assert capsys.readouterr().out.strip() == f'initialized {isolated_default_database}'
+    assert opened == [isolated_default_database]
+    assert not isolated_default_database.exists()
+
+
+def test_developer_settings_file_cannot_redirect_the_session_defaults(
+    isolated_settings_source: Path,
+    isolated_default_database: Path,
+    isolated_default_runs_directory: Path,
+) -> None:
+    """Keep a real config.toml from steering the suite at developer state."""
+
+    # Redirecting the module attributes alone would leave both guards open,
+    # because settings take precedence over built-in defaults. The suite must
+    # find no settings file at all.
+    assert Path(os.environ['XDG_CONFIG_HOME']) == isolated_settings_source
+    assert not (isolated_settings_source / 'agent-orchestra/config.toml').exists()
+
+    settings = load_settings(
+        default_database=cli.DEFAULT_DATABASE,
+        default_runs_directory=cli.DEFAULT_RUNS_DIRECTORY,
+    )
+
+    assert settings.database.value == isolated_default_database
+    assert settings.database.source == 'built_in'
+    assert settings.runs_directory.value == isolated_default_runs_directory
+    assert settings.runs_directory.source == 'built_in'
+
+
 def test_job_reports_unknown_job(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1673,6 +1740,10 @@ def test_run_selects_reviewer_adapter(
 def test_default_database_is_outside_a_repo_in_the_home_directory() -> None:
     """Keep default orchestration state outside a typical reviewed repo."""
 
+    # This asserts the production location, so it deliberately uses the
+    # module-level import rather than cli.DEFAULT_DATABASE: the session guard
+    # redirects the attribute, and reading it here would assert a temporary path
+    # and quietly stop checking anything.
     repo = Path.home() / 'Projects/repo'
 
     assert Path.home() / '.local/state/agent-orchestra/state.db' == DEFAULT_DATABASE

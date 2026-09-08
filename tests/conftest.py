@@ -1,4 +1,4 @@
-"""Shared pytest configuration isolating tests from the live evidence root."""
+"""Shared pytest configuration isolating tests from live developer state."""
 
 from __future__ import annotations
 
@@ -14,7 +14,29 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(scope='session', autouse=True)
+def isolated_settings_source(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[Path]:
+    """Hide the developer's settings file from every command the suite runs."""
+
+    # Redirecting the module defaults is not enough on its own: load_settings
+    # reads $XDG_CONFIG_HOME/agent-orchestra/config.toml, and a configured
+    # storage.database or storage.runs_directory overrides the patched value.
+    # A developer with a settings file would otherwise have the suite write to
+    # whatever it names, past both guards below. Point the search at an empty
+    # session directory so no settings file is found and the built-in defaults
+    # win. Tests that need configuration set XDG_CONFIG_HOME themselves, which
+    # a function-scoped monkeypatch does over this one.
+    config_home = tmp_path_factory.mktemp('config-home')
+    patch = pytest.MonkeyPatch()
+    patch.setenv('XDG_CONFIG_HOME', str(config_home))
+    yield config_home
+    patch.undo()
+
+
+@pytest.fixture(scope='session', autouse=True)
 def isolated_default_runs_directory(
+    isolated_settings_source: Path,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[Path]:
     """Redirect the default evidence root and fail when a test writes to it."""
@@ -42,4 +64,37 @@ def isolated_default_runs_directory(
             'the test session wrote to the default evidence root: '
             f'{written[:5]}; pass --runs-directory so evidence is written '
             'beneath tmp_path'
+        )
+
+
+@pytest.fixture(scope='session', autouse=True)
+def isolated_default_database(
+    isolated_settings_source: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[Path]:
+    """Redirect the default state database and fail when a test writes to it."""
+
+    # DEFAULT_DATABASE sits beside DEFAULT_RUNS_DIRECTORY and needs the same
+    # protection for a stronger reason: an evidence leak only appends orphan
+    # directories, while a stray write here mutates durable job state in a
+    # database the developer depends on, and leaves nothing to count afterwards.
+    #
+    # As with the evidence guard, the real database is never read or stat-ed, so
+    # concurrent Agent Orchestra activity cannot fail the session.
+    session_database = tmp_path_factory.mktemp('default-database') / 'state.db'
+    patch = pytest.MonkeyPatch()
+    patch.setattr(cli, 'DEFAULT_DATABASE', session_database)
+    yield session_database
+    patch.undo()
+    # SQLite may leave -wal and -shm beside the database, so match on the stem
+    # rather than the exact name.
+    written = sorted(
+        path.name
+        for path in session_database.parent.iterdir()
+        if path.name.startswith(session_database.name)
+    )
+    if written:
+        pytest.fail(
+            'the test session wrote to the default state database: '
+            f'{written}; pass --database so state is written beneath tmp_path'
         )
