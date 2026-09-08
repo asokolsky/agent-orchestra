@@ -63,7 +63,13 @@ run = [
 ]
 
 [tasks.tests]
-description = "Execute unit tests"
+description = "Execute unit tests across parallel workers"
 run = [
-    'uv run pytest -v tests',
+    'uv run pytest -n auto tests',
+]
+
+[tasks.tests-serial]
+description = "Execute unit tests in one process for readable failure output"
+run = [
+    'uv run pytest -v -p no:xdist tests',
 ]
