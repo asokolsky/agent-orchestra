@@ -17,8 +17,7 @@ from agent_orchestra import audit as audit_module
 from agent_orchestra import manifests as manifest_module
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import (
-    finalize_evidence_write,
-    record_finalized_evidence,
+    JobEvidence,
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import AttemptStatus
@@ -98,7 +97,7 @@ def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, R
     artifact.parent.mkdir(parents=True)
     temporary = artifact.with_suffix('.tmp')
     temporary.write_text('{}\n')
-    finalize_evidence_write(root, str(job.id), temporary, artifact, 'failure')
+    JobEvidence(root, str(job.id)).finalize_write(temporary, artifact, 'failure')
     return database, root, current
 
 
@@ -163,9 +162,7 @@ def _write_json_evidence(
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.tmp')
     temporary.write_text(json.dumps(document))
-    finalize_evidence_write(
-        root,
-        job_id,
+    JobEvidence(root, job_id).finalize_write(
         temporary,
         path,
         evidence_type,  # type: ignore[arg-type]
@@ -382,7 +379,7 @@ def test_audit_rejects_indexed_unrecognized_canonical_evidence(
     unknown = resolve_evidence_path(root, str(job.id)) / 'messages/000003-future.json'
     unknown.parent.mkdir()
     unknown.write_text('{}', encoding='utf-8')
-    record_finalized_evidence(root, str(job.id), unknown, 'process_stdout')
+    JobEvidence(root, str(job.id)).record_finalized(unknown, 'process_stdout')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
     document = json.loads(capsys.readouterr().out)
@@ -402,7 +399,7 @@ def test_audit_rejects_indexed_non_json_in_manifest_namespace(
     unknown = resolve_evidence_path(root, str(job.id)) / 'messages/000003-future.log'
     unknown.parent.mkdir()
     unknown.write_text('future output\n', encoding='utf-8')
-    record_finalized_evidence(root, str(job.id), unknown, 'process_stdout')
+    JobEvidence(root, str(job.id)).record_finalized(unknown, 'process_stdout')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
     document = json.loads(capsys.readouterr().out)
@@ -424,7 +421,7 @@ def test_audit_rejects_indexed_canonical_evidence_type_mismatch(
     )
     request.parent.mkdir(parents=True, exist_ok=True)
     request.write_text('{}', encoding='utf-8')
-    record_finalized_evidence(root, str(job.id), request, 'process_stdout')
+    JobEvidence(root, str(job.id)).record_finalized(request, 'process_stdout')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
     document = json.loads(capsys.readouterr().out)
@@ -461,7 +458,7 @@ def test_verify_active_attempt_marks_streams_in_progress(
     invocation = next(
         (resolve_evidence_path(root, str(job.id)) / 'invocations').glob('*.json')
     )
-    record_finalized_evidence(root, str(job.id), invocation, 'invocation_record')
+    JobEvidence(root, str(job.id)).record_finalized(invocation, 'invocation_record')
     qualified_temporary = (
         resolve_evidence_path(root, str(job.id))
         / '.000001-reviewer-codex.attempt-0001.review-result.json'

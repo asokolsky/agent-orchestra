@@ -34,8 +34,7 @@ from agent_orchestra.adapter.issue_reviewer import (
 from agent_orchestra.adapter.process import run_streaming_process
 from agent_orchestra.evidence import (
     EvidenceType,
-    evidence_root_for_job,
-    finalize_evidence_write,
+    JobEvidence,
 )
 from agent_orchestra.manifests import adapter_arguments
 from agent_orchestra.models import Finding, Review, Severity, Verdict
@@ -108,12 +107,8 @@ def _write_text_atomic(
         if job_directory is None or evidence_type is None:
             temporary.replace(path)
         else:
-            finalize_evidence_write(
-                evidence_root_for_job(job_directory),
-                job_directory.name,
-                temporary,
-                path,
-                evidence_type,
+            JobEvidence.for_directory(job_directory).finalize_write(
+                temporary, path, evidence_type
             )
     finally:
         temporary.unlink(missing_ok=True)

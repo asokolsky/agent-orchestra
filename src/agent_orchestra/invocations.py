@@ -15,9 +15,8 @@ from uuid import uuid4
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
+    JobEvidence,
     evidence_root_for_job,
-    finalize_evidence_write,
-    record_finalized_evidence,
     resolve_evidence_path,
 )
 from agent_orchestra.models import RunState
@@ -526,13 +525,8 @@ def write_record(
             os.fsync(file.fileno())
         if evidence_root is not None and job_id is not None:
             try:
-                finalize_evidence_write(
-                    evidence_root,
-                    job_id,
-                    temporary,
-                    path,
-                    'invocation_record',
-                    exclusive=new_record,
+                JobEvidence(evidence_root, job_id).finalize_write(
+                    temporary, path, 'invocation_record', exclusive=new_record
                 )
             except EvidencePathError as error:
                 if new_record and str(error) == 'finalized evidence already exists':
@@ -693,20 +687,12 @@ def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> N
             declared != expected for expected, declared, _kind in expected_streams
         ):
             _fail(f'invocation record does not match evidence filenames: {stem}')
-        record_finalized_evidence(
-            evidence_root_for_job(run_directory),
-            run_id,
-            manifest,
-            'invocation_record',
-            replace_existing=False,
+        JobEvidence(evidence_root_for_job(run_directory), run_id).record_finalized(
+            manifest, 'invocation_record', replace_existing=False
         )
         for expected, _declared, kind in expected_streams:
             if not expected.is_file():
                 _fail(f'completed invocation stream is missing: {expected.name}')
-            record_finalized_evidence(
-                evidence_root_for_job(run_directory),
-                run_id,
-                expected,
-                cast('EvidenceType', kind),
-                replace_existing=False,
+            JobEvidence(evidence_root_for_job(run_directory), run_id).record_finalized(
+                expected, cast('EvidenceType', kind), replace_existing=False
             )

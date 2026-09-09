@@ -25,10 +25,8 @@ from agent_orchestra.adapter.registry import (
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
+    JobEvidence,
     evidence_root_for_job,
-    finalize_evidence_write,
-    record_finalized_evidence,
-    recover_evidence_index,
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import (
@@ -88,12 +86,8 @@ def _write_json(
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        finalize_evidence_write(
-            evidence_root_for_job(job_directory),
-            job_directory.name,
-            temporary,
-            path,
-            evidence_type,
+        JobEvidence.for_directory(job_directory).finalize_write(
+            temporary, path, evidence_type
         )
     finally:
         temporary.unlink(missing_ok=True)
@@ -116,12 +110,8 @@ def _write_text(
             file.flush()
             os.fsync(file.fileno())
         if evidence_type is not None:
-            finalize_evidence_write(
-                evidence_root_for_job(job_directory),
-                job_directory.name,
-                temporary,
-                path,
-                evidence_type,
+            JobEvidence.for_directory(job_directory).finalize_write(
+                temporary, path, evidence_type
             )
         else:
             temporary.replace(path)
@@ -154,12 +144,7 @@ def _record_finalized_path(
 ) -> None:
     """Record a finalized issue-review artifact in its owning job index."""
 
-    record_finalized_evidence(
-        evidence_root_for_job(job_directory),
-        job_directory.name,
-        path,
-        evidence_type,
-    )
+    JobEvidence.for_directory(job_directory).record_finalized(path, evidence_type)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -425,7 +410,7 @@ def run_issue_review(
         raise IssueReviewError(str(error)) from error
     root = runs_directory.expanduser().resolve()
     job_directory = _job_directory(root, job.id)
-    recover_evidence_index(root, job.id)
+    JobEvidence(root, job.id).recover_index()
     recover_completed_invocation_evidence(job_directory, job.id)
     captured_path = _evidence_path(
         job_directory, *Path(evidence_path('issue_snapshot')).parts

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Never
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
-from agent_orchestra.evidence import finalize_evidence_write
+from agent_orchestra.evidence import JobEvidence
 from agent_orchestra.manifests import ManifestError, classify_provider_failure
 
 PROVIDER_TIMEOUT_SECONDS = 60
@@ -551,13 +551,7 @@ def write_snapshot(
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        finalize_evidence_write(
-            root,
-            job_id,
-            temporary,
-            path,
-            'issue_snapshot',
-        )
+        JobEvidence(root, job_id).finalize_write(temporary, path, 'issue_snapshot')
     finally:
         temporary.unlink(missing_ok=True)
 

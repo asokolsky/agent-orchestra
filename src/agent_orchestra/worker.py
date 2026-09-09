@@ -28,11 +28,8 @@ from agent_orchestra.agents import (
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
+    JobEvidence,
     evidence_root_for_job,
-    finalize_evidence_write,
-    record_finalized_evidence,
-    recover_evidence_index,
-    relocate_finalized_evidence,
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import (
@@ -121,7 +118,7 @@ def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
     try:
         path = resolve_evidence_path(runs_directory, run_id)
         path.mkdir(parents=True, exist_ok=True)
-        recover_evidence_index(runs_directory, run_id)
+        JobEvidence(runs_directory, run_id).recover_index()
         recover_completed_invocation_evidence(path, run_id)
         return path
     except EvidencePathError as error:
@@ -230,12 +227,8 @@ def _archive_unaccepted_response(
             if destination.parent.name in structural
             else destination.parent
         )
-        relocate_finalized_evidence(
-            evidence_root_for_job(job_directory),
-            job_directory.name,
-            path,
-            destination,
-            evidence_type,
+        JobEvidence.for_directory(job_directory).relocate_finalized(
+            path, destination, evidence_type
         )
 
 
@@ -246,12 +239,7 @@ def _record_finalized_path(path: Path, evidence_type: EvidenceType) -> None:
     job_directory = (
         path.parent.parent if path.parent.name in structural else path.parent
     )
-    record_finalized_evidence(
-        evidence_root_for_job(job_directory),
-        job_directory.name,
-        path,
-        evidence_type,
-    )
+    JobEvidence.for_directory(job_directory).record_finalized(path, evidence_type)
 
 
 def _finalize_temporary_path(
@@ -263,12 +251,8 @@ def _finalize_temporary_path(
     job_directory = (
         path.parent.parent if path.parent.name in structural else path.parent
     )
-    finalize_evidence_write(
-        evidence_root_for_job(job_directory),
-        job_directory.name,
-        temporary,
-        path,
-        evidence_type,
+    JobEvidence.for_directory(job_directory).finalize_write(
+        temporary, path, evidence_type
     )
 
 
