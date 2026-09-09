@@ -85,13 +85,11 @@ class ReviewerExecutionPlanSchema(StrictSchema):
         return self
 
 
-class ExecutionRecordSchema(StrictSchema):
-    """Strict execution context required to resume a run safely."""
+class ExecutionRecordBaseSchema(StrictSchema):
+    """Fields shared by versioned resumable execution records."""
 
-    schema_version: Literal[2]
     run_id: str
     objective: str = Field(min_length=1)
-    reviewer: ExecutionRoleSchema
     developer: ExecutionRoleSchema
     max_review_iterations: int = Field(gt=0)
     created_at: str
@@ -107,6 +105,20 @@ class ExecutionRecordSchema(StrictSchema):
         ):
             raise ValueError(TIMESTAMP_NOT_UTC)
         return value
+
+
+class ExecutionRecordSchema(ExecutionRecordBaseSchema):
+    """Schema-2 execution context for one resumable reviewer."""
+
+    schema_version: Literal[2]
+    reviewer: ExecutionRoleSchema
+
+
+class ReviewerSetExecutionRecordSchema(ExecutionRecordBaseSchema):
+    """Schema-3 execution context for one resumable reviewer set."""
+
+    schema_version: Literal[3]
+    reviewer_plan: ReviewerExecutionPlanSchema
 
 
 class ReviewFindingSchema(StrictSchema):
