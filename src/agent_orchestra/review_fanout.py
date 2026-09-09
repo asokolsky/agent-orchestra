@@ -44,7 +44,7 @@ def build_review_fanout(
     run_id: str,
     sequence: int,
     iteration: int,
-    attempt: int = 1,
+    attempt: int,
 ) -> tuple[ReviewerDispatch, ...]:
     """Resolve every required reviewer into its own dispatch and evidence."""
 

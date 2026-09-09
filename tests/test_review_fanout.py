@@ -64,7 +64,7 @@ def test_fanout_preserves_plan_order_identity_and_commands(tmp_path: Path) -> No
     """Carry every immutable plan field onto its reviewer dispatch."""
 
     dispatches = build_review_fanout(
-        _plan(tmp_path), run_id='job-1', sequence=1, iteration=1
+        _plan(tmp_path), run_id='job-1', sequence=1, iteration=1, attempt=1
     )
 
     assert [dispatch.reviewer_id for dispatch in dispatches] == [
@@ -99,7 +99,7 @@ def test_fanout_owns_disjoint_paths_in_every_evidence_family(
     """Share no mutable path between two reviewers of one iteration."""
 
     dispatches = build_review_fanout(
-        _plan(tmp_path), run_id='job-1', sequence=1, iteration=1
+        _plan(tmp_path), run_id='job-1', sequence=1, iteration=1, attempt=1
     )
 
     families = [field.name for field in fields(ReviewerEvidencePaths)]
@@ -112,13 +112,27 @@ def test_fanout_owns_disjoint_paths_in_every_evidence_family(
     assert dispatches[0].paths.temporary_result != '.review-result.json'
 
 
+def test_fanout_is_deterministic_for_resume(tmp_path: Path) -> None:
+    """Rebuild identical dispatch identities from the same durable inputs."""
+
+    plan = _plan(tmp_path)
+    first = build_review_fanout(
+        plan, run_id='job-1', sequence=3, iteration=2, attempt=4
+    )
+    resumed = build_review_fanout(
+        plan, run_id='job-1', sequence=3, iteration=2, attempt=4
+    )
+
+    assert resumed == first
+
+
 def test_fanout_rejects_duplicate_reviewer_ids() -> None:
     """Fail closed before two reviewers can collide on one namespace."""
 
     plan = ReviewerExecutionPlan('default', (_reviewer('same'), _reviewer('same')))
 
     with pytest.raises(ReviewFanoutError, match='duplicate reviewer IDs'):
-        build_review_fanout(plan, run_id='job-1', sequence=1, iteration=1)
+        build_review_fanout(plan, run_id='job-1', sequence=1, iteration=1, attempt=1)
 
 
 def test_fanout_requires_at_least_two_reviewers() -> None:
@@ -127,7 +141,7 @@ def test_fanout_requires_at_least_two_reviewers() -> None:
     plan = ReviewerExecutionPlan('default', (_reviewer('security'),))
 
     with pytest.raises(ReviewFanoutError, match='at least two reviewers'):
-        build_review_fanout(plan, run_id='job-1', sequence=1, iteration=1)
+        build_review_fanout(plan, run_id='job-1', sequence=1, iteration=1, attempt=1)
 
 
 @pytest.mark.parametrize(
@@ -161,4 +175,4 @@ def test_fanout_rejects_an_unsafe_reviewer_identifier() -> None:
     )
 
     with pytest.raises(ReviewFanoutError, match='invalid reviewer ID'):
-        build_review_fanout(plan, run_id='job-1', sequence=1, iteration=1)
+        build_review_fanout(plan, run_id='job-1', sequence=1, iteration=1, attempt=1)
