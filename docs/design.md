@@ -349,6 +349,16 @@ qualified by the same stable ID. Fan-out dispatch will produce these records in
 a subsequent slice. Schema-4 records remain readable and retain the
 single-reviewer `{job_id}:{sequence:06d}-reviewer` form.
 
+One reviewer execution plan resolves into one dispatch per required reviewer
+before any reviewer process starts. Each dispatch carries the member's frozen
+command, declared identity, and timeout together with its durable task ID,
+invocation ID, and the reviewer-qualified paths of every evidence family. The
+resolution is a pure derivation of the plan and the iteration's sequence,
+iteration, and attempt, so it produces the same identities on a resume as it did
+on the original dispatch. It fails closed on a plan with fewer than two
+reviewers, duplicate member identifiers, or an identifier the path layer
+rejects, because a batch that cannot own distinct evidence must not start.
+
 Required source-review batches use one completion-order-independent aggregation
 policy. Any `changes_requested` member makes the batch `changes_requested`.
 Otherwise, a `blocked` or incomplete member makes the batch `blocked`. The batch
