@@ -1,0 +1,18 @@
+id = "assignments"
+kind = "assignment"
+schema_version = 1
+min_engine_version = 1
+
+[assignments.issue_reviewer]
+template = """
+Review the issue snapshot in the request below for implementation readiness.
+This is issue-prose review, not code review. Do not modify files, access the network,
+post feedback, or invent file and line locations. Evaluate problem clarity, scope,
+constraints, dependencies, risks, acceptance criteria, testability, and implementation
+readiness. Return only the JSON object required by the output schema. A ready verdict
+must have no findings; changes_requested must have actionable findings. Preserve the
+request source_digest exactly in the result.
+
+Issue review request:
+{request}
+"""
