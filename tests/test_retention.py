@@ -12,7 +12,7 @@ import pytest
 
 from agent_orchestra import retention
 from agent_orchestra.cli import main
-from agent_orchestra.evidence import record_finalized_evidence, resolve_evidence_path
+from agent_orchestra.evidence import JobEvidence, resolve_evidence_path
 from agent_orchestra.models import IssueJob, Run, RunState
 from agent_orchestra.retention import (
     RetentionError,
@@ -40,7 +40,7 @@ def _terminal_source_job(tmp_path: Path) -> tuple[Path, Path, Run]:
     evidence = resolve_evidence_path(runs, str(job.id), 'failure.json')
     evidence.parent.mkdir(parents=True)
     evidence.write_text('{}\n')
-    record_finalized_evidence(runs, str(job.id), evidence, 'failure')
+    JobEvidence(runs, str(job.id)).record_finalized(evidence, 'failure')
     return database, runs, failed
 
 
@@ -157,7 +157,7 @@ def test_orphan_apply_requires_valid_identity_and_a_database_match(
     orphan_file = resolve_evidence_path(runs, orphan_id, 'failure.json')
     orphan_file.parent.mkdir(parents=True)
     orphan_file.write_text('{}\n')
-    record_finalized_evidence(runs, orphan_id, orphan_file, 'failure')
+    JobEvidence(runs, orphan_id).record_finalized(orphan_file, 'failure')
 
     assert (
         main(
@@ -274,7 +274,7 @@ def test_prune_uses_issue_review_terminal_transition_age(tmp_path: Path) -> None
     evidence = resolve_evidence_path(runs, job.id, 'failure.json')
     evidence.parent.mkdir(parents=True)
     evidence.write_text('{}\n')
-    record_finalized_evidence(runs, job.id, evidence, 'failure')
+    JobEvidence(runs, job.id).record_finalized(evidence, 'failure')
 
     plan = build_prune_plan(
         store,
