@@ -48,6 +48,12 @@ from agent_orchestra.invocations import (
 )
 from agent_orchestra.manifests import canonical_message_evidence, evidence_path
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
+from agent_orchestra.reviewer_paths import (
+    ReviewerIdentityError,
+    reviewer_invocation_id,
+    reviewer_invocation_stem,
+    reviewer_task_id,
+)
 from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
     DUPLICATE_REVIEW_FINDING_IDS,
@@ -352,11 +358,28 @@ def _record_invocation(
     response_received_at: str | None = None,
     validation_started_at: str | None = None,
     finished_at_value: str | None = None,
+    reviewer_id: str | None = None,
 ) -> str:
     """Persist separate streams and their adapter-neutral invocation record."""
 
-    task_id = f'{run.id}:{sequence:06d}-{role}'
-    invocation_id = invocation_id or f'{task_id}:attempt-{attempt:04d}'
+    if reviewer_id is not None:
+        if role != 'reviewer':
+            message = 'only reviewer invocations can have a reviewer ID'
+            raise WorkerError(message)
+        try:
+            task_id = reviewer_task_id(str(run.id), sequence, reviewer_id)
+            invocation_id = invocation_id or reviewer_invocation_id(
+                str(run.id), sequence, reviewer_id, attempt
+            )
+            log_stem = reviewer_invocation_stem(sequence, reviewer_id, attempt)
+        except ReviewerIdentityError as error:
+            raise WorkerError(str(error)) from error
+        schema_version = 5
+    else:
+        task_id = f'{run.id}:{sequence:06d}-{role}'
+        invocation_id = invocation_id or f'{task_id}:attempt-{attempt:04d}'
+        log_stem = _invocation_stem(sequence, role, attempt)
+        schema_version = 4
     attempt_status = status or ('completed' if finished else 'pending')
     if attempt_status == 'completed' and conclusion is None:
         if timed_out:
@@ -365,7 +388,6 @@ def _record_invocation(
             conclusion = 'interrupted'
         else:
             conclusion = 'succeeded' if exit_code == 0 else 'failed'
-    log_stem = _invocation_stem(sequence, role, attempt)
     stdout_path = logs / f'{log_stem}.stdout.log'
     stderr_path = logs / f'{log_stem}.stderr.log'
     if stdout is not None or not stdout_path.exists():
@@ -381,7 +403,7 @@ def _record_invocation(
     _persist_attempt_record(
         invocations / f'{log_stem}.json',
         InvocationRecord(
-            schema_version=4,
+            schema_version=schema_version,
             run_id=str(run.id),
             task_id=task_id,
             invocation_id=invocation_id,
@@ -404,6 +426,7 @@ def _record_invocation(
             conclusion=conclusion,
             response_received_at=response_received_at,
             validation_started_at=validation_started_at,
+            reviewer_id=reviewer_id,
         ),
     )
     return invocation_id

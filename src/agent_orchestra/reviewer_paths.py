@@ -45,6 +45,19 @@ def reviewer_invocation_id(
     return f'{task_id}:attempt-{attempt:04d}'
 
 
+def reviewer_invocation_stem(sequence: int, reviewer_id: str, attempt: int) -> str:
+    """Return the shared filename stem for one reviewer attempt."""
+
+    validate_reviewer_id(reviewer_id)
+    if sequence < 1:
+        message = 'reviewer sequence must be positive'
+        raise ReviewerIdentityError(message)
+    if attempt < 1:
+        message = 'reviewer attempt must be positive'
+        raise ReviewerIdentityError(message)
+    return f'{sequence:06d}-reviewer-{reviewer_id}.attempt-{attempt:04d}'
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewerEvidencePaths:
     """Contained relative paths owned by one reviewer attempt."""
@@ -67,8 +80,7 @@ def reviewer_evidence_paths(
     if sequence < 1 or iteration < 1 or attempt < 1:
         message = 'reviewer sequence, iteration, and attempt must be positive'
         raise ReviewerIdentityError(message)
-    task_stem = f'{sequence:06d}-reviewer-{reviewer_id}'
-    invocation_stem = f'{task_stem}.attempt-{attempt:04d}'
+    invocation_stem = reviewer_invocation_stem(sequence, reviewer_id, attempt)
     return ReviewerEvidencePaths(
         request=evidence_path(
             'review_request', ordinal=sequence, reviewer_id=reviewer_id
