@@ -49,7 +49,9 @@ from agent_orchestra.invocations import (
 from agent_orchestra.manifests import canonical_message_evidence, evidence_path
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.reviewer_paths import (
+    ReviewerIdentityError,
     reviewer_invocation_id,
+    reviewer_invocation_stem,
     reviewer_task_id,
 )
 from agent_orchestra.schemas import (
@@ -364,11 +366,14 @@ def _record_invocation(
         if role != 'reviewer':
             message = 'only reviewer invocations can have a reviewer ID'
             raise WorkerError(message)
-        task_id = reviewer_task_id(str(run.id), sequence, reviewer_id)
-        invocation_id = invocation_id or reviewer_invocation_id(
-            str(run.id), sequence, reviewer_id, attempt
-        )
-        log_stem = f'{sequence:06d}-reviewer-{reviewer_id}.attempt-{attempt:04d}'
+        try:
+            task_id = reviewer_task_id(str(run.id), sequence, reviewer_id)
+            invocation_id = invocation_id or reviewer_invocation_id(
+                str(run.id), sequence, reviewer_id, attempt
+            )
+            log_stem = reviewer_invocation_stem(sequence, reviewer_id, attempt)
+        except ReviewerIdentityError as error:
+            raise WorkerError(str(error)) from error
         schema_version = 5
     else:
         task_id = f'{run.id}:{sequence:06d}-{role}'
