@@ -191,10 +191,72 @@ by another process.
 - Make every workflow transition durable and resumable.
 - Separate agent roles from the runtimes that execute them.
 - Grant capabilities by registered role and fail closed for unknown roles.
+- Give a value that several functions need an owner rather than a parameter.
 
 These choices optimize for local agents and minimum resource use. Python is the
 preferred implementation language, with a toolchain based on uv, Ruff, and
 mise.
+
+## Collaborators and value types
+
+Two kinds of object carry state, and the difference decides where new code goes.
+
+**Value types own data and pure derivations.** `Run`, `IssueJob`,
+`InvocationRecord`, `JobTransition`, `IntegrityEntry`, `Manifest`, and
+`RuntimeDefinition` are frozen dataclasses. Their instance methods compute only
+from their own fields, as `RuntimeDefinition.supports` does. They depend on no
+subsystem that reads or writes: no store, evidence root, registry, or provider.
+
+Their classmethod constructors may consult ambient state to capture a value at
+creation. `Run.create_local` resolves the repository and worktree paths, reads
+the clock, and draws entropy for the job identifier. That is capture, not
+persistence: the constructor records what was true when the value was made and
+then the value is inert. The line that matters is not whether a byte was read,
+but whether the type reaches into a subsystem that another object owns.
+
+**Collaborators own identity, and take one of two shapes.**
+
+*Service collaborators* hold configuration fixed at construction and expose the
+operations that use it. `RunStore` owns a database path, `RuntimeRegistry` owns
+the set of runtimes, `JobEvidence` owns one job's evidence root and identifier,
+and `InvocationEvidenceStore` owns one job directory. Callers ask them to do
+things rather than reading their fields.
+
+*Parameter groups* name a set of values that belong together and are consumed by
+functions rather than by methods. `WorkerContext` groups the four collaborators
+a worker invocation needs, and `ReviewPlan` groups one workflow's objective,
+commands, limits, and identities; both are frozen dataclasses, and the worker
+functions unpack them. A parameter group may still carry a constructor that
+builds it from somewhere else, as `ReviewPlan.from_execution_record` builds one
+from durable evidence.
+
+The distinction is worth keeping: a service collaborator earns its methods,
+while a parameter group exists to stop a set of values being threaded by hand.
+Adding a method to a parameter group is a sign it is becoming a service, or that
+the method has no caller.
+
+The rule that separates them: when a group of values always travels together,
+is always derived from the same source, and is passed by hand through a call
+chain, that group is a collaborator waiting to be named. Adding a cross-cutting
+value should be a new field, not an edit to every signature in the chain.
+
+Two consequences worth stating, because both were learned by getting them
+wrong:
+
+- **A collaborator is not a place to put anything shared.** Split by
+  provenance. `WorkerContext` holds what the caller supplies identically on
+  every path; `ReviewPlan` holds what the run path takes from the caller and the
+  resume path rebuilds from durable evidence. Merging them would silently use
+  caller values when resuming.
+- **Verify that repeated code actually agrees before unifying it.** Three
+  consolidations in this codebase each hid a real difference: lock preambles
+  that differed in which exception they translated, evidence-root derivations
+  that diverge through a symlinked root, and a timeout that was optional in one
+  function and required in another. Read every copy before replacing them with
+  one.
+
+Refactors that introduce a collaborator change no public document, evidence
+path, or stable error code, and do not move `CLI_SCHEMA_VERSION`.
 
 ## Job ID format
 
