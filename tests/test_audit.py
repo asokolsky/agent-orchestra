@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra import audit as audit_module
 from agent_orchestra import manifests as manifest_module
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import (
@@ -24,6 +25,7 @@ from agent_orchestra.invocations import AttemptStatus
 from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_snapshot
 from agent_orchestra.manifests import evidence_path, parse_manifest
 from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
+from agent_orchestra.reviewer_paths import reviewer_evidence_paths
 from agent_orchestra.store import RunStore
 from agent_orchestra.workflow import transition
 from tests.test_job_views import add_attempt
@@ -43,6 +45,22 @@ def _arguments(database: Path, root: Path, job_id: str, *, verify: bool) -> list
     if verify:
         arguments.append('--verify')
     return arguments
+
+
+@pytest.mark.parametrize(
+    ('reviewer_id', 'attempt'),
+    [('codex', 1), ('claude-code', 2), ('review-result-000002', 9)],
+)
+def test_reviewer_writer_paths_are_recognized(reviewer_id: str, attempt: int) -> None:
+    """Pin reviewer path writers to audit and manifest recognizers."""
+
+    paths = reviewer_evidence_paths(
+        sequence=7, iteration=3, reviewer_id=reviewer_id, attempt=attempt
+    )
+
+    assert audit_module._is_known_temporary(paths.temporary_result)
+    assert manifest_module.canonical_evidence_type(paths.request) == 'review_request'
+    assert manifest_module.canonical_evidence_type(paths.result) == 'review_result'
 
 
 def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, Run]:
@@ -305,7 +323,7 @@ def test_default_audit_is_versioned_deterministic_and_omits_result(
 
     assert first == second
     document = json.loads(first)
-    assert document['schema_version'] == 13
+    assert document['schema_version'] == 14
     assert 'result' not in document
     assert document['job']['scenario'] == 'local_changes'
     assert [item['to_state'] for item in document['transitions']] == [
@@ -444,13 +462,28 @@ def test_verify_active_attempt_marks_streams_in_progress(
         (resolve_evidence_path(root, str(job.id)) / 'invocations').glob('*.json')
     )
     record_finalized_evidence(root, str(job.id), invocation, 'invocation_record')
+    qualified_temporary = (
+        resolve_evidence_path(root, str(job.id))
+        / '.000001-reviewer-codex.attempt-0001.review-result.json'
+    )
+    qualified_temporary.write_text('partial')
+    nested_temporary = (
+        resolve_evidence_path(root, str(job.id))
+        / 'artifacts/.000001-reviewer-codex.attempt-0001.review-result.json'
+    )
+    nested_temporary.parent.mkdir(exist_ok=True)
+    nested_temporary.write_text('stale nested partial')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
     document = json.loads(capsys.readouterr().out)
-    assert document['result'] == 'incomplete'
-    statuses = [item['status'] for item in document['evidence']]
-    assert statuses.count('in_progress') == 2
+    assert document['result'] == 'failed'
+    statuses = {item['path']: item['status'] for item in document['evidence']}
+    assert list(statuses.values()).count('in_progress') == 3
+    assert (
+        statuses['artifacts/.000001-reviewer-codex.attempt-0001.review-result.json']
+        == 'unindexed'
+    )
     serialized = json.dumps(document)
     assert str(root) not in serialized
     assert 'child stdout' not in serialized
@@ -469,6 +502,8 @@ def test_verify_reports_unindexed_partial_and_stale_evidence(
     (job_directory / 'stale-result.json').write_text('stale')
     (job_directory / '.final-result.json').write_text('hidden stale')
     (job_directory / 'candidate-approved.json').write_text('named stale')
+    invalid_qualified = '.000001-reviewer-Upper.attempt-0001.review-result.json'
+    (job_directory / invalid_qualified).write_text('invalid reviewer ID')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
@@ -479,9 +514,10 @@ def test_verify_reports_unindexed_partial_and_stale_evidence(
     assert statuses['stale-result.json'] == 'unindexed'
     assert statuses['.final-result.json'] == 'unindexed'
     assert statuses['candidate-approved.json'] == 'unindexed'
+    assert statuses[invalid_qualified] == 'unindexed'
     assert [item['code'] for item in document['findings']].count(
         'unindexed_evidence'
-    ) == 3
+    ) == 4
 
 
 def test_default_audit_does_not_report_canonical_verification_findings(
@@ -924,6 +960,6 @@ def test_audit_reports_missing_job_as_versioned_error(
     assert main(_arguments(database, tmp_path / 'runs', 'missing', verify=True)) == 2
 
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 14
+    assert document['schema_version'] == 15
     assert document['job_id'] == 'missing'
     assert document['error']['code'] == 'job_not_found'

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 VerificationResult = Literal[
     'verified', 'failed', 'unverifiable', 'incomplete', 'expired'
 ]
+AUDIT_SCHEMA_VERSION = 14
 RETENTION_MARKER = '.retention.json'
 
 
@@ -623,6 +624,8 @@ def _tasks(
             )
             continue
         attempt = asdict(record)
+        if record.reviewer_id is None:
+            attempt.pop('reviewer_id')
         attempt['effective_models'] = list(record.effective_models)
         attempt['streams'] = {
             'stdout': {'path': stdout_relative.as_posix()},
@@ -638,7 +641,12 @@ def _tasks(
                     'attempt task ID belongs to a different job',
                 )
             )
-        if not record.task_id.endswith(f'-{record.role}'):
+        expected_suffix = (
+            f'-reviewer-{record.reviewer_id}'
+            if record.reviewer_id is not None
+            else f'-{record.role}'
+        )
+        if not record.task_id.endswith(expected_suffix):
             findings.append(
                 _finding(
                     'role_mismatch',
@@ -673,17 +681,18 @@ def _tasks(
     for task_id, attempts in sorted(grouped.items()):
         attempts.sort(key=lambda item: int(item['attempt']))
         latest = attempts[-1]
-        tasks.append(
-            {
-                'task_id': task_id,
-                'job_id': job_id,
-                'role': latest['role'],
-                'iteration': latest['iteration'],
-                'status': latest['status'],
-                'conclusion': latest['conclusion'],
-                'attempts': attempts,
-            }
-        )
+        task: dict[str, object] = {
+            'task_id': task_id,
+            'job_id': job_id,
+            'role': latest['role'],
+            'iteration': latest['iteration'],
+            'status': latest['status'],
+            'conclusion': latest['conclusion'],
+            'attempts': attempts,
+        }
+        if latest.get('reviewer_id') is not None:
+            task['reviewer_id'] = latest['reviewer_id']
+        tasks.append(task)
     return tasks, in_progress, findings
 
 
@@ -824,9 +833,14 @@ def _is_known_temporary(relative: str) -> bool:
 
     name = Path(relative).name
     uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    reviewer_result = (
+        r'\.\d{6}-reviewer-[a-z0-9][a-z0-9_-]*'
+        r'\.attempt-\d{4}\.review-result\.json'
+    )
     return (
         relative == '.integrity.pending.json'
         or name in {'.review-result.json', '.developer-handoff.json'}
+        or (relative == name and re.fullmatch(reviewer_result, relative) is not None)
         or re.fullmatch(rf'\..+\.{uuid_pattern}\.tmp', name) is not None
         or re.fullmatch(rf'\.candidate-result-{uuid_pattern}\.json', name) is not None
     )
@@ -931,7 +945,7 @@ def build_audit_document(
             )
         )
         pending_document: dict[str, object] = {
-            'schema_version': 13,
+            'schema_version': AUDIT_SCHEMA_VERSION,
             'job': _job_document(job),
             'transitions': [_transition_document(item) for item in transitions],
             'operations': _derived_operations(transitions),
@@ -984,7 +998,7 @@ def build_audit_document(
             if isinstance(entry, dict)
         ]
         expired_document: dict[str, object] = {
-            'schema_version': 13,
+            'schema_version': AUDIT_SCHEMA_VERSION,
             'job': _job_document(job),
             'transitions': [_transition_document(item) for item in transitions],
             'operations': _derived_operations(transitions),
@@ -1054,7 +1068,7 @@ def build_audit_document(
             if transition.scope_digest is None
         )
     document: dict[str, object] = {
-        'schema_version': 13,
+        'schema_version': AUDIT_SCHEMA_VERSION,
         'job': _job_document(job),
         'transitions': [_transition_document(item) for item in transitions],
         'operations': _derived_operations(transitions),

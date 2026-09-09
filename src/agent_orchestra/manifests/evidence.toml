@@ -18,11 +18,13 @@ pattern = "iterations/\\d{6}/result\\.json"
 
 [evidence.review_request]
 template = "messages/{ordinal:06d}-review-request.json"
-pattern = "messages/\\d{6}-review-request\\.json"
+reviewer_template = "messages/{ordinal:06d}-{reviewer_id}-review-request.json"
+pattern = "messages/\\d{6}-(?:[a-z0-9][a-z0-9_-]*-)?review-request\\.json"
 
 [evidence.review_result]
 template = "messages/{ordinal:06d}-review-result.json"
-pattern = "messages/\\d{6}-review-result\\.json"
+reviewer_template = "messages/{ordinal:06d}-{reviewer_id}-review-result.json"
+pattern = "messages/\\d{6}-(?:[a-z0-9][a-z0-9_-]*-)?review-result\\.json"
 
 [evidence.remediation_request]
 template = "messages/{ordinal:06d}-remediation-request.json"

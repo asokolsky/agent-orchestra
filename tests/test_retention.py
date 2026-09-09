@@ -121,6 +121,7 @@ def test_applied_prune_leaves_auditable_expiry_marker_and_is_idempotent(
         == 0
     )
     audit = json.loads(capsys.readouterr().out)
+    assert audit['schema_version'] == 14
     assert audit['result'] == 'expired'
     assert 'evidence_expired' in {finding['code'] for finding in audit['findings']}
 
@@ -332,7 +333,9 @@ def test_interrupted_evidence_cleanup_resumes_to_completed_marker(
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)['result'] == 'incomplete'
+    audit = json.loads(capsys.readouterr().out)
+    assert audit['schema_version'] == 14
+    assert audit['result'] == 'incomplete'
 
     retry = build_prune_plan(
         RunStore(database),

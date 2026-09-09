@@ -18,9 +18,29 @@ from agent_orchestra.manifests import (
     MANIFEST_IDS,
     ManifestError,
     adapter_arguments,
+    canonical_evidence_type,
+    canonical_message_evidence,
+    evidence_ordinal,
+    evidence_path,
     load_manifest,
     parse_manifest,
 )
+
+
+def test_reviewer_qualified_messages_are_canonical_evidence() -> None:
+    """Render and recognize reviewer-qualified request and result paths."""
+
+    request = evidence_path('review_request', ordinal=3, reviewer_id='security')
+    result = evidence_path('review_result', ordinal=4, reviewer_id='security')
+
+    assert request == 'messages/000003-security-review-request.json'
+    assert result == 'messages/000004-security-review-result.json'
+    assert canonical_evidence_type(request) == 'review_request'
+    assert canonical_evidence_type(result) == 'review_result'
+    assert canonical_message_evidence(request) == ('review_request', 3)
+    assert canonical_message_evidence(result) == ('review_result', 4)
+    assert evidence_ordinal('review_request', request) == 3
+    assert evidence_ordinal('review_result', result) == 4
 
 
 @pytest.fixture(autouse=True)
