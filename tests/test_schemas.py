@@ -14,10 +14,53 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FIELDS,
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
+    ReviewerExecutionPlanSchema,
     SchemaValidationError,
     validate_developer_result,
     validate_review_result,
 )
+
+
+def reviewer_execution_plan() -> dict[str, Any]:
+    """Return one valid canonical reviewer execution plan."""
+
+    reviewer = {
+        'command': ['/python', '-m', 'reviewer'],
+        'identity': {'vendor': 'vendor', 'model': None, 'runtime': 'runtime'},
+        'timeout_seconds': 90,
+    }
+    return {
+        'schema_version': 1,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'reviewers': [
+            {'reviewer_id': 'security', **reviewer},
+            {'reviewer_id': 'portability', **reviewer},
+        ],
+    }
+
+
+def test_reviewer_execution_plan_schema_is_strict_and_ordered() -> None:
+    """Accept an ordered plan while rejecting unknown persisted fields."""
+
+    document = reviewer_execution_plan()
+    record = ReviewerExecutionPlanSchema.model_validate(document)
+    assert [reviewer.reviewer_id for reviewer in record.reviewers] == [
+        'security',
+        'portability',
+    ]
+    document['policy_version'] = 1
+    with pytest.raises(ValueError, match='Extra inputs are not permitted'):
+        ReviewerExecutionPlanSchema.model_validate(document)
+
+
+def test_reviewer_execution_plan_schema_rejects_duplicate_members() -> None:
+    """Prevent two persisted reviewers from sharing one evidence namespace."""
+
+    document = reviewer_execution_plan()
+    document['reviewers'][1]['reviewer_id'] = 'security'
+    with pytest.raises(ValueError, match='duplicate reviewer IDs'):
+        ReviewerExecutionPlanSchema.model_validate(document)
 
 
 def review_result() -> dict[str, Any]:

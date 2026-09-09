@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from agent_orchestra.adapter.registry import RuntimeRegistry, RuntimeRole
 from agent_orchestra.invocations import InvocationIdentity
+from agent_orchestra.schemas import ReviewerExecutionPlanSchema
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,3 +81,30 @@ def build_reviewer_execution_plan(
         message = 'reviewer execution plan requires at least two reviewers'
         raise ReviewerPlanError(message)
     return ReviewerExecutionPlan(reviewer_set.identifier, tuple(reviewers))
+
+
+def reviewer_execution_plan_record(
+    plan: ReviewerExecutionPlan,
+) -> ReviewerExecutionPlanSchema:
+    """Return the strict canonical record for one immutable reviewer plan."""
+
+    return ReviewerExecutionPlanSchema.model_validate(
+        {
+            'schema_version': 1,
+            'reviewer_set_id': plan.reviewer_set_id,
+            'aggregation_policy': 'all_required',
+            'reviewers': [
+                {
+                    'reviewer_id': reviewer.reviewer_id,
+                    'command': list(reviewer.command),
+                    'identity': {
+                        'vendor': reviewer.identity.vendor,
+                        'model': reviewer.identity.model,
+                        'runtime': reviewer.identity.runtime,
+                    },
+                    'timeout_seconds': reviewer.timeout_seconds,
+                }
+                for reviewer in plan.reviewers
+            ],
+        }
+    )

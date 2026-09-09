@@ -10,6 +10,7 @@ from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY
 from agent_orchestra.reviewer_plan import (
     ReviewerPlanError,
     build_reviewer_execution_plan,
+    reviewer_execution_plan_record,
     select_reviewer_set,
 )
 from agent_orchestra.settings import load_settings
@@ -89,3 +90,29 @@ def test_build_reviewer_execution_plan_rejects_invalid_timeout(
             executable=Path('/python'),
             timeout_seconds=0,
         )
+
+
+def test_reviewer_execution_plan_record_preserves_order_and_provenance(
+    tmp_path: Path,
+) -> None:
+    """Serialize every immutable plan field into strict canonical metadata."""
+
+    settings = load_settings(_settings(tmp_path))
+    plan = build_reviewer_execution_plan(
+        select_reviewer_set(settings, 'default'),
+        registry=DEFAULT_RUNTIME_REGISTRY,
+        executable=Path('/python'),
+        timeout_seconds=90,
+    )
+
+    record = reviewer_execution_plan_record(plan)
+
+    assert record.schema_version == 1
+    assert record.reviewer_set_id == 'default'
+    assert record.aggregation_policy == 'all_required'
+    assert [reviewer.reviewer_id for reviewer in record.reviewers] == [
+        'security',
+        'portability',
+    ]
+    assert record.reviewers[0].identity.model == 'gpt-5.6'
+    assert record.reviewers[1].identity.model is None
