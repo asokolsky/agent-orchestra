@@ -248,7 +248,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-13 CLI. This
+column and field names. Those names are not exposed by the schema-14 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -270,6 +270,8 @@ Schema version history:
   application documents, and the `expired` audit result.
 - Version 13 adds source-job worktree health, explicit cancellation, and
   cancellation reasons on transition documents.
+- Version 14 adds ordered named reviewer-set configuration with stable member
+  identities and registry-derived runtime provenance.
 
 A source-code job's worktree binding is durable and may outlive the directory
 it names. Read paths observe whether that path is absent or no longer a Git

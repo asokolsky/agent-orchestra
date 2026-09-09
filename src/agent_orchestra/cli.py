@@ -77,7 +77,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 13
+CLI_SCHEMA_VERSION = 14
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -243,11 +243,12 @@ def build_parser(
 ) -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
 
+    runtimes = runtime_registry or DEFAULT_RUNTIME_REGISTRY
     effective = settings or load_settings(
         default_database=DEFAULT_DATABASE,
         default_runs_directory=DEFAULT_RUNS_DIRECTORY,
+        runtime_registry=runtimes,
     )
-    runtimes = runtime_registry or DEFAULT_RUNTIME_REGISTRY
     runs_default = cast('Path', effective.runs_directory.value)
     parser = argparse.ArgumentParser(prog='agent-orchestra')
     parser.set_defaults(runtime_registry=runtimes)
@@ -1453,6 +1454,26 @@ def _config_show(
                     'retention.job_evidence_days': {
                         'value': settings.job_evidence_days.value,
                         'source': settings.job_evidence_days.source,
+                    },
+                    'reviewer_sets': {
+                        'value': [
+                            {
+                                'id': reviewer_set.identifier,
+                                'members': [
+                                    {
+                                        'id': member.identifier,
+                                        'runtime': member.runtime,
+                                        'vendor': member.vendor,
+                                        'model': member.model,
+                                        'required': True,
+                                    }
+                                    for member in reviewer_set.members
+                                ],
+                            }
+                            for reviewer_set in settings.reviewer_sets
+                        ],
+                        'source': 'file' if settings.reviewer_sets else 'built_in',
+                        'status': 'not_yet_applied',
                     },
                 },
                 'error': None,

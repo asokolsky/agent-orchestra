@@ -50,7 +50,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "jobs": [],
   "error": null
 }
@@ -225,7 +225,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -249,7 +249,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `13`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `14`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -383,6 +383,12 @@ runs_directory = "~/.local/state/agent-orchestra/runs"
 
 [retention]
 job_evidence_days = 90
+
+[reviewer_sets.default]
+members = [
+  { id = "codex", runtime = "codex", model = "gpt-5.6" },
+  { id = "claude", runtime = "claude-code" },
+]
 ```
 
 Precedence is command-line option, settings file, then built-in default.
@@ -395,6 +401,17 @@ agent-orchestra config show
 agent-orchestra --database /var/lib/orchestra/state.db config show \
   --runs-directory /var/lib/orchestra/runs
 ```
+
+Reviewer sets are ordered and named. Each set contains at least two required
+reviewers with unique stable IDs. Runtime identifiers are validated against the
+runtime registry, and vendor attribution is derived from that registry rather
+than configured separately. Optional reviewers and quorum policies are not yet
+supported; `required = false` is rejected. An explicit `[reviewer_sets]` table
+must contain at least one named set. Reviewer-set configuration is accepted and
+validated, but no command selects a set or dispatches its members yet; issue
+[#26](https://github.com/asokolsky/agent-orchestra/issues/26) tracks that wiring.
+Until then, `config show` reports reviewer sets with a `status` of
+`"not_yet_applied"`.
 
 ## Persistent evidence retention
 
@@ -437,7 +454,7 @@ but deleted content cannot be reconstructed without an independent backup.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 13 JSON views expose
+is one process execution. Four read-only, schema-version 14 JSON views expose
 that hierarchy:
 
 ```text
@@ -486,7 +503,7 @@ stdout and stderr paths and content.
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -543,7 +560,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-13 `job_id`,
+aliases. Callers must use the four commands above and the schema-14 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -567,7 +584,7 @@ agent-orchestra [--database DATABASE] audit JOB_ID [--verify]
 
 The command is read-only. It does not initialize or update the database,
 evidence, worktree, issue provider, or remote repo. It reports source-code and
-issue-review jobs from the same schema-13 document and never contacts GitHub or
+issue-review jobs from the same schema-14 document and never contacts GitHub or
 GitLab.
 
 For source-code jobs, audit reports `worktree_missing` or
@@ -681,7 +698,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -690,7 +707,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `13`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `14`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -733,7 +750,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -797,7 +814,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -808,7 +825,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {
