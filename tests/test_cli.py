@@ -2635,6 +2635,28 @@ def test_resume_interrupted_reviewer_reuses_request(
     assert unsupported['error']['code'] == 'resume_metadata_unsupported'
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
     execution['schema_version'] = 2
+    reviewer_record = execution.pop('reviewer')
+    execution['schema_version'] = 3
+    execution['reviewer_plan'] = {
+        'schema_version': 1,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'reviewers': [
+            {'reviewer_id': reviewer_id, **reviewer_record}
+            for reviewer_id in ('security', 'portability')
+        ],
+    }
+    execution_path.write_text(json.dumps(execution))
+
+    assert main(resume_arguments(enqueued_run)) == 2
+    reviewer_set_unsupported = json.loads(capsys.readouterr().out)
+    assert (
+        reviewer_set_unsupported['error']['code'] == 'resume_reviewer_set_unsupported'
+    )
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    execution['schema_version'] = 2
+    execution['reviewer'] = reviewer_record
+    execution.pop('reviewer_plan')
     execution_path.write_text(json.dumps(execution))
     write_reviewer(reviewer, 'approved')
 

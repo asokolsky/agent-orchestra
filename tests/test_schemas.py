@@ -11,6 +11,7 @@ from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
     DEVELOPER_RESULT_SCHEMA,
     DUPLICATE_REVIEW_FINDING_IDS,
+    EXECUTION_RECORD_ADAPTER,
     INVALID_REVIEW_FIELDS,
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
@@ -137,6 +138,36 @@ def test_reviewer_set_execution_record_rejects_schema_2_shape() -> None:
 
     with pytest.raises(ValueError, match='reviewer_plan'):
         ReviewerSetExecutionRecordSchema.model_validate(document)
+
+
+@pytest.mark.parametrize('schema_version', [2, 3])
+def test_execution_record_adapter_selects_versioned_shape(schema_version: int) -> None:
+    """Decode legacy and reviewer-set records through one strict boundary."""
+
+    document: dict[str, Any] = {
+        'schema_version': schema_version,
+        'run_id': 'job-1',
+        'objective': 'Review the frozen diff.',
+        'developer': {
+            'command': ['/python', '-m', 'developer'],
+            'identity': {'vendor': 'vendor', 'model': None, 'runtime': 'runtime'},
+            'timeout_seconds': 120,
+        },
+        'max_review_iterations': 3,
+        'created_at': '2026-09-09T15:00:00Z',
+    }
+    if schema_version == 2:
+        document['reviewer'] = {
+            'command': ['/python', '-m', 'reviewer'],
+            'identity': {'vendor': 'vendor', 'model': None, 'runtime': 'runtime'},
+            'timeout_seconds': 90,
+        }
+    else:
+        document['reviewer_plan'] = reviewer_execution_plan()
+
+    record = EXECUTION_RECORD_ADAPTER.validate_python(document)
+
+    assert record.schema_version == schema_version
 
 
 @pytest.mark.parametrize(

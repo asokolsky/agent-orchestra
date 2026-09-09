@@ -26,6 +26,7 @@ from agent_orchestra.worker import (
     WORKTREE_CHANGED,
     WorkerError,
     _digest,
+    _read_execution_record,
     _require_unchanged,
     _require_unique_message_id,
     _validate_developer_handoff,
@@ -79,6 +80,46 @@ def review_documents(artifact_path: Path) -> tuple[dict[str, Any], dict[str, Any
         },
     }
     return request, response
+
+
+def test_read_execution_record_accepts_reviewer_set_schema(tmp_path: Path) -> None:
+    """Parse schema-3 execution metadata at the worker resume boundary."""
+
+    document = {
+        'schema_version': 3,
+        'run_id': 'job-1',
+        'objective': 'Review the frozen diff.',
+        'developer': {
+            'command': ['/python', '-m', 'developer'],
+            'identity': {'vendor': 'vendor', 'model': None, 'runtime': 'runtime'},
+            'timeout_seconds': 120,
+        },
+        'max_review_iterations': 3,
+        'created_at': '2026-09-09T15:00:00Z',
+        'reviewer_plan': {
+            'schema_version': 1,
+            'reviewer_set_id': 'default',
+            'aggregation_policy': 'all_required',
+            'reviewers': [
+                {
+                    'reviewer_id': reviewer_id,
+                    'command': ['/python', '-m', reviewer_id],
+                    'identity': {
+                        'vendor': 'vendor',
+                        'model': None,
+                        'runtime': reviewer_id,
+                    },
+                    'timeout_seconds': 90,
+                }
+                for reviewer_id in ('security', 'portability')
+            ],
+        },
+    }
+    (tmp_path / 'execution.json').write_text(json.dumps(document), encoding='utf-8')
+
+    record = _read_execution_record(tmp_path, 'job-1')
+
+    assert record.schema_version == 3
 
 
 def test_validate_review_response_uses_request_sequence(tmp_path: Path) -> None:
