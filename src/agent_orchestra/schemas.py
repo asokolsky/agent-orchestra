@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from agent_orchestra.reviewer_paths import validate_reviewer_id as canonical_reviewer_id
+
 
 class SchemaValidationError(RuntimeError):
     """Raised when an agent returns an invalid canonical schema document."""
@@ -58,19 +60,33 @@ class ExecutionRoleSchema(StrictSchema):
 class ReviewerExecutionSchema(StrictSchema):
     """Persist one required reviewer in an immutable batch plan."""
 
-    reviewer_id: str = Field(pattern=r'^[a-z0-9][a-z0-9_-]*$')
+    reviewer_id: str
     command: list[str] = Field(min_length=1)
     identity: InvocationIdentityRecordSchema
     timeout_seconds: int = Field(gt=0)
+
+    @field_validator('reviewer_id')
+    @classmethod
+    def validate_reviewer_id(cls, value: str) -> str:
+        """Apply the canonical whole-string reviewer ID contract."""
+
+        return canonical_reviewer_id(value)
 
 
 class ReviewerExecutionPlanSchema(StrictSchema):
     """Persist one ordered required-reviewer execution plan."""
 
     schema_version: Literal[1]
-    reviewer_set_id: str = Field(pattern=r'^[a-z0-9][a-z0-9_-]*$')
+    reviewer_set_id: str
     aggregation_policy: Literal['all_required']
     reviewers: list[ReviewerExecutionSchema] = Field(min_length=2)
+
+    @field_validator('reviewer_set_id')
+    @classmethod
+    def validate_reviewer_set_id(cls, value: str) -> str:
+        """Apply the canonical whole-string reviewer ID contract."""
+
+        return canonical_reviewer_id(value)
 
     @model_validator(mode='after')
     def validate_unique_reviewer_ids(self) -> ReviewerExecutionPlanSchema:

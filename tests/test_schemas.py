@@ -63,6 +63,25 @@ def test_reviewer_execution_plan_schema_rejects_duplicate_members() -> None:
         ReviewerExecutionPlanSchema.model_validate(document)
 
 
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [('reviewer_set_id', 'Unsafe ID'), ('reviewer_id', 'also bad!')],
+)
+def test_reviewer_execution_plan_schema_rejects_partial_id_matches(
+    field: str, value: str
+) -> None:
+    """Apply canonical full-match semantics to every persisted identifier."""
+
+    document = reviewer_execution_plan()
+    if field == 'reviewer_set_id':
+        document[field] = value
+    else:
+        document['reviewers'][0][field] = value
+
+    with pytest.raises(ValueError, match='invalid reviewer ID'):
+        ReviewerExecutionPlanSchema.model_validate(document)
+
+
 def review_result() -> dict[str, Any]:
     """Return one valid canonical review result."""
 

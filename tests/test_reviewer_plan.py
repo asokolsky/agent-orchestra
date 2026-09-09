@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY
+from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.reviewer_plan import (
+    ReviewerExecution,
+    ReviewerExecutionPlan,
     ReviewerPlanError,
     build_reviewer_execution_plan,
     reviewer_execution_plan_record,
@@ -116,3 +119,24 @@ def test_reviewer_execution_plan_record_preserves_order_and_provenance(
     ]
     assert record.reviewers[0].identity.model == 'gpt-5.6'
     assert record.reviewers[1].identity.model is None
+
+
+def test_reviewer_execution_plan_record_normalizes_schema_failure() -> None:
+    """Keep invalid external plans inside the module error boundary."""
+
+    reviewer = ReviewerExecution(
+        reviewer_id='Unsafe ID',
+        command=('/python', '-m', 'reviewer'),
+        identity=InvocationIdentity(vendor='vendor', model=None, runtime='runtime'),
+        timeout_seconds=90,
+    )
+    valid_reviewer = ReviewerExecution(
+        reviewer_id='portability',
+        command=('/python', '-m', 'reviewer'),
+        identity=InvocationIdentity(vendor='vendor', model=None, runtime='runtime'),
+        timeout_seconds=90,
+    )
+    plan = ReviewerExecutionPlan('default', (reviewer, valid_reviewer))
+
+    with pytest.raises(ReviewerPlanError, match='invalid reviewer execution plan'):
+        reviewer_execution_plan_record(plan)
