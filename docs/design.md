@@ -754,18 +754,26 @@ agent invocation. It contains the run ID, objective, exact reviewer and
 developer commands, declared agent identities, role-specific timeouts,
 iteration limit, and creation timestamp. These are the durable inputs used by
 `resume`; older execution schemas remain historical evidence but are not
-sufficient to restart an agent safely. A retry keeps the original request
-message and writes a new invocation record with the same `task_id`, a new
-`invocation_id`, and an incremented `attempt`. A task has no separately persisted
-state: no or pending latest attempt derives `pending`, a running latest attempt
-derives `running`, and a completed latest attempt derives `completed` until a
-new retry attempt is durably created. Recovery validates existing invocation
-evidence before leaving a recoverable state, then persists the next request and
-pending invocation record before activating the role and launching its process.
-A durable recovery request with a persisted `pending` attempt is not relaunched
-because activation cannot be established safely. Because the configured command
-is persisted for recovery, callers must not place secrets in command-line
-arguments. Environment snapshots remain excluded.
+sufficient to restart an agent safely. Execution schema version 3 replaces the
+single `reviewer` with an immutable `reviewer_plan` containing the reviewer-set
+identity, aggregation policy, and every ordered required reviewer's stable ID,
+command, identity, and timeout. Version 3 is readable at the execution-record
+boundary, but no command writes or dispatches it yet, and `resume` fails closed
+with `resume_reviewer_set_unsupported` until reviewer-batch recovery is
+implemented.
+
+A retry keeps the original request message and writes a new invocation record
+with the same `task_id`, a new `invocation_id`, and an incremented `attempt`. A
+task has no separately persisted state: no or pending latest attempt derives
+`pending`, a running latest attempt derives `running`, and a completed latest
+attempt derives `completed` until a new retry attempt is durably created.
+Recovery validates existing invocation evidence before leaving a recoverable
+state, then persists the next request and pending invocation record before
+activating the role and launching its process. A durable recovery request with a
+persisted `pending` attempt is not relaunched because activation cannot be
+established safely. Because the configured command is persisted for recovery,
+callers must not place secrets in command-line arguments. Environment snapshots
+remain excluded.
 
 Recovery follows durable evidence rather than assuming that a missing update
 means a process never started:
