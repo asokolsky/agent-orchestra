@@ -13,8 +13,8 @@ from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
     InvocationRecord,
+    _write_record_unindexed,
     transition_attempt,
-    write_record,
 )
 from agent_orchestra.models import Run
 from agent_orchestra.store import RunStore
@@ -85,11 +85,11 @@ def add_attempt(
         status='pending',
         conclusion=None,
     )
-    write_record(record_path, pending)
+    _write_record_unindexed(record_path, pending)
     if status is AttemptStatus.PENDING:
         return task_id
     running = transition_attempt(pending, AttemptStatus.RUNNING)
-    write_record(record_path, running)
+    _write_record_unindexed(record_path, running)
     if status is AttemptStatus.RUNNING:
         return task_id
     completed = transition_attempt(
@@ -100,7 +100,7 @@ def add_attempt(
         response_received_at='2026-09-07T10:01:00Z',
         validation_started_at='2026-09-07T10:01:00Z',
     )
-    write_record(record_path, completed)
+    _write_record_unindexed(record_path, completed)
     return task_id
 
 

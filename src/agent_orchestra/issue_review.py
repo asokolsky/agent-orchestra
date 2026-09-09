@@ -33,12 +33,10 @@ from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
     InvocationEvidenceError,
+    InvocationEvidenceStore,
     InvocationRecord,
-    read_records,
-    recover_completed_invocation_evidence,
     timestamp,
     transition_attempt,
-    write_record,
 )
 from agent_orchestra.issue_sources import (
     IssueLocator,
@@ -294,19 +292,9 @@ def _start_invocation(
         conclusion=None,
     )
     record_path = _evidence_path(job_directory, 'invocations', f'{stem}.json')
-    write_record(
-        record_path,
-        pending,
-        evidence_root=evidence_root_for_job(job_directory),
-        job_id=job_directory.name,
-    )
+    InvocationEvidenceStore(job_directory).write(record_path, pending)
     running = transition_attempt(pending, AttemptStatus.RUNNING)
-    write_record(
-        record_path,
-        running,
-        evidence_root=evidence_root_for_job(job_directory),
-        job_id=job_directory.name,
-    )
+    InvocationEvidenceStore(job_directory).write(record_path, running)
     return record_path, running
 
 
@@ -372,12 +360,7 @@ def _finish_invocation(
             else 'unavailable'
         ),
     )
-    write_record(
-        record_path,
-        completed,
-        evidence_root=evidence_root_for_job(job_directory),
-        job_id=job_directory.name,
-    )
+    InvocationEvidenceStore(job_directory).write(record_path, completed)
     _record_finalized_path(job_directory, Path(record.stdout_path), 'process_stdout')
     _record_finalized_path(job_directory, Path(record.stderr_path), 'process_stderr')
 
@@ -411,7 +394,7 @@ def run_issue_review(
     root = runs_directory.expanduser().resolve()
     job_directory = _job_directory(root, job.id)
     JobEvidence(root, job.id).recover_index()
-    recover_completed_invocation_evidence(job_directory, job.id)
+    InvocationEvidenceStore(job_directory).recover_completed(job.id)
     captured_path = _evidence_path(
         job_directory, *Path(evidence_path('issue_snapshot')).parts
     )
@@ -434,7 +417,7 @@ def run_issue_review(
     current_task_id = f'{job.id}:{job.iteration:06d}-issue_reviewer'
     current_attempts = [
         record
-        for record in read_records(job_directory, job.id)
+        for record in InvocationEvidenceStore(job_directory).read_all(job.id)
         if record.task_id == current_task_id
     ]
     latest_attempt = current_attempts[-1] if current_attempts else None
@@ -576,7 +559,7 @@ def run_issue_review(
     task_id = f'{job.id}:{iteration:06d}-issue_reviewer'
     attempts = [
         record.attempt
-        for record in read_records(job_directory, job.id)
+        for record in InvocationEvidenceStore(job_directory).read_all(job.id)
         if record.task_id == task_id
     ]
     attempt = max(attempts, default=0) + 1
@@ -687,7 +670,7 @@ def resume_issue_review(
     task_id = f'{job.id}:{job.iteration:06d}-issue_reviewer'
     attempts = [
         record
-        for record in read_records(job_directory, job.id)
+        for record in InvocationEvidenceStore(job_directory).read_all(job.id)
         if record.task_id == task_id
     ]
     if not attempts:

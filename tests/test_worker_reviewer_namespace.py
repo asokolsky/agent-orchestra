@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agent_orchestra.invocations import InvocationIdentity, read_records
+from agent_orchestra.invocations import InvocationEvidenceStore, InvocationIdentity
 from agent_orchestra.models import Run
 from agent_orchestra.worker import WorkerError, _record_invocation
 
@@ -108,7 +108,7 @@ def test_record_invocation_uses_distinct_reviewer_qualified_schema_5_paths(
         assert (logs / f'{stem}.stdout.log').is_file()
         assert (logs / f'{stem}.stderr.log').is_file()
         assert (invocations / f'{stem}.json').is_file()
-    records = read_records(tmp_path, str(run.id))
+    records = InvocationEvidenceStore(tmp_path).read_all(str(run.id))
     assert len(records) == 2
     assert {record.schema_version for record in records} == {5}
     assert len({record.task_id for record in records}) == 2

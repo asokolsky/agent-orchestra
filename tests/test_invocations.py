@@ -15,16 +15,15 @@ from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
     InvocationEvidenceError,
+    InvocationEvidenceStore,
     InvocationRecord,
     RecoveryAction,
     TaskStatus,
+    _write_record_unindexed,
     derive_task_status,
-    read_records,
-    recover_completed_invocation_evidence,
     recovery_action,
     transition_attempt,
     validate_attempt_record,
-    write_record,
 )
 from agent_orchestra.models import RunState
 
@@ -92,9 +91,9 @@ def test_schema_5_record_round_trip_preserves_reviewer_id(tmp_path: Path) -> Non
     )
     path = job_directory / 'invocations/000001-reviewer-security.json'
 
-    write_record(path, record)
+    _write_record_unindexed(path, record)
 
-    [loaded] = read_records(job_directory, 'run')
+    [loaded] = InvocationEvidenceStore(job_directory).read_all('run')
     assert loaded.reviewer_id == 'security'
     assert loaded.task_id == 'run:000001-reviewer-security'
     with pytest.raises(InvocationEvidenceError, match='requires reviewer_id'):
@@ -290,11 +289,11 @@ def test_persisted_completed_attempt_is_immutable(tmp_path: Path) -> None:
         conclusion=AttemptConclusion.FAILED,
         finished_at='2026-09-07T10:00:01Z',
     )
-    write_record(path, pending_attempt())
-    write_record(path, completed)
+    _write_record_unindexed(path, pending_attempt())
+    _write_record_unindexed(path, completed)
 
     with pytest.raises(InvocationEvidenceError, match='completed attempt is immutable'):
-        write_record(path, replace(completed, exit_code=1))
+        _write_record_unindexed(path, replace(completed, exit_code=1))
 
 
 def test_persisted_completed_attempt_accepts_identical_rewrite(tmp_path: Path) -> None:
@@ -307,10 +306,10 @@ def test_persisted_completed_attempt_accepts_identical_rewrite(tmp_path: Path) -
         conclusion=AttemptConclusion.FAILED,
         finished_at='2026-09-07T10:00:01Z',
     )
-    write_record(path, pending_attempt())
-    write_record(path, completed)
+    _write_record_unindexed(path, pending_attempt())
+    _write_record_unindexed(path, completed)
 
-    write_record(path, completed)
+    _write_record_unindexed(path, completed)
 
     assert json.loads(path.read_text())['conclusion'] == 'failed'
 
@@ -321,7 +320,7 @@ def test_new_persisted_attempt_must_start_pending(tmp_path: Path) -> None:
     running = transition_attempt(pending_attempt(), AttemptStatus.RUNNING)
 
     with pytest.raises(InvocationEvidenceError, match='must start pending'):
-        write_record(tmp_path / 'attempt.json', running)
+        _write_record_unindexed(tmp_path / 'attempt.json', running)
 
 
 def test_concurrent_initial_record_creation_does_not_overwrite(
@@ -330,7 +329,7 @@ def test_concurrent_initial_record_creation_does_not_overwrite(
     """Reject a stale first-writer view after another creator wins the path."""
 
     path = tmp_path / 'attempt.json'
-    write_record(path, pending_attempt())
+    _write_record_unindexed(path, pending_attempt())
     path_type = type(path)
     real_exists = path_type.exists
 
@@ -342,17 +341,17 @@ def test_concurrent_initial_record_creation_does_not_overwrite(
     monkeypatch.setattr(path_type, 'exists', stale_exists)
 
     with pytest.raises(InvocationEvidenceError, match='attempt record already exists'):
-        write_record(path, pending_attempt())
+        _write_record_unindexed(path, pending_attempt())
 
 
 def test_existing_pending_attempt_cannot_be_claimed_again(tmp_path: Path) -> None:
     """Reject a delayed creator after another resumer has claimed the attempt."""
 
     path = tmp_path / 'attempt.json'
-    write_record(path, pending_attempt())
+    _write_record_unindexed(path, pending_attempt())
 
     with pytest.raises(InvocationEvidenceError, match='attempt record already exists'):
-        write_record(path, pending_attempt())
+        _write_record_unindexed(path, pending_attempt())
 
 
 def test_task_status_follows_latest_attempt() -> None:
@@ -552,7 +551,7 @@ def test_legacy_invocation_schema_is_unreadable(tmp_path: Path) -> None:
     (manifests / 'legacy.json').write_text('{"schema_version": 3}\n')
 
     with pytest.raises(InvocationEvidenceError, match='unsupported invocation'):
-        read_records(tmp_path, 'run')
+        InvocationEvidenceStore(tmp_path).read_all('run')
 
 
 @pytest.mark.parametrize(
@@ -575,7 +574,7 @@ def test_read_records_rejects_wrong_primitive_types(
     (manifests / 'attempt.json').write_text(json.dumps(document))
 
     with pytest.raises(InvocationEvidenceError, match='invalid invocation record'):
-        read_records(tmp_path, 'run')
+        InvocationEvidenceStore(tmp_path).read_all('run')
 
 
 def test_read_records_rejects_duplicate_task_attempts(tmp_path: Path) -> None:
@@ -595,7 +594,7 @@ def test_read_records_rejects_duplicate_task_attempts(tmp_path: Path) -> None:
     (manifests / 'second.json').write_text(document)
 
     with pytest.raises(InvocationEvidenceError, match='duplicate task attempt'):
-        read_records(tmp_path, 'run')
+        InvocationEvidenceStore(tmp_path).read_all('run')
 
 
 @pytest.mark.parametrize(
@@ -617,13 +616,15 @@ def test_persisted_milestones_are_immutable(
         response_received_at='2026-09-07T10:01:01Z',
         validation_started_at='2026-09-07T10:01:02Z',
     )
-    write_record(path, pending_attempt())
-    write_record(path, transition_attempt(pending_attempt(), AttemptStatus.RUNNING))
-    write_record(path, running)
+    _write_record_unindexed(path, pending_attempt())
+    _write_record_unindexed(
+        path, transition_attempt(pending_attempt(), AttemptStatus.RUNNING)
+    )
+    _write_record_unindexed(path, running)
 
     changed = replace(running, **cast('Any', {field: changed_value}))
     with pytest.raises(InvocationEvidenceError, match='immutable once set'):
-        write_record(path, changed)
+        _write_record_unindexed(path, changed)
 
 
 def test_completed_recovery_preserves_original_stream_digest(tmp_path: Path) -> None:
@@ -650,12 +651,12 @@ def test_completed_recovery_preserves_original_stream_digest(tmp_path: Path) -> 
     )
     manifest = invocations / '000001-reviewer.json'
     for record in (pending, running, completed):
-        write_record(manifest, record, evidence_root=tmp_path, job_id='run')
-    recover_completed_invocation_evidence(run, 'run')
+        InvocationEvidenceStore(run).write(manifest, record)
+    InvocationEvidenceStore(run).recover_completed('run')
     before = json.loads((run / '.integrity.json').read_text())
     stdout.write_text('changed')
 
-    recover_completed_invocation_evidence(run, 'run')
+    InvocationEvidenceStore(run).recover_completed('run')
 
     after = json.loads((run / '.integrity.json').read_text())
     assert after == before
@@ -685,9 +686,9 @@ def test_completed_schema_5_reviewer_evidence_is_recoverable(tmp_path: Path) -> 
     )
     manifest = invocations / '000001-reviewer-security.attempt-0001.json'
     for record in (pending, running, completed):
-        write_record(manifest, record, evidence_root=tmp_path, job_id='run')
+        InvocationEvidenceStore(run).write(manifest, record)
 
-    recover_completed_invocation_evidence(run, 'run')
+    InvocationEvidenceStore(run).recover_completed('run')
 
     integrity = json.loads((run / '.integrity.json').read_text())
     paths = {entry['path'] for entry in integrity['entries']}
@@ -722,10 +723,10 @@ def test_completed_recovery_rejects_miscorrelated_stream_name(tmp_path: Path) ->
     )
     manifest = invocations / '000001-reviewer.json'
     for record in (pending, running, completed):
-        write_record(manifest, record)
+        _write_record_unindexed(manifest, record)
 
     with pytest.raises(InvocationEvidenceError, match='evidence filenames'):
-        recover_completed_invocation_evidence(run, 'run')
+        InvocationEvidenceStore(run).recover_completed('run')
 
 
 def relocatable_attempt(job_directory: Path) -> InvocationRecord:
@@ -751,12 +752,12 @@ def test_write_record_persists_job_relative_stream_paths(tmp_path: Path) -> None
     record = relocatable_attempt(job_directory)
     path = job_directory / 'invocations' / '000001-reviewer.json'
 
-    write_record(path, record)
+    _write_record_unindexed(path, record)
 
     document = json.loads(path.read_text(encoding='utf-8'))
     assert document['stdout_path'] == 'logs/000001-reviewer.stdout.log'
     assert document['stderr_path'] == 'logs/000001-reviewer.stderr.log'
-    assert read_records(job_directory, 'run')[0].stdout_path == str(
+    assert InvocationEvidenceStore(job_directory).read_all('run')[0].stdout_path == str(
         job_directory / 'logs/000001-reviewer.stdout.log'
     )
 
@@ -765,7 +766,7 @@ def test_relocated_job_evidence_remains_readable(tmp_path: Path) -> None:
     """Read one job's attempts after moving it beneath a different root."""
 
     job_directory = tmp_path / 'first' / 'run'
-    write_record(
+    _write_record_unindexed(
         job_directory / 'invocations' / '000001-reviewer.json',
         relocatable_attempt(job_directory),
     )
@@ -773,7 +774,7 @@ def test_relocated_job_evidence_remains_readable(tmp_path: Path) -> None:
     moved.parent.mkdir(parents=True)
     job_directory.rename(moved)
 
-    records = read_records(moved, 'run')
+    records = InvocationEvidenceStore(moved).read_all('run')
 
     relocated_stdout = moved / 'logs/000001-reviewer.stdout.log'
     assert records[0].stdout_path == str(relocated_stdout)
@@ -791,9 +792,9 @@ def test_absolute_stream_paths_written_before_this_change_still_transition(
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(asdict(record)), encoding='utf-8')
 
-    write_record(path, transition_attempt(record, AttemptStatus.RUNNING))
+    _write_record_unindexed(path, transition_attempt(record, AttemptStatus.RUNNING))
 
     document = json.loads(path.read_text(encoding='utf-8'))
     assert document['status'] == 'running'
     assert document['stdout_path'] == 'logs/000001-reviewer.stdout.log'
-    assert read_records(job_directory, 'run')[0].status == 'running'
+    assert InvocationEvidenceStore(job_directory).read_all('run')[0].status == 'running'

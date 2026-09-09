@@ -36,15 +36,13 @@ from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
     InvocationEvidenceError,
+    InvocationEvidenceStore,
     InvocationIdentity,
     InvocationRecord,
     RecoveryAction,
-    read_records,
-    recover_completed_invocation_evidence,
     recovery_action,
     timestamp,
     transition_attempt,
-    write_record,
 )
 from agent_orchestra.manifests import canonical_message_evidence, evidence_path
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
@@ -125,7 +123,7 @@ def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
         path = resolve_evidence_path(runs_directory, run_id)
         path.mkdir(parents=True, exist_ok=True)
         JobEvidence(runs_directory, run_id).recover_index()
-        recover_completed_invocation_evidence(path, run_id)
+        InvocationEvidenceStore(path).recover_completed(run_id)
         return path
     except EvidencePathError as error:
         raise WorkerError(str(error)) from error
@@ -314,12 +312,7 @@ def _persist_attempt_record(path: Path, record: InvocationRecord) -> None:
 
     try:
         job_directory = path.parent.parent
-        write_record(
-            path,
-            record,
-            evidence_root=evidence_root_for_job(job_directory),
-            job_id=job_directory.name,
-        )
+        InvocationEvidenceStore(job_directory).write(path, record)
         if record.status == 'completed':
             _record_finalized_path(Path(record.stdout_path), 'process_stdout')
             _record_finalized_path(Path(record.stderr_path), 'process_stderr')
@@ -865,7 +858,7 @@ def _latest_task_attempt(
     """Return the latest validated attempt for one durable task."""
 
     try:
-        records = read_records(run_directory, run_directory.name)
+        records = InvocationEvidenceStore(run_directory).read_all(run_directory.name)
     except InvocationEvidenceError as error:
         message = 'invalid invocation evidence'
         raise WorkerError(message) from error

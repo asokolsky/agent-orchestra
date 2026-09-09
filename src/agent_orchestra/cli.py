@@ -28,10 +28,10 @@ from agent_orchestra.evidence import (
 )
 from agent_orchestra.invocations import (
     InvocationEvidenceError,
+    InvocationEvidenceStore,
     InvocationIdentity,
     InvocationRecord,
     derive_task_status,
-    read_records,
 )
 from agent_orchestra.issue_review import (
     IssueReviewError,
@@ -823,7 +823,7 @@ def _job_tasks(
             return []
         raise InvocationEvidenceError(f'evidence not found for job: {job_id}')
     return _task_documents(
-        read_records(job_directory, job_id),
+        InvocationEvidenceStore(job_directory).read_all(job_id),
         include_stream_content=include_stream_content,
     )
 
