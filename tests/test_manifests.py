@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +15,8 @@ from agent_orchestra import manifests
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+from agent_orchestra.adapter import issue_reviewer
+from agent_orchestra.adapter.issue_reviewer import issue_review_prompt
 from agent_orchestra.manifests import (
     MANIFEST_IDS,
     ManifestError,
@@ -176,3 +179,78 @@ def test_adapter_profiles_render_dynamic_values(tmp_path: Path) -> None:
     assert codex[codex.index('--output-last-message') + 1] == 'r'
     assert claude[claude.index('--settings') + 1] == '{}'
     assert claude[claude.index('--mcp-config') + 1] == '{"mcpServers":{}}'
+
+
+def test_issue_reviewer_assignment_comes_from_packaged_data() -> None:
+    """Render the packaged template rather than any literal in the adapter."""
+
+    request = {'payload': {'title': 'A {braced} title'}}
+    template = load_manifest('assignments').data['assignments']['issue_reviewer'][
+        'template'
+    ]
+    rendered = issue_review_prompt(request)
+
+    assert rendered == template.format(request=json.dumps(request, indent=2))
+    # A brace inside the request must survive substitution untouched.
+    assert '{braced}' in rendered
+
+
+def test_issue_reviewer_assignment_is_not_a_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail if the adapter reproduces the assignment instead of rendering it."""
+
+    # Comparing against the checked-in template cannot catch a hardcoded string
+    # that happens to match it. Substituting the accessor can: only an
+    # implementation that actually calls it can return the sentinel.
+    sentinel = 'SENTINEL ASSIGNMENT\n{request}\n'
+
+    def fake_assignment(role: str, *, request: str) -> str:
+        assert role == 'issue_reviewer'
+        return sentinel.format(request=request)
+
+    monkeypatch.setattr(issue_reviewer, 'role_assignment', fake_assignment)
+
+    assert issue_review_prompt({'a': 1}).startswith('SENTINEL ASSIGNMENT')
+
+
+@pytest.mark.parametrize(
+    'document',
+    [
+        'id="assignments"\nkind="assignment"\nschema_version=1\nmin_engine_version=1\n',
+        (
+            'id="assignments"\nkind="assignment"\nschema_version=1\n'
+            'min_engine_version=1\n[assignments.not_a_role]\ntemplate="x {request}"\n'
+        ),
+        # A valid role that is skill-driven, not assignment-driven.
+        (
+            'id="assignments"\nkind="assignment"\nschema_version=1\n'
+            'min_engine_version=1\n[assignments.developer]\ntemplate="x {request}"\n'
+        ),
+        # The consumed role present, but alongside one that must not be here.
+        (
+            'id="assignments"\nkind="assignment"\nschema_version=1\n'
+            'min_engine_version=1\n[assignments.issue_reviewer]\n'
+            'template="a {request}"\n[assignments.reviewer]\ntemplate="b {request}"\n'
+        ),
+        (
+            'id="assignments"\nkind="assignment"\nschema_version=1\n'
+            'min_engine_version=1\n[assignments.issue_reviewer]\ntemplate="no fields"\n'
+        ),
+        (
+            'id="assignments"\nkind="assignment"\nschema_version=1\n'
+            'min_engine_version=1\n[assignments.issue_reviewer]\n'
+            'template="{request} {extra}"\n'
+        ),
+        (
+            'id="assignments"\nkind="assignment"\nschema_version=1\n'
+            'min_engine_version=1\n[assignments.issue_reviewer]\n'
+            'template="{request}"\nunknown="x"\n'
+        ),
+    ],
+)
+def test_assignment_manifest_rejects_invalid_shapes(document: str) -> None:
+    """Fail closed for a missing table, unknown role, or wrong placeholders."""
+
+    with pytest.raises(ManifestError, match='manifest_malformed'):
+        parse_manifest('assignments', document)

@@ -24,16 +24,23 @@ MANIFEST_IDS = (
     *PROVIDER_MANIFEST_IDS,
     *DEFAULT_RUNTIME_REGISTRY.identifiers(),
     'evidence',
+    'assignments',
 )
 MALFORMED_MANIFEST = 'manifest_malformed'
 ENGINE_TOO_OLD = 'manifest_engine_too_old'
 UNSUPPORTED_MANIFEST_VERSION = 'manifest_schema_version_unsupported'
 EVIDENCE_MANIFEST = 'evidence'
+ASSIGNMENT_MANIFEST = 'assignments'
+# Roles told what to do by packaged data rather than by a skill they load.
+# developer and reviewer are skill-driven, so an assignment for either would
+# contradict the role mapping in docs/design.md.
+ASSIGNMENT_ROLES = frozenset({RuntimeRole.ISSUE_REVIEWER.value})
 COMMON_FIELDS = {'id', 'kind', 'schema_version', 'min_engine_version'}
 STATIC_MANIFEST_KINDS = {
     'github': 'provider',
     'gitlab': 'provider',
     EVIDENCE_MANIFEST: 'evidence',
+    ASSIGNMENT_MANIFEST: 'assignment',
 }
 EVIDENCE_TYPES = (
     'issue_snapshot',
@@ -121,6 +128,8 @@ def parse_manifest(
             _validate_runtime(manifest_id, document, runtime_registry)
         elif kind == 'evidence':
             _validate_evidence(document)
+        elif kind == 'assignment':
+            _validate_assignment(document)
         else:
             raise ManifestError(MALFORMED_MANIFEST, manifest_id)
     except (re.error, TypeError, ValueError) as error:
@@ -191,6 +200,27 @@ def _validate_runtime(
         for argument in arguments:
             fields.update(_validate_format(argument, allowed))
         if fields != allowed:
+            raise TypeError
+
+
+def _validate_assignment(document: dict[str, Any]) -> None:
+    """Validate one role assignment template per declared agent role."""
+
+    if set(document) != COMMON_FIELDS | {'assignments'}:
+        raise TypeError
+    entries = document.get('assignments')
+    # Exact equality, not a subset: startup validation must fail when the
+    # assignment a consumer needs is absent, rather than deferring to a
+    # manifest_malformed at dispatch time.
+    if not isinstance(entries, dict) or set(entries) != ASSIGNMENT_ROLES:
+        raise TypeError
+    for entry in entries.values():
+        if not isinstance(entry, dict) or set(entry) != {'template'}:
+            raise TypeError
+        template = entry['template']
+        if not isinstance(template, str) or not template.strip():
+            raise TypeError
+        if _validate_format(template, {'request'}) != {'request'}:
             raise TypeError
 
 
@@ -376,6 +406,21 @@ def evidence_path(
         return template.format(ordinal=ordinal, reviewer_id=reviewer_id)
     except (KeyError, TypeError, ValueError) as error:
         raise ManifestError(MALFORMED_MANIFEST, EVIDENCE_MANIFEST) from error
+
+
+def role_assignment(role: str, *, request: str) -> str:
+    """Render one role's packaged assignment around its request document."""
+
+    manifest = load_manifest(ASSIGNMENT_MANIFEST)
+    entries = manifest.data.get('assignments')
+    entry = entries.get(role) if isinstance(entries, dict) else None
+    template = entry.get('template') if isinstance(entry, dict) else None
+    if not isinstance(template, str):
+        raise ManifestError(MALFORMED_MANIFEST, ASSIGNMENT_MANIFEST)
+    try:
+        return template.format(request=request)
+    except (IndexError, KeyError, ValueError) as error:
+        raise ManifestError(MALFORMED_MANIFEST, ASSIGNMENT_MANIFEST) from error
 
 
 def canonical_evidence_type(relative: str) -> str | None:

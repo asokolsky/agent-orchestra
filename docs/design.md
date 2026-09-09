@@ -275,7 +275,7 @@ required header:
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | String | Stable identifier matching the packaged filename. |
-| `kind` | String | `provider`, `runtime`, or `evidence`. |
+| `kind` | String | `provider`, `runtime`, `evidence`, or `assignment`. |
 | `schema_version` | Integer | Version of the manifest document schema. |
 | `min_engine_version` | Integer | Lowest manifest engine able to interpret it. |
 
@@ -284,7 +284,31 @@ expression determines the public error code. Runtime manifests contain the
 ordered argument arrays for `reviewer`, `issue_reviewer`, and `developer`
 profiles. The evidence manifest pairs each writer template with its audit
 recognition pattern, so producers and consumers share one naming contract.
+The assignment manifest holds one instruction template per agent role, keyed by
+`RuntimeRole`, whose only placeholder is `{request}`.
 Filesystem ordering never affects resolution.
+
+### Where each role's assignment comes from
+
+An agent role is told what to do in one of two ways, and the choice follows the
+capabilities the role is granted.
+
+| Role | Assignment | Why |
+|---|---|---|
+| `developer` | `agent-orchestra-developer` skill | Has the `Skill` tool and reads its instructions from disk. |
+| `reviewer` | `agent-orchestra-reviewer` skill | Same. |
+| `issue_reviewer` | `assignment` manifest, inlined into the request | Granted no tools, so it cannot read a skill and must be handed its instructions. |
+
+A skill is the right home when the role can load one. When the role is
+deliberately tool-less, the assignment still belongs in versioned packaged data
+rather than in a Python string, so it can be reviewed and changed without a code
+change. `issue_review_prompt` renders the packaged template around the request
+document and inlines the result, which is what a tool-less role requires.
+
+Adding a role means deciding which of the two applies. Granting a role the
+`Skill` tool solely so it can read a skill widens its capability ceiling, and
+both supported runtimes must be able to load the same skill for that to be
+acceptable.
 
 The runtime registry in `adapter/registry.py` owns runtime identity, vendor,
 role capability, adapter implementation, and manifest-placeholder requirements.

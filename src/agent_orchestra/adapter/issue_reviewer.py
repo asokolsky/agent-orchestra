@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent_orchestra.adapter.registry import RuntimeRole
+from agent_orchestra.manifests import role_assignment
+
 
 class IssueReviewerError(RuntimeError):
     """Raised when an issue reviewer cannot return a structured result."""
@@ -30,16 +33,15 @@ class IssueReviewerError(RuntimeError):
 
 
 def issue_review_prompt(request: dict[str, Any]) -> str:
-    """Build the shared, provider- and runtime-neutral review assignment."""
+    """
+    Build the shared, provider- and runtime-neutral review assignment.
 
-    return f"""Review the issue snapshot in the request below for implementation readiness.
-This is issue-prose review, not code review. Do not modify files, access the network,
-post feedback, or invent file and line locations. Evaluate problem clarity, scope,
-constraints, dependencies, risks, acceptance criteria, testability, and implementation
-readiness. Return only the JSON object required by the output schema. A ready verdict
-must have no findings; changes_requested must have actionable findings. Preserve the
-request source_digest exactly in the result.
+    The assignment text is packaged data rather than a literal here, so it can
+    be versioned and reviewed. It is still inlined into the request: this role
+    is granted no tools and must not need any to read its own instructions.
+    """
 
-Issue review request:
-{json.dumps(request, indent=2)}
-"""
+    return role_assignment(
+        RuntimeRole.ISSUE_REVIEWER.value,
+        request=json.dumps(request, indent=2),
+    )
