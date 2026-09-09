@@ -133,11 +133,6 @@ class WorkerContext:
     digest_worktree: Callable[[Path, str], str | None]
     registry: RuntimeRegistry
 
-    def run_directory(self, run: Run) -> Path:
-        """Resolve one run's evidence directory under this runs directory."""
-
-        return _run_evidence_directory(self.runs_directory, str(run.id))
-
 
 @dataclass(frozen=True, slots=True)
 class ReviewPlan:
