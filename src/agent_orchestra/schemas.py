@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from agent_orchestra.reviewer_paths import REVIEWER_ID_PATTERN
+
 
 class SchemaValidationError(RuntimeError):
     """Raised when an agent returns an invalid canonical schema document."""
@@ -53,6 +55,34 @@ class ExecutionRoleSchema(StrictSchema):
     command: list[str]
     identity: InvocationIdentityRecordSchema
     timeout_seconds: int = Field(gt=0)
+
+
+class ReviewerExecutionSchema(StrictSchema):
+    """Persist one required reviewer in an immutable batch plan."""
+
+    reviewer_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
+    command: list[str] = Field(min_length=1)
+    identity: InvocationIdentityRecordSchema
+    timeout_seconds: int = Field(gt=0)
+
+
+class ReviewerExecutionPlanSchema(StrictSchema):
+    """Persist one ordered required-reviewer execution plan."""
+
+    schema_version: Literal[1]
+    reviewer_set_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
+    aggregation_policy: Literal['all_required']
+    reviewers: list[ReviewerExecutionSchema] = Field(min_length=2)
+
+    @model_validator(mode='after')
+    def validate_unique_reviewer_ids(self) -> ReviewerExecutionPlanSchema:
+        """Reject a plan whose reviewers cannot own distinct evidence."""
+
+        reviewer_ids = [reviewer.reviewer_id for reviewer in self.reviewers]
+        if len(reviewer_ids) != len(set(reviewer_ids)):
+            message = 'reviewer execution plan contains duplicate reviewer IDs'
+            raise ValueError(message)
+        return self
 
 
 class ExecutionRecordSchema(StrictSchema):
