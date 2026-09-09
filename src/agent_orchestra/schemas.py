@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
@@ -119,6 +120,13 @@ class ReviewerSetExecutionRecordSchema(ExecutionRecordBaseSchema):
 
     schema_version: Literal[3]
     reviewer_plan: ReviewerExecutionPlanSchema
+
+
+ExecutionRecord = Annotated[
+    ExecutionRecordSchema | ReviewerSetExecutionRecordSchema,
+    Field(discriminator='schema_version'),
+]
+EXECUTION_RECORD_ADAPTER: TypeAdapter[ExecutionRecord] = TypeAdapter(ExecutionRecord)
 
 
 class ReviewFindingSchema(StrictSchema):

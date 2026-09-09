@@ -55,9 +55,12 @@ from agent_orchestra.reviewer_paths import (
 from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
     DUPLICATE_REVIEW_FINDING_IDS,
+    EXECUTION_RECORD_ADAPTER,
     DeveloperHandoffMessageSchema,
+    ExecutionRecord,
     ExecutionRecordSchema,
     RemediationRequestMessageSchema,
+    ReviewerSetExecutionRecordSchema,
     ReviewRequestMessageSchema,
     ReviewResultMessageSchema,
 )
@@ -109,6 +112,7 @@ REVIEW_PATH_ESCAPE = 'review request references evidence outside the run'
 DUPLICATE_MESSAGE_ID = 'message ID was already persisted for this run'
 RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
 RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
+RESUME_REVIEWER_SET_UNSUPPORTED_CODE = 'resume_reviewer_set_unsupported'
 RESUME_SCOPE_CHANGED_CODE = 'resume_scope_changed'
 RESUME_INTERRUPTED_CODE = 'resume_interrupted'
 RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
@@ -700,13 +704,13 @@ def _is_developer_disagreement(message: DeveloperHandoffMessageSchema) -> bool:
     )
 
 
-def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecordSchema:
+def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecord:
     """Read and validate the durable execution context for a resumable run."""
 
     path = _run_evidence_path(run_directory, 'execution.json')
     try:
         document = _read_object(path)
-        record = ExecutionRecordSchema.model_validate(document)
+        record = EXECUTION_RECORD_ADAPTER.validate_python(document)
     except (WorkerError, ValidationError) as error:
         message = 'resume metadata is missing, legacy, or invalid'
         raise WorkerError(message, code=RESUME_METADATA_UNSUPPORTED_CODE) from error
@@ -2764,6 +2768,9 @@ def _resume_review(
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
     execution = _read_execution_record(run_directory, str(run.id))
+    if isinstance(execution, ReviewerSetExecutionRecordSchema):
+        message = 'reviewer-set execution resume is not implemented'
+        raise WorkerError(message, code=RESUME_REVIEWER_SET_UNSUPPORTED_CODE)
     chain = read_message_chain(run_directory.resolve(), str(run.id))
     if not execution.reviewer.command:
         message = 'resume reviewer command is missing'
