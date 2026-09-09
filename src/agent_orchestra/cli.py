@@ -732,7 +732,7 @@ def _attempt_document(
 ) -> dict[str, object]:
     """Return one invocation record using the public attempt vocabulary."""
 
-    return {
+    document: dict[str, object] = {
         'attempt_id': record.invocation_id,
         'attempt': record.attempt,
         'status': record.status,
@@ -759,6 +759,9 @@ def _attempt_document(
             ),
         },
     }
+    if record.reviewer_id is not None:
+        document['reviewer_id'] = record.reviewer_id
+    return document
 
 
 def _task_documents(
@@ -773,23 +776,22 @@ def _task_documents(
     for task_id, attempts in sorted(grouped.items()):
         ordered = tuple(sorted(attempts, key=lambda item: item.attempt))
         latest = ordered[-1]
-        documents.append(
-            {
-                'task_id': task_id,
-                'job_id': latest.run_id,
-                'role': latest.role,
-                'iteration': latest.iteration,
-                'status': str(derive_task_status(ordered)),
-                'conclusion': latest.conclusion,
-                'attempt': latest.attempt,
-                'attempts': [
-                    _attempt_document(
-                        record, include_stream_content=include_stream_content
-                    )
-                    for record in ordered
-                ],
-            }
-        )
+        document: dict[str, object] = {
+            'task_id': task_id,
+            'job_id': latest.run_id,
+            'role': latest.role,
+            'iteration': latest.iteration,
+            'status': str(derive_task_status(ordered)),
+            'conclusion': latest.conclusion,
+            'attempt': latest.attempt,
+            'attempts': [
+                _attempt_document(record, include_stream_content=include_stream_content)
+                for record in ordered
+            ],
+        }
+        if latest.reviewer_id is not None:
+            document['reviewer_id'] = latest.reviewer_id
+        documents.append(document)
     return documents
 
 

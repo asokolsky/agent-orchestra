@@ -444,13 +444,28 @@ def test_verify_active_attempt_marks_streams_in_progress(
         (resolve_evidence_path(root, str(job.id)) / 'invocations').glob('*.json')
     )
     record_finalized_evidence(root, str(job.id), invocation, 'invocation_record')
+    qualified_temporary = (
+        resolve_evidence_path(root, str(job.id))
+        / '.000001-reviewer-codex.attempt-0001.review-result.json'
+    )
+    qualified_temporary.write_text('partial')
+    nested_temporary = (
+        resolve_evidence_path(root, str(job.id))
+        / 'artifacts/.000001-reviewer-codex.attempt-0001.review-result.json'
+    )
+    nested_temporary.parent.mkdir(exist_ok=True)
+    nested_temporary.write_text('stale nested partial')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
     document = json.loads(capsys.readouterr().out)
-    assert document['result'] == 'incomplete'
-    statuses = [item['status'] for item in document['evidence']]
-    assert statuses.count('in_progress') == 2
+    assert document['result'] == 'failed'
+    statuses = {item['path']: item['status'] for item in document['evidence']}
+    assert list(statuses.values()).count('in_progress') == 3
+    assert (
+        statuses['artifacts/.000001-reviewer-codex.attempt-0001.review-result.json']
+        == 'unindexed'
+    )
     serialized = json.dumps(document)
     assert str(root) not in serialized
     assert 'child stdout' not in serialized
@@ -469,6 +484,8 @@ def test_verify_reports_unindexed_partial_and_stale_evidence(
     (job_directory / 'stale-result.json').write_text('stale')
     (job_directory / '.final-result.json').write_text('hidden stale')
     (job_directory / 'candidate-approved.json').write_text('named stale')
+    invalid_qualified = '.000001-reviewer-Upper.attempt-0001.review-result.json'
+    (job_directory / invalid_qualified).write_text('invalid reviewer ID')
 
     assert main(_arguments(database, root, str(job.id), verify=True)) == 0
 
@@ -479,9 +496,10 @@ def test_verify_reports_unindexed_partial_and_stale_evidence(
     assert statuses['stale-result.json'] == 'unindexed'
     assert statuses['.final-result.json'] == 'unindexed'
     assert statuses['candidate-approved.json'] == 'unindexed'
+    assert statuses[invalid_qualified] == 'unindexed'
     assert [item['code'] for item in document['findings']].count(
         'unindexed_evidence'
-    ) == 3
+    ) == 4
 
 
 def test_default_audit_does_not_report_canonical_verification_findings(

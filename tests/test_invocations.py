@@ -57,6 +57,58 @@ def pending_attempt() -> InvocationRecord:
     )
 
 
+def reviewer_attempt() -> InvocationRecord:
+    """Return a valid pending schema-5 reviewer attempt record."""
+
+    task_id = 'run:000001-reviewer-security'
+    return replace(
+        pending_attempt(),
+        schema_version=5,
+        task_id=task_id,
+        invocation_id=f'{task_id}:attempt-0001',
+        reviewer_id='security',
+    )
+
+
+def test_schema_5_correlates_reviewer_identity() -> None:
+    """Accept a reviewer-qualified task and reject identity drift."""
+
+    validate_attempt_record(reviewer_attempt())
+
+    with pytest.raises(InvocationEvidenceError, match='task_id does not match'):
+        validate_attempt_record(
+            replace(reviewer_attempt(), task_id='run:000001-reviewer-other')
+        )
+
+
+def test_schema_5_record_round_trip_preserves_reviewer_id(tmp_path: Path) -> None:
+    """Persist and read one reviewer-qualified attempt without losing identity."""
+
+    job_directory = tmp_path / 'run'
+    record = replace(
+        reviewer_attempt(),
+        stdout_path='logs/000001-reviewer-security.stdout.log',
+        stderr_path='logs/000001-reviewer-security.stderr.log',
+    )
+    path = job_directory / 'invocations/000001-reviewer-security.json'
+
+    write_record(path, record)
+
+    [loaded] = read_records(job_directory, 'run')
+    assert loaded.reviewer_id == 'security'
+    assert loaded.task_id == 'run:000001-reviewer-security'
+    with pytest.raises(InvocationEvidenceError, match='requires reviewer_id'):
+        validate_attempt_record(replace(reviewer_attempt(), reviewer_id=None))
+    with pytest.raises(InvocationEvidenceError, match='only reviewer'):
+        validate_attempt_record(
+            replace(
+                reviewer_attempt(),
+                role='developer',
+                task_id='run:000001-developer',
+            )
+        )
+
+
 def test_attempt_transitions_through_validation_to_success() -> None:
     """Accept the complete pending, running, and successful path."""
 
@@ -536,7 +588,9 @@ def test_read_records_rejects_duplicate_task_attempts(tmp_path: Path) -> None:
         stdout_path=str(tmp_path / 'logs/stdout.log'),
         stderr_path=str(tmp_path / 'logs/stderr.log'),
     )
-    document = json.dumps(asdict(record))
+    serialized = asdict(record)
+    serialized.pop('reviewer_id')
+    document = json.dumps(serialized)
     (manifests / 'first.json').write_text(document)
     (manifests / 'second.json').write_text(document)
 
@@ -605,6 +659,43 @@ def test_completed_recovery_preserves_original_stream_digest(tmp_path: Path) -> 
 
     after = json.loads((run / '.integrity.json').read_text())
     assert after == before
+
+
+def test_completed_schema_5_reviewer_evidence_is_recoverable(tmp_path: Path) -> None:
+    """Index completed reviewer-qualified records and streams without dropping them."""
+
+    run = tmp_path / 'run'
+    logs = run / 'logs'
+    invocations = run / 'invocations'
+    logs.mkdir(parents=True)
+    invocations.mkdir()
+    stdout = logs / '000001-reviewer-security.attempt-0001.stdout.log'
+    stderr = logs / '000001-reviewer-security.attempt-0001.stderr.log'
+    stdout.write_text('review output')
+    stderr.write_text('')
+    pending = replace(
+        reviewer_attempt(), stdout_path=str(stdout), stderr_path=str(stderr)
+    )
+    running = transition_attempt(pending, AttemptStatus.RUNNING)
+    completed = transition_attempt(
+        running,
+        AttemptStatus.COMPLETED,
+        conclusion=AttemptConclusion.FAILED,
+        finished_at='2026-09-07T10:01:00Z',
+    )
+    manifest = invocations / '000001-reviewer-security.attempt-0001.json'
+    for record in (pending, running, completed):
+        write_record(manifest, record, evidence_root=tmp_path, job_id='run')
+
+    recover_completed_invocation_evidence(run, 'run')
+
+    integrity = json.loads((run / '.integrity.json').read_text())
+    paths = {entry['path'] for entry in integrity['entries']}
+    assert paths == {
+        'invocations/000001-reviewer-security.attempt-0001.json',
+        'logs/000001-reviewer-security.attempt-0001.stderr.log',
+        'logs/000001-reviewer-security.attempt-0001.stdout.log',
+    }
 
 
 def test_completed_recovery_rejects_miscorrelated_stream_name(tmp_path: Path) -> None:

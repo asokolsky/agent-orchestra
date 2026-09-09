@@ -206,6 +206,8 @@ def _validate_evidence(document: dict[str, Any]) -> None:
         fields = {'template', 'pattern'}
         if evidence_type == 'issue_snapshot':
             fields.add('root_template')
+        if evidence_type in {'review_request', 'review_result'}:
+            fields.add('reviewer_template')
         if not isinstance(entry, dict) or set(entry) != fields:
             raise TypeError
         template = entry.get('template')
@@ -221,6 +223,16 @@ def _validate_evidence(document: dict[str, Any]) -> None:
             parts = PurePosixPath(rendered).parts
             if len(parts) != 2 or parts[0] != 'messages':
                 raise TypeError
+        reviewer_template = entry.get('reviewer_template')
+        if reviewer_template is not None:
+            if not isinstance(reviewer_template, str):
+                raise TypeError
+            _validate_evidence_template(
+                reviewer_template, requires_ordinal=True, requires_reviewer=True
+            )
+            reviewer_rendered = reviewer_template.format(ordinal=1, reviewer_id='codex')
+            if compiled.fullmatch(reviewer_rendered) is None:
+                raise TypeError
         root_template = entry.get('root_template')
         if root_template is not None:
             if not isinstance(root_template, str):
@@ -229,14 +241,18 @@ def _validate_evidence(document: dict[str, Any]) -> None:
             if compiled.fullmatch(root_template) is None:
                 raise TypeError
     for evidence_type, entry in entries.items():
-        rendered = entry['template'].format(ordinal=1)
-        matches = [
-            candidate
-            for candidate, candidate_entry in entries.items()
-            if re.fullmatch(candidate_entry['pattern'], rendered)
-        ]
-        if matches != [evidence_type]:
-            raise TypeError
+        templates = [entry['template']]
+        if 'reviewer_template' in entry:
+            templates.append(entry['reviewer_template'])
+        for template in templates:
+            rendered = template.format(ordinal=1, reviewer_id='codex')
+            matches = [
+                candidate
+                for candidate, candidate_entry in entries.items()
+                if re.fullmatch(candidate_entry['pattern'], rendered)
+            ]
+            if matches != [evidence_type]:
+                raise TypeError
 
 
 def _validate_format(value: str, allowed_fields: set[str]) -> set[str]:
@@ -253,7 +269,9 @@ def _validate_format(value: str, allowed_fields: set[str]) -> set[str]:
     return fields
 
 
-def _validate_evidence_template(template: str, *, requires_ordinal: bool) -> None:
+def _validate_evidence_template(
+    template: str, *, requires_ordinal: bool, requires_reviewer: bool = False
+) -> None:
     """Require one normalized, relative, safely renderable evidence path."""
 
     parsed = list(Formatter().parse(template))
@@ -263,9 +281,11 @@ def _validate_evidence_template(template: str, *, requires_ordinal: bool) -> Non
         if field_name is not None
     ]
     expected = [('ordinal', '06d', None)] if requires_ordinal else []
+    if requires_reviewer:
+        expected.append(('reviewer_id', '', None))
     if fields != expected:
         raise TypeError
-    rendered = template.format(ordinal=1)
+    rendered = template.format(ordinal=1, reviewer_id='codex')
     path = PurePosixPath(rendered)
     if (
         not rendered
@@ -284,7 +304,11 @@ def _evidence_template_pattern(template: str) -> re.Pattern[str]:
     for literal, field_name, _, _ in Formatter().parse(template):
         fragments.append(re.escape(literal))
         if field_name is not None:
-            fragments.append(r'(?P<ordinal>\d{6})')
+            fragments.append(
+                r'(?P<ordinal>\d{6})'
+                if field_name == 'ordinal'
+                else r'(?P<reviewer_id>[a-z0-9][a-z0-9_-]*)'
+            )
     return re.compile(''.join(fragments))
 
 
@@ -327,18 +351,29 @@ def classify_provider_failure(provider: str, diagnostic: str) -> str:
     return 'issue_lookup_failed'
 
 
-def evidence_path(evidence_type: str, *, ordinal: int | None = None) -> str:
+def evidence_path(
+    evidence_type: str,
+    *,
+    ordinal: int | None = None,
+    reviewer_id: str | None = None,
+) -> str:
     """Render a canonical evidence path from the shared evidence manifest."""
 
     manifest = load_manifest(EVIDENCE_MANIFEST)
     entries = manifest.data.get('evidence')
     entry = entries.get(evidence_type) if isinstance(entries, dict) else None
-    template_key = 'root_template' if ordinal is None else 'template'
+    template_key = (
+        'root_template'
+        if ordinal is None
+        else 'reviewer_template'
+        if reviewer_id is not None
+        else 'template'
+    )
     template = entry.get(template_key) if isinstance(entry, dict) else None
     if not isinstance(template, str):
         raise ManifestError(MALFORMED_MANIFEST, EVIDENCE_MANIFEST)
     try:
-        return template.format(ordinal=ordinal)
+        return template.format(ordinal=ordinal, reviewer_id=reviewer_id)
     except (KeyError, TypeError, ValueError) as error:
         raise ManifestError(MALFORMED_MANIFEST, EVIDENCE_MANIFEST) from error
 
@@ -384,10 +419,14 @@ def canonical_message_evidence(relative: str) -> tuple[str, int] | None:
     manifest = load_manifest(EVIDENCE_MANIFEST)
     entries = manifest.data['evidence']
     for evidence_type in MESSAGE_EVIDENCE_TYPES:
-        template = entries[evidence_type]['template']
-        match = _evidence_template_pattern(template).fullmatch(relative)
-        if match is not None:
-            return evidence_type, int(match.group('ordinal'))
+        entry = entries[evidence_type]
+        for key in ('template', 'reviewer_template'):
+            template = entry.get(key)
+            if not isinstance(template, str):
+                continue
+            match = _evidence_template_pattern(template).fullmatch(relative)
+            if match is not None:
+                return evidence_type, int(match.group('ordinal'))
     return None
 
 
@@ -397,8 +436,19 @@ def evidence_ordinal(evidence_type: str, relative: str) -> int | None:
     manifest = load_manifest(EVIDENCE_MANIFEST)
     entries = manifest.data.get('evidence')
     entry = entries.get(evidence_type) if isinstance(entries, dict) else None
-    template = entry.get('template') if isinstance(entry, dict) else None
-    if not isinstance(template, str):
+    templates = (
+        tuple(
+            template
+            for key in ('template', 'reviewer_template')
+            if isinstance((template := entry.get(key)), str)
+        )
+        if isinstance(entry, dict)
+        else ()
+    )
+    if not templates:
         raise ManifestError(MALFORMED_MANIFEST, EVIDENCE_MANIFEST)
-    match = _evidence_template_pattern(template).fullmatch(relative)
-    return int(match.group('ordinal')) if match is not None else None
+    for template in templates:
+        match = _evidence_template_pattern(template).fullmatch(relative)
+        if match is not None:
+            return int(match.group('ordinal'))
+    return None

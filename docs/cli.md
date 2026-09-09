@@ -543,6 +543,7 @@ the root before use and rejects job-directory and attempt-evidence escapes.
 |---|---|---|
 | `task_id` | String | Globally addressable `{job_id}:{sequence}-{role}` identifier. |
 | `role` | String | `developer` or `reviewer` for source-code jobs; `issue_reviewer` for issue-readiness jobs. |
+| `reviewer_id` | String | Stable configured reviewer identity on schema-5 source-review tasks and attempts; absent from earlier records and non-reviewer work. |
 | `status` | String | Task or attempt lifecycle status. |
 | `attempt_id` | String | Public identifier for one process execution. |
 | `attempt` | Integer | One-based attempt ordinal. |

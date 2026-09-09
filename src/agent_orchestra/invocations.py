@@ -21,6 +21,7 @@ from agent_orchestra.evidence import (
     resolve_evidence_path,
 )
 from agent_orchestra.models import RunState
+from agent_orchestra.reviewer_paths import validate_reviewer_id
 
 INVOCATION_DIRECTORY_ESCAPE = 'invocation directory escapes the run directory'
 INVOCATION_RECORD_ESCAPE = 'invocation record escapes the run directory'
@@ -125,6 +126,7 @@ class InvocationRecord:
     conclusion: AttemptConclusionValue | None
     response_received_at: str | None = None
     validation_started_at: str | None = None
+    reviewer_id: str | None = None
 
 
 def transition_attempt(
@@ -196,7 +198,7 @@ def _parsed_timestamp(value: str, field: str) -> datetime:
 
 
 def _valid_record_types(record: InvocationRecord) -> bool:
-    """Return whether lifecycle fields have their exact schema-4 primitive types."""
+    """Return whether lifecycle fields have their exact primitive types."""
 
     return (
         type(record.schema_version) is int
@@ -229,14 +231,22 @@ def _valid_record_types(record: InvocationRecord) -> bool:
             record.validation_started_at is None
             or isinstance(record.validation_started_at, str)
         )
+        and (record.reviewer_id is None or isinstance(record.reviewer_id, str))
     )
 
 
 def validate_attempt_record(record: InvocationRecord) -> None:
-    """Validate schema-4 lifecycle and milestone consistency."""
+    """Validate lifecycle, identity, and milestone consistency."""
 
-    if record.schema_version != 4:
+    if record.schema_version not in {4, 5}:
         _fail('unsupported invocation record schema')
+    if record.schema_version == 4 and record.reviewer_id is not None:
+        _fail('schema 4 invocation cannot contain reviewer_id')
+    if record.schema_version == 5:
+        if record.role == 'reviewer' and record.reviewer_id is None:
+            _fail('schema 5 reviewer invocation requires reviewer_id')
+        if record.role != 'reviewer' and record.reviewer_id is not None:
+            _fail('only reviewer invocations can contain reviewer_id')
     if not record.task_id:
         _fail('schema 4 invocation requires task_id')
     if not _valid_record_types(record):
@@ -265,7 +275,14 @@ def validate_attempt_record(record: InvocationRecord) -> None:
     terminal = record.status == 'completed'
     if terminal != (record.conclusion is not None):
         _fail('invalid attempt status and conclusion')
-    expected_task_suffix = rf':\d{{6}}-{re.escape(record.role)}'
+    if record.reviewer_id is not None:
+        try:
+            reviewer_id = validate_reviewer_id(record.reviewer_id)
+        except ValueError as error:
+            _fail(str(error), error)
+        expected_task_suffix = rf':\d{{6}}-reviewer-{re.escape(reviewer_id)}'
+    else:
+        expected_task_suffix = rf':\d{{6}}-{re.escape(record.role)}'
     if (
         re.fullmatch(re.escape(record.run_id) + expected_task_suffix, record.task_id)
         is None
@@ -335,13 +352,13 @@ def validate_attempt_record(record: InvocationRecord) -> None:
 
 
 def derive_task_status(records: tuple[InvocationRecord, ...]) -> TaskStatus:
-    """Derive one task's status from its latest schema-4 attempt evidence."""
+    """Derive one task's status from its latest validated attempt evidence."""
 
     if not records:
         return TaskStatus.PENDING
     task_ids = {record.task_id for record in records}
     if len(task_ids) != 1:
-        _fail('task status requires one schema 4 task')
+        _fail('task status requires one task')
     attempts = [record.attempt for record in records]
     if len(attempts) != len(set(attempts)):
         _fail('task attempts must be unique')
@@ -352,7 +369,7 @@ def derive_task_status(records: tuple[InvocationRecord, ...]) -> TaskStatus:
         return TaskStatus.RUNNING
     if latest.status == 'completed':
         return TaskStatus.COMPLETED
-    _fail('task status requires schema 4 lifecycle evidence')
+    _fail('task status requires valid lifecycle evidence')
 
 
 def recovery_action(
@@ -430,6 +447,8 @@ def write_record(
 
     validate_attempt_record(record)
     document = _job_relative_streams(asdict(record), path.parent.parent)
+    if record.schema_version == 4:
+        document.pop('reviewer_id')
     new_record = not path.exists()
     if new_record and record.status != 'pending':
         _fail('new attempt must start pending')
@@ -440,8 +459,17 @@ def write_record(
             _fail(f'invalid existing invocation record {path.name}', error)
         if not isinstance(existing, dict):
             _fail(f'invalid existing invocation record {path.name}')
-        immutable_fields = ('run_id', 'task_id', 'invocation_id', 'role', 'attempt')
-        if any(existing.get(field) != document[field] for field in immutable_fields):
+        immutable_fields = (
+            'run_id',
+            'task_id',
+            'invocation_id',
+            'role',
+            'attempt',
+            'reviewer_id',
+        )
+        if any(
+            existing.get(field) != document.get(field) for field in immutable_fields
+        ):
             _fail('attempt identity is immutable')
         existing_status_value = existing.get('status')
         if not isinstance(existing_status_value, str):
@@ -563,11 +591,16 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
             _fail(f'invalid invocation record {path.name}: {error}', error)
         if not isinstance(document, dict):
             _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
-        if document.get('schema_version') != 4:
+        schema_version = document.get('schema_version')
+        if schema_version not in {4, 5}:
             _fail(f'unsupported invocation record schema in {path.name}')
         required = set(InvocationRecord.__dataclass_fields__)
+        if schema_version == 4:
+            required.remove('reviewer_id')
         if set(document) != required:
             _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
+        if schema_version == 4:
+            document['reviewer_id'] = None
         try:
             record = InvocationRecord(**document)
         except TypeError as error:
@@ -575,7 +608,7 @@ def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ..
         if not _valid_record_types(record):
             _fail(f'invalid invocation record {path.name}')
         validate_attempt_record(record)
-        if record.schema_version != 4 or record.run_id != run_id:
+        if record.run_id != run_id:
             _fail(f'invocation record {path.name} does not match run {run_id}')
         attempt_key = (record.task_id, record.attempt)
         if attempt_key in seen_attempts:
@@ -620,6 +653,8 @@ def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> N
         task_stem = record.task_id.rsplit(':', 1)[-1]
         if record.role == 'issue_reviewer':
             stem = f'{record.iteration:06d}-issue-reviewer-attempt-{record.attempt:04d}'
+        elif record.reviewer_id is not None:
+            stem = f'{task_stem}.attempt-{record.attempt:04d}'
         else:
             stem = (
                 task_stem

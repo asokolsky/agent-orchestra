@@ -273,6 +273,14 @@ Schema version history:
 - Version 14 adds ordered named reviewer-set configuration with stable member
   identities and registry-derived runtime provenance.
 
+Invocation record schema 5 defines `reviewer_id` for source-code reviewer tasks.
+The reviewer identity and path builder uses durable task IDs of
+`{job_id}:{sequence:06d}-reviewer-{reviewer_id}`, and every reviewer-owned
+message, artifact, stream, runtime sidecar, and temporary response path is
+qualified by the same stable ID. Fan-out dispatch will produce these records in
+a subsequent slice. Schema-4 records remain readable and retain the
+single-reviewer `{job_id}:{sequence:06d}-reviewer` form.
+
 A source-code job's worktree binding is durable and may outlive the directory
 it names. Read paths observe whether that path is absent or no longer a Git
 worktree without mutating state. Only the explicit cancellation command may
