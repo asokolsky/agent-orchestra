@@ -15,6 +15,7 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
     ReviewerExecutionPlanSchema,
+    ReviewerSetExecutionRecordSchema,
     SchemaValidationError,
     validate_developer_result,
     validate_review_result,
@@ -72,6 +73,70 @@ def test_reviewer_execution_plan_schema_rejects_duplicate_members() -> None:
     document['reviewers'][1]['reviewer_id'] = 'security'
     with pytest.raises(ValueError, match='duplicate reviewer IDs'):
         ReviewerExecutionPlanSchema.model_validate(document)
+
+
+def test_reviewer_set_execution_record_embeds_resumable_plan() -> None:
+    """Persist the complete selected reviewer plan in schema-3 resume metadata."""
+
+    document = {
+        'schema_version': 3,
+        'run_id': 'job-1',
+        'objective': 'Review the frozen diff.',
+        'developer': {
+            'command': ['/python', '-m', 'developer'],
+            'identity': {
+                'vendor': 'vendor',
+                'model': None,
+                'runtime': 'runtime',
+            },
+            'timeout_seconds': 120,
+        },
+        'max_review_iterations': 3,
+        'created_at': '2026-09-09T15:00:00Z',
+        'reviewer_plan': reviewer_execution_plan(),
+    }
+
+    record = ReviewerSetExecutionRecordSchema.model_validate(document)
+
+    assert record.schema_version == 3
+    assert record.reviewer_plan.reviewer_set_id == 'default'
+    assert [member.reviewer_id for member in record.reviewer_plan.reviewers] == [
+        'security',
+        'portability',
+    ]
+
+
+def test_reviewer_set_execution_record_rejects_schema_2_shape() -> None:
+    """Keep single-reviewer and reviewer-set execution records unambiguous."""
+
+    document = {
+        'schema_version': 3,
+        'run_id': 'job-1',
+        'objective': 'Review the frozen diff.',
+        'reviewer': {
+            'command': ['/python', '-m', 'reviewer'],
+            'identity': {
+                'vendor': 'vendor',
+                'model': None,
+                'runtime': 'runtime',
+            },
+            'timeout_seconds': 90,
+        },
+        'developer': {
+            'command': ['/python', '-m', 'developer'],
+            'identity': {
+                'vendor': 'vendor',
+                'model': None,
+                'runtime': 'runtime',
+            },
+            'timeout_seconds': 120,
+        },
+        'max_review_iterations': 3,
+        'created_at': '2026-09-09T15:00:00Z',
+    }
+
+    with pytest.raises(ValueError, match='reviewer_plan'):
+        ReviewerSetExecutionRecordSchema.model_validate(document)
 
 
 @pytest.mark.parametrize(
