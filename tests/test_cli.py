@@ -3534,7 +3534,7 @@ def test_skills_install_for_both_agents(
     skill = source / 'example-skill'
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('instructions\n')
-    codex_home = tmp_path / 'codex'
+    codex_home = tmp_path / 'codex=custom'
     claude_home = tmp_path / 'claude'
 
     result = main(
@@ -3558,3 +3558,55 @@ def test_skills_install_for_both_agents(
     assert 'installed example-skill for codex' in capsys.readouterr().out
     assert (codex_home / 'skills/example-skill/SKILL.md').is_file()
     assert (claude_home / 'skills/example-skill/SKILL.md').is_file()
+
+
+@pytest.mark.parametrize(
+    ('override', 'message'),
+    [
+        ('codex', 'expected RUNTIME=PATH'),
+        ('codex=', 'expected RUNTIME=PATH'),
+        ('=/tmp/skills', 'runtime_unknown: '),
+        ('unknown=/tmp/skills', 'runtime_unknown: unknown'),
+    ],
+)
+def test_skills_install_rejects_malformed_home_override(
+    override: str, message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject malformed or unknown runtime skill-home overrides."""
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                'skills',
+                'install',
+                '--skill',
+                'agent-orchestra-developer',
+                '--skill-home',
+                override,
+            ]
+        )
+
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_skills_install_rejects_duplicate_home_override(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject two skill-home overrides for the same runtime."""
+
+    result = main(
+        [
+            'skills',
+            'install',
+            '--skill',
+            'agent-orchestra-developer',
+            '--skill-home',
+            f'codex={tmp_path / "first"}',
+            '--skill-home',
+            f'codex={tmp_path / "second"}',
+        ]
+    )
+
+    assert result == 2
+    assert 'skill home specified twice for codex' in capsys.readouterr().err

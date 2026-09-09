@@ -1397,12 +1397,21 @@ def _install_skills(args: argparse.Namespace) -> int:
         args.runtime_registry.identifiers() if args.agent == 'all' else (args.agent,)
     )
     skill_names = tuple(dict.fromkeys(args.skill))
+    skill_homes: dict[str, Path] = {}
+    for runtime, path in args.skill_home:
+        if runtime in skill_homes:
+            print(
+                f'error: skill home specified twice for {runtime}',
+                file=sys.stderr,
+            )
+            return 2
+        skill_homes[runtime] = path
     try:
         results = install_skills(
             skill_names,
             agents,
             source_root=args.source,
-            skill_homes=dict(args.skill_home),
+            skill_homes=skill_homes,
             runtime_registry=args.runtime_registry,
         )
     except (SkillInstallError, OSError) as error:
