@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from agent_orchestra.reviewer_paths import ReviewerIdentityError, validate_reviewer_id
 
@@ -12,7 +12,7 @@ AggregateVerdict = Literal['approved', 'changes_requested', 'blocked']
 EMPTY_BATCH = 'review batch must contain at least one reviewer'
 DUPLICATE_REVIEWER_IDS = 'review batch contains duplicate reviewer IDs'
 INVALID_OUTCOME = 'review batch contains an invalid reviewer outcome'
-VALID_OUTCOMES = frozenset({'approved', 'changes_requested', 'blocked', 'incomplete'})
+VALID_OUTCOMES = frozenset(get_args(ReviewerOutcome))
 
 
 class ReviewBatchError(ValueError):

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import cast, get_args
 
 import pytest
 
 from agent_orchestra.review_batch import (
+    VALID_OUTCOMES,
     ReviewBatchError,
     ReviewerDecision,
     ReviewerOutcome,
@@ -91,3 +92,9 @@ def test_unknown_outcome_fails_closed() -> None:
 
     with pytest.raises(ReviewBatchError, match='invalid reviewer outcome'):
         aggregate_review_batch((decision,))
+
+
+def test_runtime_outcomes_follow_the_typed_vocabulary() -> None:
+    """Keep runtime validation synchronized with the reviewer outcome type."""
+
+    assert frozenset(get_args(ReviewerOutcome)) == VALID_OUTCOMES
