@@ -52,6 +52,7 @@ from agent_orchestra.reviewer_paths import (
     reviewer_invocation_stem,
     reviewer_task_id,
 )
+from agent_orchestra.reviewer_plan import reviewer_execution_plan_record
 from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
     DUPLICATE_REVIEW_FINDING_IDS,
@@ -69,6 +70,7 @@ from agent_orchestra.workflow import transition
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
     from agent_orchestra.store import RunStore
 
 
@@ -184,6 +186,66 @@ class ReviewPlan:
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerSetReviewPlan:
+    """One workflow's immutable reviewer batch and developer configuration."""
+
+    objective: str
+    reviewer_plan: ReviewerExecutionPlan
+    developer_command: Sequence[str]
+    developer_timeout_seconds: int
+    max_iterations: int
+    developer_identity: InvocationIdentity
+
+
+def _execution_record(
+    plan: ReviewPlan | ReviewerSetReviewPlan,
+    *,
+    run_id: str,
+    created_at: str,
+) -> ExecutionRecord:
+    """Build one strict versioned execution record from a worker plan."""
+
+    common: dict[str, Any] = {
+        'run_id': run_id,
+        'objective': plan.objective,
+        'developer': {
+            'command': list(plan.developer_command),
+            'identity': {
+                'vendor': plan.developer_identity.vendor,
+                'model': plan.developer_identity.model,
+                'runtime': plan.developer_identity.runtime,
+            },
+            'timeout_seconds': plan.developer_timeout_seconds,
+        },
+        'max_review_iterations': plan.max_iterations,
+        'created_at': created_at,
+    }
+    if isinstance(plan, ReviewerSetReviewPlan):
+        return ReviewerSetExecutionRecordSchema.model_validate(
+            {
+                **common,
+                'schema_version': 3,
+                'reviewer_plan': reviewer_execution_plan_record(plan.reviewer_plan),
+            }
+        )
+    return ExecutionRecordSchema.model_validate(
+        {
+            **common,
+            'schema_version': 2,
+            'reviewer': {
+                'command': list(plan.reviewer_command),
+                'identity': {
+                    'vendor': plan.reviewer_identity.vendor,
+                    'model': plan.reviewer_identity.model,
+                    'runtime': plan.reviewer_identity.runtime,
+                },
+                'timeout_seconds': plan.timeout_seconds,
+            },
+        }
+    )
 
 
 def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
@@ -1050,38 +1112,22 @@ def _run_queued_review(
             updated_at=utc_now(),
         )
         store.update(prepared, expected_state=RunState.QUEUED)
-        execution_document: dict[str, Any] = {
-            'schema_version': 2,
-            'run_id': str(run.id),
-            'objective': objective,
-            'reviewer': {
-                'command': list(reviewer_command),
-                'identity': {
-                    'vendor': reviewer_identity.vendor,
-                    'model': reviewer_identity.model,
-                    'runtime': reviewer_identity.runtime,
-                },
-                'timeout_seconds': timeout_seconds,
-            },
-            'developer': {
-                'command': list(developer_command),
-                'identity': {
-                    'vendor': developer_identity.vendor,
-                    'model': developer_identity.model,
-                    'runtime': developer_identity.runtime,
-                },
-                'timeout_seconds': developer_timeout_seconds,
-            },
-            'max_review_iterations': max_iterations,
-            'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
-        }
         try:
-            ExecutionRecordSchema.model_validate(execution_document)
+            execution = _execution_record(
+                replace(
+                    plan,
+                    developer_timeout_seconds=developer_timeout_seconds,
+                    reviewer_identity=reviewer_identity,
+                    developer_identity=developer_identity,
+                ),
+                run_id=str(run.id),
+                created_at=datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+            )
         except ValidationError as error:
             raise WorkerError(f'invalid execution record: {error}') from error
         _write_json_atomic(
             _run_evidence_path(run_directory, 'execution.json'),
-            execution_document,
+            execution.model_dump(mode='json'),
             'execution',
         )
         reviewing = transition(prepared, RunState.REVIEWING)

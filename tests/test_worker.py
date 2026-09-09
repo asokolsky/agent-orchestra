@@ -10,7 +10,9 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import evidence_path
+from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.schemas import CHANGES_REQUESTED_WITHOUT_FINDINGS
 from agent_orchestra.worker import (
     APPROVED_WITH_FINDINGS,
@@ -24,8 +26,10 @@ from agent_orchestra.worker import (
     INVALID_VERDICT,
     MISSING_ARTIFACT,
     WORKTREE_CHANGED,
+    ReviewerSetReviewPlan,
     WorkerError,
     _digest,
+    _execution_record,
     _read_execution_record,
     _require_unchanged,
     _require_unique_message_id,
@@ -120,6 +124,41 @@ def test_read_execution_record_accepts_reviewer_set_schema(tmp_path: Path) -> No
     record = _read_execution_record(tmp_path, 'job-1')
 
     assert record.schema_version == 3
+
+
+def test_reviewer_set_plan_builds_schema_3_execution_record() -> None:
+    """Persist the complete immutable reviewer plan through the worker boundary."""
+
+    identity = InvocationIdentity(vendor='vendor', model=None, runtime='runtime')
+    reviewer_plan = ReviewerExecutionPlan(
+        'default',
+        tuple(
+            ReviewerExecution(
+                reviewer_id=reviewer_id,
+                command=('/python', '-m', reviewer_id),
+                identity=identity,
+                timeout_seconds=90,
+            )
+            for reviewer_id in ('security', 'portability')
+        ),
+    )
+    plan = ReviewerSetReviewPlan(
+        objective='Review the frozen diff.',
+        reviewer_plan=reviewer_plan,
+        developer_command=('/python', '-m', 'developer'),
+        developer_timeout_seconds=120,
+        max_iterations=3,
+        developer_identity=identity,
+    )
+
+    record = _execution_record(plan, run_id='job-1', created_at='2026-09-09T15:00:00Z')
+
+    assert record.schema_version == 3
+    assert record.reviewer_plan.reviewer_set_id == 'default'
+    assert [reviewer.reviewer_id for reviewer in record.reviewer_plan.reviewers] == [
+        'security',
+        'portability',
+    ]
 
 
 def test_validate_review_response_uses_request_sequence(tmp_path: Path) -> None:
