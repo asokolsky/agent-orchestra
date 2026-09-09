@@ -287,6 +287,14 @@ qualified by the same stable ID. Fan-out dispatch will produce these records in
 a subsequent slice. Schema-4 records remain readable and retain the
 single-reviewer `{job_id}:{sequence:06d}-reviewer` form.
 
+Required source-review batches use one completion-order-independent aggregation
+policy. Any `changes_requested` member makes the batch `changes_requested`.
+Otherwise, a `blocked` or incomplete member makes the batch `blocked`. The batch
+is `approved` only when every required member approves. The rationale preserves
+the configured reviewer order in separate `changes_requested_by`, `blocked_by`,
+and `incomplete_reviewers` lists so later persisted evidence can explain the
+decision without recomputing policy from logs.
+
 A source-code job's worktree binding is durable and may outlive the directory
 it names. Read paths observe whether that path is absent or no longer a Git
 worktree without mutating state. Only the explicit cancellation command may
