@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from agent_orchestra.manifests import evidence_path
 
-REVIEWER_ID_PATTERN = re.compile(r'[a-z0-9][a-z0-9_-]*')
+REVIEWER_ID_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
 
 
 class ReviewerIdentityError(ValueError):

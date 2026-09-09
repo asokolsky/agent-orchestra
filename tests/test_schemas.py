@@ -53,6 +53,17 @@ def test_reviewer_execution_plan_schema_is_strict_and_ordered() -> None:
     with pytest.raises(ValueError, match='Extra inputs are not permitted'):
         ReviewerExecutionPlanSchema.model_validate(document)
 
+    schema = ReviewerExecutionPlanSchema.model_json_schema()
+    assert schema['properties']['reviewer_set_id']['pattern'] == (
+        '^[a-z0-9][a-z0-9_-]*$'
+    )
+    assert (
+        schema['$defs']['ReviewerExecutionSchema']['properties']['reviewer_id'][
+            'pattern'
+        ]
+        == '^[a-z0-9][a-z0-9_-]*$'
+    )
+
 
 def test_reviewer_execution_plan_schema_rejects_duplicate_members() -> None:
     """Prevent two persisted reviewers from sharing one evidence namespace."""
@@ -78,7 +89,7 @@ def test_reviewer_execution_plan_schema_rejects_partial_id_matches(
     else:
         document['reviewers'][0][field] = value
 
-    with pytest.raises(ValueError, match='invalid reviewer ID'):
+    with pytest.raises(ValueError, match='String should match pattern'):
         ReviewerExecutionPlanSchema.model_validate(document)
 
 
