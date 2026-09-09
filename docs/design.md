@@ -248,7 +248,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-14 CLI. This
+column and field names. Those names are not exposed by the schema-15 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -272,6 +272,12 @@ Schema version history:
   cancellation reasons on transition documents.
 - Version 14 adds ordered named reviewer-set configuration with stable member
   identities and registry-derived runtime provenance.
+- Version 15 adds the stable `reviewer_id` field to source-review task and
+  attempt documents. The version advances because the current CLI contract
+  versions additive public fields; issue #61 may revise that policy globally.
+
+The independent audit document schema is version 14. It advances from 13 for
+the same conditional reviewer identity in its task and attempt history.
 
 Invocation record schema 5 defines `reviewer_id` for source-code reviewer tasks.
 The reviewer identity and path builder uses durable task IDs of

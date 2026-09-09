@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 VerificationResult = Literal[
     'verified', 'failed', 'unverifiable', 'incomplete', 'expired'
 ]
+AUDIT_SCHEMA_VERSION = 14
 RETENTION_MARKER = '.retention.json'
 
 
@@ -944,7 +945,7 @@ def build_audit_document(
             )
         )
         pending_document: dict[str, object] = {
-            'schema_version': 13,
+            'schema_version': AUDIT_SCHEMA_VERSION,
             'job': _job_document(job),
             'transitions': [_transition_document(item) for item in transitions],
             'operations': _derived_operations(transitions),
@@ -997,7 +998,7 @@ def build_audit_document(
             if isinstance(entry, dict)
         ]
         expired_document: dict[str, object] = {
-            'schema_version': 13,
+            'schema_version': AUDIT_SCHEMA_VERSION,
             'job': _job_document(job),
             'transitions': [_transition_document(item) for item in transitions],
             'operations': _derived_operations(transitions),
@@ -1067,7 +1068,7 @@ def build_audit_document(
             if transition.scope_digest is None
         )
     document: dict[str, object] = {
-        'schema_version': 13,
+        'schema_version': AUDIT_SCHEMA_VERSION,
         'job': _job_document(job),
         'transitions': [_transition_document(item) for item in transitions],
         'operations': _derived_operations(transitions),

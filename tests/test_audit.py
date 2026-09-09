@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra import audit as audit_module
 from agent_orchestra import manifests as manifest_module
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import (
@@ -24,6 +25,7 @@ from agent_orchestra.invocations import AttemptStatus
 from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_snapshot
 from agent_orchestra.manifests import evidence_path, parse_manifest
 from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
+from agent_orchestra.reviewer_paths import reviewer_evidence_paths
 from agent_orchestra.store import RunStore
 from agent_orchestra.workflow import transition
 from tests.test_job_views import add_attempt
@@ -43,6 +45,22 @@ def _arguments(database: Path, root: Path, job_id: str, *, verify: bool) -> list
     if verify:
         arguments.append('--verify')
     return arguments
+
+
+@pytest.mark.parametrize(
+    ('reviewer_id', 'attempt'),
+    [('codex', 1), ('claude-code', 2), ('review-result-000002', 9)],
+)
+def test_reviewer_writer_paths_are_recognized(reviewer_id: str, attempt: int) -> None:
+    """Pin reviewer path writers to audit and manifest recognizers."""
+
+    paths = reviewer_evidence_paths(
+        sequence=7, iteration=3, reviewer_id=reviewer_id, attempt=attempt
+    )
+
+    assert audit_module._is_known_temporary(paths.temporary_result)
+    assert manifest_module.canonical_evidence_type(paths.request) == 'review_request'
+    assert manifest_module.canonical_evidence_type(paths.result) == 'review_result'
 
 
 def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, Run]:
@@ -305,7 +323,7 @@ def test_default_audit_is_versioned_deterministic_and_omits_result(
 
     assert first == second
     document = json.loads(first)
-    assert document['schema_version'] == 13
+    assert document['schema_version'] == 14
     assert 'result' not in document
     assert document['job']['scenario'] == 'local_changes'
     assert [item['to_state'] for item in document['transitions']] == [
@@ -942,6 +960,6 @@ def test_audit_reports_missing_job_as_versioned_error(
     assert main(_arguments(database, tmp_path / 'runs', 'missing', verify=True)) == 2
 
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 14
+    assert document['schema_version'] == 15
     assert document['job_id'] == 'missing'
     assert document['error']['code'] == 'job_not_found'
