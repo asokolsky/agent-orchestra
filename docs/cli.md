@@ -871,8 +871,7 @@ agent-orchestra skills install --skill SKILL [--skill SKILL ...] [OPTIONS]
 | `--skill SKILL` | Required | Skill name to install. Repeat to install multiple skills; duplicate names are collapsed. |
 | `--agent {codex,claude-code,all}` | `all` | Runtime installation target. |
 | `--source SOURCE` | Packaged skill data | Alternate directory containing canonical skill subdirectories. |
-| `--codex-home CODEX_HOME` | `$CODEX_HOME`, otherwise `~/.codex` | Override the Codex configuration root. |
-| `--claude-home CLAUDE_HOME` | `$CLAUDE_CONFIG_DIR`, otherwise `~/.claude` | Override the Claude Code configuration root. |
+| `--skill-home RUNTIME=PATH` | Runtime registry environment/default | Override a registered runtime configuration root; repeat as needed. |
 
 Examples:
 
@@ -886,7 +885,7 @@ agent-orchestra skills install \
 agent-orchestra skills install \
   --agent codex \
   --skill agent-orchestra-reviewer \
-  --codex-home /var/tmp/codex
+  --skill-home codex=/var/tmp/codex
 ```
 
 An unchanged installation is reported as already installed. A changed canonical

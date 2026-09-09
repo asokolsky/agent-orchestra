@@ -9,15 +9,19 @@ import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any, Never, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
 
-from agent_orchestra.adapter.base import IssueReviewExecution
-from agent_orchestra.adapter.claude_code import ClaudeCodeIssueReviewerAdapter
-from agent_orchestra.adapter.codex import CodexIssueReviewerAdapter
+from agent_orchestra.adapter.base import IssueReviewerAdapter, IssueReviewExecution
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.adapter.registry import (
+    DEFAULT_RUNTIME_REGISTRY,
+    RuntimeRegistry,
+    RuntimeRegistryError,
+    RuntimeRole,
+)
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
@@ -269,6 +273,7 @@ def _start_invocation(
     iteration: int,
     *,
     agent: str,
+    vendor: str,
     model: str | None,
     attempt: int,
 ) -> tuple[Path, InvocationRecord]:
@@ -286,13 +291,7 @@ def _start_invocation(
         task_id=task_id,
         invocation_id=f'{task_id}:attempt-{attempt:04d}',
         role='issue_reviewer',
-        agent_vendor=(
-            'openai'
-            if agent == 'codex'
-            else 'anthropic'
-            if agent == 'claude-code'
-            else 'custom'
-        ),
+        agent_vendor=vendor,
         requested_model=model if agent != 'custom' else None,
         effective_models=(),
         effective_model_status='unavailable',
@@ -408,9 +407,22 @@ def run_issue_review(
     model: str | None,
     timeout: int,
     command: tuple[str, ...] = (),
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> IssueJob:
     """Run one review bound to the latest immutable issue revision."""
 
+    adapter: IssueReviewerAdapter | None = None
+    try:
+        runtime = (
+            None if command else registry.require(agent, RuntimeRole.ISSUE_REVIEWER)
+        )
+        if runtime is not None:
+            adapter = cast(
+                'IssueReviewerAdapter',
+                registry.adapter(agent, RuntimeRole.ISSUE_REVIEWER, model),
+            )
+    except RuntimeRegistryError as error:
+        raise IssueReviewError(str(error)) from error
     root = runs_directory.expanduser().resolve()
     job_directory = _job_directory(root, job.id)
     recover_evidence_index(root, job.id)
@@ -594,20 +606,15 @@ def run_issue_review(
             job,
             iteration,
             agent='custom' if command else agent,
+            vendor='custom' if runtime is None else runtime.vendor,
             model=model,
             attempt=attempt,
         )
-        execution = (
-            _custom_review(command, request_path, candidate_path, timeout)
-            if command
-            else (
-                CodexIssueReviewerAdapter(model).execute(request, timeout=timeout)
-                if agent == 'codex'
-                else ClaudeCodeIssueReviewerAdapter(model).execute(
-                    request, timeout=timeout
-                )
-            )
-        )
+        if command:
+            execution = _custom_review(command, request_path, candidate_path, timeout)
+        else:
+            assert adapter is not None
+            execution = adapter.execute(request, timeout=timeout)
         raw_result = execution.result
         result = validate_issue_review_result(raw_result)
         if result.source_digest != current.digest:
@@ -674,6 +681,7 @@ def resume_issue_review(
     runs_directory: Path,
     *,
     timeout: int,
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> IssueJob:
     """Resume one built-in issue-review attempt from durable evidence."""
 
@@ -704,9 +712,11 @@ def resume_issue_review(
     if latest.status != 'completed':
         message = 'issue review activation is uncertain'
         raise IssueReviewError(message)
-    if latest.runtime not in {'codex', 'claude-code'}:
+    try:
+        registry.require(latest.runtime, RuntimeRole.ISSUE_REVIEWER)
+    except RuntimeRegistryError as error:
         message = 'custom issue reviewers must be retried with review-issue'
-        raise IssueReviewError(message)
+        raise IssueReviewError(f'{message}: {error}') from error
     return run_issue_review(
         job,
         store,
@@ -715,6 +725,7 @@ def resume_issue_review(
         agent=latest.runtime,
         model=latest.requested_model,
         timeout=timeout,
+        registry=registry,
     )
 
 

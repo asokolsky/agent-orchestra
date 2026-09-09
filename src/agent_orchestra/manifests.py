@@ -11,24 +11,29 @@ from pathlib import PurePosixPath
 from string import Formatter
 from typing import Any
 
+from agent_orchestra.adapter.registry import (
+    DEFAULT_RUNTIME_REGISTRY,
+    RuntimeRegistry,
+    RuntimeRole,
+)
+
 MANIFEST_ENGINE_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
-MANIFEST_IDS = ('github', 'gitlab', 'codex', 'claude-code', 'evidence')
+PROVIDER_MANIFEST_IDS = ('github', 'gitlab')
+MANIFEST_IDS = (
+    *PROVIDER_MANIFEST_IDS,
+    *DEFAULT_RUNTIME_REGISTRY.identifiers(),
+    'evidence',
+)
 MALFORMED_MANIFEST = 'manifest_malformed'
 ENGINE_TOO_OLD = 'manifest_engine_too_old'
 UNSUPPORTED_MANIFEST_VERSION = 'manifest_schema_version_unsupported'
 EVIDENCE_MANIFEST = 'evidence'
 COMMON_FIELDS = {'id', 'kind', 'schema_version', 'min_engine_version'}
-MANIFEST_KINDS = {
+STATIC_MANIFEST_KINDS = {
     'github': 'provider',
     'gitlab': 'provider',
-    'codex': 'runtime',
-    'claude-code': 'runtime',
     EVIDENCE_MANIFEST: 'evidence',
-}
-RUNTIME_PLACEHOLDERS = {
-    'codex': {'cwd', 'schema', 'result'},
-    'claude-code': {'settings', 'schema'},
 }
 EVIDENCE_TYPES = (
     'issue_snapshot',
@@ -76,7 +81,12 @@ def load_manifest(manifest_id: str) -> Manifest:
     return parse_manifest(manifest_id, content)
 
 
-def parse_manifest(manifest_id: str, content: str) -> Manifest:
+def parse_manifest(
+    manifest_id: str,
+    content: str,
+    *,
+    runtime_registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
+) -> Manifest:
     """Parse and validate manifest TOML for runtime and test callers."""
 
     try:
@@ -99,13 +109,16 @@ def parse_manifest(manifest_id: str, content: str) -> Manifest:
     if document['schema_version'] != MANIFEST_SCHEMA_VERSION:
         raise ManifestError(UNSUPPORTED_MANIFEST_VERSION, manifest_id)
     kind = str(document['kind'])
-    if MANIFEST_KINDS.get(manifest_id) != kind:
+    expected_kind = STATIC_MANIFEST_KINDS.get(manifest_id)
+    if expected_kind is None and manifest_id in runtime_registry.identifiers():
+        expected_kind = 'runtime'
+    if expected_kind != kind:
         raise ManifestError(MALFORMED_MANIFEST, manifest_id)
     try:
         if kind == 'provider':
             _validate_provider(document)
         elif kind == 'runtime':
-            _validate_runtime(manifest_id, document)
+            _validate_runtime(manifest_id, document, runtime_registry)
         elif kind == 'evidence':
             _validate_evidence(document)
         else:
@@ -152,19 +165,21 @@ def _validate_provider(document: dict[str, Any]) -> None:
             re.compile(pattern)
 
 
-def _validate_runtime(manifest_id: str, document: dict[str, Any]) -> None:
+def _validate_runtime(
+    manifest_id: str,
+    document: dict[str, Any],
+    runtime_registry: RuntimeRegistry,
+) -> None:
     """Validate named ordered adapter argument profiles."""
 
     if set(document) != COMMON_FIELDS | {'profiles'}:
         raise TypeError
     profiles = document.get('profiles')
-    if not isinstance(profiles, dict) or set(profiles) != {
-        'reviewer',
-        'issue_reviewer',
-        'developer',
-    }:
+    runtime = runtime_registry.require(manifest_id)
+    required_profiles = {role.value for role in RuntimeRole if runtime.supports(role)}
+    if not isinstance(profiles, dict) or set(profiles) != required_profiles:
         raise TypeError
-    allowed = RUNTIME_PLACEHOLDERS[manifest_id]
+    allowed = set(runtime.manifest_placeholders)
     for arguments in profiles.values():
         if (
             not isinstance(arguments, list)

@@ -117,6 +117,18 @@ prove that the user authorized a commit or remote action.
 A runtime is the product that runs an agent. Codex and Claude Code are the first
 supported runtimes.
 
+The runtime registry is the single source of supported identifiers. Each entry
+declares its vendor, module entry point, role adapter implementations, role
+capabilities, skill-home convention, manifest inputs, and runtime-metadata
+capability. CLI choices and orchestration dispatch are derived from the same
+entry. A known runtime selected for a role it does not implement is rejected as
+`runtime_role_unsupported` before an attempt starts; an unknown identifier is
+rejected as `runtime_unknown`. The same checks apply when resuming: removing a
+persisted runtime from the registry makes its unfinished jobs unresumable. The
+configured default is preferred for every role; if it lacks a role, declaration
+order selects the first capable runtime. This deterministic fallback may cross
+vendors and is part of the registry configuration, not an implicit CLI choice.
+
 Runtime selection answers **how** a role is executed, not **what** the role may
 do. Runtime-specific details include:
 

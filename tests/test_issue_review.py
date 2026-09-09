@@ -5,13 +5,14 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
 from agent_orchestra import issue_review
-from agent_orchestra.adapter.base import IssueReviewExecution
+from agent_orchestra.adapter.base import IssueReviewerAdapter, IssueReviewExecution
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
 from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import resolve_evidence_path
@@ -19,6 +20,7 @@ from agent_orchestra.invocations import read_records
 from agent_orchestra.issue_review import (
     IssueReviewError,
     publish_issue_feedback,
+    resume_issue_review,
     run_issue_review,
 )
 from agent_orchestra.issue_sources import (
@@ -29,6 +31,56 @@ from agent_orchestra.issue_sources import (
 )
 from agent_orchestra.models import IssueJob, RunState
 from agent_orchestra.store import ConcurrentUpdateError, RunStore
+
+
+class FakeIssueReviewerAdapter(IssueReviewerAdapter):
+    """Executable non-built-in adapter used to prove registry dispatch."""
+
+    executions: ClassVar[list[IssueReviewExecution | BaseException]] = []
+
+    def __init__(self, model: str | None) -> None:
+        """Retain the selected fake model."""
+
+        self.model = model
+
+    def execute(self, request: dict[str, Any], *, timeout: int) -> IssueReviewExecution:
+        """Return or raise the next deterministic fake execution."""
+
+        del request, timeout
+        outcome = self.executions.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def fake_issue_registry() -> RuntimeRegistry:
+    """Create a role-limited registry with an executable issue adapter."""
+
+    return RuntimeRegistry(
+        (
+            RuntimeDefinition(
+                identifier='fake-runtime',
+                vendor='example-vendor',
+                module=__name__,
+                reviewer_adapter=None,
+                developer_adapter=None,
+                issue_reviewer_adapter=f'{__name__}.FakeIssueReviewerAdapter',
+                manifest_placeholders=frozenset({'schema'}),
+                reports_runtime_metadata=False,
+                skill_home_environment='FAKE_RUNTIME_HOME',
+                skill_home_directory='.fake-runtime',
+            ),
+        )
+    )
+
+
+def invalid_issue_registry() -> RuntimeRegistry:
+    """Create a registry whose declared issue adapter cannot be imported."""
+
+    definition = fake_issue_registry().require('fake-runtime')
+    return RuntimeRegistry(
+        (replace(definition, issue_reviewer_adapter='missing.module.Adapter'),)
+    )
 
 
 def snapshot(
@@ -109,6 +161,31 @@ Path(sys.argv[2]).write_text(json.dumps(result))
 ''',
         encoding='utf-8',
     )
+
+
+def test_run_issue_review_rejects_invalid_adapter_before_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep workflow state unchanged when adapter resolution fails."""
+
+    store, job, runs = setup_job(tmp_path)
+    monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
+
+    with pytest.raises(IssueReviewError, match='runtime_adapter_invalid'):
+        run_issue_review(
+            job,
+            store,
+            runs,
+            objective='Review readiness.',
+            agent='fake-runtime',
+            model=None,
+            timeout=30,
+            registry=invalid_issue_registry(),
+        )
+
+    assert store.get_issue(job.id).state is RunState.QUEUED
+    job_directory = resolve_evidence_path(runs, job.id)
+    assert not (job_directory / 'invocations').exists()
 
 
 def test_run_issue_review_persists_result_and_feedback(
@@ -209,7 +286,7 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
         raise IssueReviewerError(message, timed_out=True)
 
     monkeypatch.setattr(
-        'agent_orchestra.issue_review.CodexIssueReviewerAdapter.execute', timeout
+        'agent_orchestra.adapter.codex.CodexIssueReviewerAdapter.execute', timeout
     )
     with pytest.raises(IssueReviewError, match='timed out'):
         run_issue_review(
@@ -232,7 +309,7 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
         'verification_gaps': [],
     }
     monkeypatch.setattr(
-        'agent_orchestra.issue_review.CodexIssueReviewerAdapter.execute',
+        'agent_orchestra.adapter.codex.CodexIssueReviewerAdapter.execute',
         lambda *_args, **_kwargs: IssueReviewExecution(result, '', '', 0),
     )
 
@@ -255,6 +332,52 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
     records = read_records(resolve_evidence_path(runs, job.id), job.id)
     assert [record.conclusion for record in records] == ['timed_out', 'succeeded']
     assert records[-1].requested_model == 'codex-test'
+
+
+def test_fake_issue_runtime_dispatches_resumes_and_attributes_vendor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use one injected registry for issue dispatch, resume, and attribution."""
+
+    store, job, runs = setup_job(tmp_path)
+    monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
+    registry = fake_issue_registry()
+    result = {
+        'schema_version': 1,
+        'source_digest': snapshot().digest,
+        'verdict': 'ready',
+        'summary': 'The fake runtime completed the review.',
+        'findings': [],
+        'validation': ['Exercised fake registry dispatch.'],
+        'verification_gaps': [],
+    }
+    FakeIssueReviewerAdapter.executions = [
+        IssueReviewerError('timed out', timed_out=True),
+        IssueReviewExecution(result, '', '', 0),
+    ]
+
+    with pytest.raises(IssueReviewError, match='timed out'):
+        run_issue_review(
+            job,
+            store,
+            runs,
+            objective='Review readiness.',
+            agent='fake-runtime',
+            model='fake-model',
+            timeout=30,
+            registry=registry,
+        )
+    finished = resume_issue_review(
+        store.get_issue(job.id), store, runs, timeout=30, registry=registry
+    )
+
+    assert finished.state is RunState.APPROVED
+    records = read_records(resolve_evidence_path(runs, job.id), job.id)
+    assert [record.agent_vendor for record in records] == [
+        'example-vendor',
+        'example-vendor',
+    ]
+    assert [record.conclusion for record in records] == ['timed_out', 'succeeded']
 
 
 def test_run_issue_review_dispatches_claude_code_adapter(
@@ -289,7 +412,8 @@ def test_run_issue_review_dispatches_claude_code_adapter(
         )
 
     monkeypatch.setattr(
-        'agent_orchestra.issue_review.ClaudeCodeIssueReviewerAdapter.execute', execute
+        'agent_orchestra.adapter.claude_code.ClaudeCodeIssueReviewerAdapter.execute',
+        execute,
     )
 
     finished = run_issue_review(
@@ -507,6 +631,7 @@ def test_run_issue_review_does_not_relaunch_running_attempt(
         reviewing,
         1,
         agent='codex',
+        vendor='openai',
         model=None,
         attempt=1,
     )

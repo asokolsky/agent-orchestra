@@ -7,8 +7,11 @@ canonical workflow contracts.
 define shared requests, prompts, message handling, and errors. Runtime modules
 implement the interfaces and own executable discovery,
 command construction, sandbox configuration, timeouts, output-envelope parsing,
-and runtime metadata. Orchestration code selects an implementation but does not
-encode runtime-specific commands.
+and runtime metadata. `registry.py` is the single source for public runtime
+identifiers, vendors, supported roles, adapter implementations, module entry
+points, skill homes, and metadata capability. Orchestration resolves a
+`(runtime, role)` pair through that registry and does not encode runtime-specific
+commands or identity branches.
 
 For issue review, `issue_reviewer.py` defines the common issue-reviewer
 assignment. This role evaluates issue prose and returns feedback to an issue

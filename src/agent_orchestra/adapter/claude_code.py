@@ -52,7 +52,7 @@ from agent_orchestra.schemas import (
     SchemaValidationError,
     validate_review_result,
 )
-from agent_orchestra.skill_install import AgentTarget, skill_destination
+from agent_orchestra.skill_install import skill_destination
 
 
 class ClaudeCodeReviewerError(RuntimeError):
@@ -251,8 +251,7 @@ def _execute_claude_code_reviewer(
     if executable is None:
         raise ClaudeCodeReviewerError(CLAUDE_CODE_NOT_FOUND)
     if not (
-        skill_destination(AgentTarget.CLAUDE_CODE, 'agent-orchestra-reviewer')
-        / 'SKILL.md'
+        skill_destination('claude-code', 'agent-orchestra-reviewer') / 'SKILL.md'
     ).is_file():
         raise ClaudeCodeReviewerError(REVIEWER_SKILL_MISSING)
 
@@ -424,8 +423,7 @@ def _execute_claude_code_developer(
     if executable is None:
         raise DeveloperAdapterError(CLAUDE_CODE_NOT_FOUND)
     if not (
-        skill_destination(AgentTarget.CLAUDE_CODE, 'agent-orchestra-developer')
-        / 'SKILL.md'
+        skill_destination('claude-code', 'agent-orchestra-developer') / 'SKILL.md'
     ).is_file():
         raise DeveloperAdapterError(DEVELOPER_SKILL_MISSING)
     command = [

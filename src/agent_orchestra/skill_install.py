@@ -9,8 +9,13 @@ import shutil
 import sysconfig
 import tempfile
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY, RuntimeRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 INSTALL_MANIFEST = '.agent-orchestra-install.json'
 HASH_CHUNK_SIZE = 1024 * 1024
@@ -20,18 +25,11 @@ class SkillInstallError(RuntimeError):
     """Raised when a skill installation cannot be completed safely."""
 
 
-class AgentTarget(StrEnum):
-    """Agent runtimes supported by the skill installer."""
-
-    CODEX = 'codex'
-    CLAUDE_CODE = 'claude-code'
-
-
 @dataclass(frozen=True, slots=True)
 class InstallResult:
     """Outcome of installing one skill for one agent runtime."""
 
-    agent: AgentTarget
+    agent: str
     skill: str
     destination: Path
     installed: bool
@@ -61,11 +59,11 @@ def find_skills_root(explicit_source: Path | None = None) -> Path:
 
 def install_skills(
     skill_names: tuple[str, ...],
-    agents: tuple[AgentTarget, ...],
+    agents: tuple[str, ...],
     *,
     source_root: Path | None = None,
-    codex_home: Path | None = None,
-    claude_home: Path | None = None,
+    skill_homes: Mapping[str, Path] | None = None,
+    runtime_registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> tuple[InstallResult, ...]:
     """Install each skill atomically after validating every destination."""
 
@@ -78,8 +76,8 @@ def install_skills(
             skill_destination(
                 agent,
                 name,
-                codex_home=codex_home,
-                claude_home=claude_home,
+                skill_homes=skill_homes,
+                runtime_registry=runtime_registry,
             ),
         )
         for agent in agents
@@ -132,30 +130,23 @@ def _validate_source(root: Path, skill_name: str) -> Path:
 
 
 def skill_destination(
-    agent: AgentTarget,
+    agent: str,
     skill_name: str,
     *,
-    codex_home: Path | None = None,
-    claude_home: Path | None = None,
+    skill_homes: Mapping[str, Path] | None = None,
+    runtime_registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Path:
     """Resolve a personal skill destination for an agent runtime."""
 
-    if agent is AgentTarget.CODEX:
-        configured = codex_home
-        if configured is None:
-            codex_home_env = os.environ.get('CODEX_HOME')
-            configured = (
-                Path(codex_home_env) if codex_home_env else Path.home() / '.codex'
-            )
-    else:
-        configured = claude_home
-        if configured is None:
-            claude_config_dir = os.environ.get('CLAUDE_CONFIG_DIR')
-            configured = (
-                Path(claude_config_dir)
-                if claude_config_dir
-                else Path.home() / '.claude'
-            )
+    runtime = runtime_registry.require(agent)
+    configured = (skill_homes or {}).get(runtime.identifier)
+    if configured is None:
+        environment_value = os.environ.get(runtime.skill_home_environment)
+        configured = (
+            Path(environment_value)
+            if environment_value
+            else Path.home() / runtime.skill_home_directory
+        )
     return configured.expanduser().resolve() / 'skills' / skill_name
 
 
