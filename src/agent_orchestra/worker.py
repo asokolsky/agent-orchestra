@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -114,6 +114,77 @@ RESUME_INTERRUPTED_CODE = 'resume_interrupted'
 RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
 RESUME_ACTIVATION_UNCERTAIN_CODE = 'resume_activation_uncertain'
 RESUME_CANCELLED_CODE = 'resume_cancelled'
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerContext:
+    """
+    Caller-supplied collaborators invariant across one worker invocation.
+
+    These four values are identical on the run and the resume path and never
+    change as a workflow advances, so they travel as one collaborator rather
+    than as four parameters through every function in the chain. Adding a
+    cross-cutting collaborator becomes a field here instead of a signature edit
+    in nine places, which is what #38 had to do for the runtime registry.
+    """
+
+    store: RunStore
+    runs_directory: Path
+    digest_worktree: Callable[[Path, str], str | None]
+    registry: RuntimeRegistry
+
+    def run_directory(self, run: Run) -> Path:
+        """Resolve one run's evidence directory under this runs directory."""
+
+        return _run_evidence_directory(self.runs_directory, str(run.id))
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewPlan:
+    """
+    One workflow's objective, commands, limits, and agent identities.
+
+    The run path takes these from the caller while the resume path rebuilds
+    them from the durable execution record, so they are workflow state rather
+    than caller configuration and are kept apart from WorkerContext.
+    """
+
+    objective: str
+    reviewer_command: Sequence[str]
+    developer_command: Sequence[str]
+    timeout_seconds: int
+    developer_timeout_seconds: int | None
+    max_iterations: int
+    reviewer_identity: InvocationIdentity
+    developer_identity: InvocationIdentity
+
+    @classmethod
+    def from_execution_record(
+        cls,
+        execution: ExecutionRecordSchema,
+        *,
+        reviewer_identity: InvocationIdentity,
+        developer_identity: InvocationIdentity,
+    ) -> ReviewPlan:
+        """
+        Rebuild the plan a stopped run was executing from its own evidence.
+
+        The identities are supplied rather than read here because the resume
+        path resolves them against the registry only for runs that are not
+        approved, and that condition belongs with the caller that knows the
+        run state.
+        """
+
+        return cls(
+            objective=execution.objective,
+            reviewer_command=execution.reviewer.command,
+            developer_command=execution.developer.command,
+            timeout_seconds=execution.reviewer.timeout_seconds,
+            developer_timeout_seconds=execution.developer.timeout_seconds,
+            max_iterations=execution.max_review_iterations,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
+        )
 
 
 def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
@@ -906,19 +977,9 @@ def _next_attempt(
 
 def _run_queued_review(
     *,
-    store: RunStore,
+    context: WorkerContext,
+    plan: ReviewPlan,
     run: Run,
-    objective: str,
-    reviewer_command: Sequence[str],
-    developer_command: Sequence[str],
-    runs_directory: Path,
-    timeout_seconds: int,
-    developer_timeout_seconds: int | None = None,
-    max_iterations: int = 3,
-    digest_worktree: Callable[[Path, str], str | None],
-    reviewer_identity: InvocationIdentity,
-    developer_identity: InvocationIdentity,
-    registry: RuntimeRegistry,
     continuation_sequence: int | None = None,
     continuation_prior_review_path: Path | None = None,
     retry_review_request: dict[str, Any] | None = None,
@@ -926,6 +987,19 @@ def _run_queued_review(
     resume_expected_state: RunState | None = None,
 ) -> Run:
     """Consume one queued local run through a bounded review-remediation loop."""
+
+    store = context.store
+    runs_directory = context.runs_directory
+    digest_worktree = context.digest_worktree
+    registry = context.registry
+    objective = plan.objective
+    reviewer_command = plan.reviewer_command
+    developer_command = plan.developer_command
+    timeout_seconds = plan.timeout_seconds
+    developer_timeout_seconds = plan.developer_timeout_seconds
+    max_iterations = plan.max_iterations
+    reviewer_identity = plan.reviewer_identity
+    developer_identity = plan.developer_identity
 
     continuing = run.state is RunState.REVIEWING and continuation_sequence is not None
     if run.state is not RunState.QUEUED and not continuing:
@@ -1735,25 +1809,32 @@ def _run_queued_review(
 
 def _resume_developer_request(
     *,
-    store: RunStore,
+    context: WorkerContext,
+    plan: ReviewPlan,
     run: Run,
     request: dict[str, Any],
     current_digest: str,
     allow_unchanged_ready: bool,
-    reviewer_command: Sequence[str],
-    developer_command: Sequence[str],
-    runs_directory: Path,
-    timeout_seconds: int,
-    developer_timeout_seconds: int,
-    max_iterations: int,
-    digest_worktree: Callable[[Path, str], str | None],
-    reviewer_identity: InvocationIdentity,
-    developer_identity: InvocationIdentity,
-    registry: RuntimeRegistry,
     attempt: int,
     resume_expected_state: RunState | None = None,
 ) -> Run:
     """Retry one durable remediation request and continue the same run."""
+
+    store = context.store
+    runs_directory = context.runs_directory
+    digest_worktree = context.digest_worktree
+    registry = context.registry
+    developer_command = plan.developer_command
+    # This path always carries an integer, taken from the durable execution
+    # record, and its parameter was typed as such before the plan existed.
+    # Normalizing here mirrors what _run_queued_review does with the same
+    # caller-facing optional value.
+    developer_timeout_seconds = (
+        plan.timeout_seconds
+        if plan.developer_timeout_seconds is None
+        else plan.developer_timeout_seconds
+    )
+    developer_identity = plan.developer_identity
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
     logs = _run_evidence_path(run_directory, 'logs')
@@ -2066,19 +2147,13 @@ def _resume_developer_request(
     )
     store.update(reviewing, expected_state=RunState.DEVELOPING)
     return _run_queued_review(
-        store=store,
+        context=context,
+        # The objective is taken from the durable remediation request rather
+        # than from the plan, exactly as before this collaborator existed. The
+        # two agree for every request this worker writes, but the request is
+        # read back from evidence that can predate the execution record.
+        plan=replace(plan, objective=request['payload']['objective']),
         run=reviewing,
-        objective=request['payload']['objective'],
-        reviewer_command=reviewer_command,
-        developer_command=developer_command,
-        runs_directory=runs_directory,
-        timeout_seconds=timeout_seconds,
-        developer_timeout_seconds=developer_timeout_seconds,
-        max_iterations=max_iterations,
-        digest_worktree=digest_worktree,
-        reviewer_identity=reviewer_identity,
-        developer_identity=developer_identity,
-        registry=registry,
         continuation_sequence=sequence + 2,
         continuation_prior_review_path=review_result_path,
     )
@@ -2195,7 +2270,7 @@ def _raise_recovered_conclusion(
 
 def _resume_reviewer_validation(
     *,
-    store: RunStore,
+    context: WorkerContext,
     run: Run,
     request: dict[str, Any],
     record: InvocationRecord,
@@ -2203,11 +2278,11 @@ def _resume_reviewer_validation(
     execution: ExecutionRecordSchema,
     reviewer_identity: InvocationIdentity,
     developer_identity: InvocationIdentity,
-    runs_directory: Path,
-    digest_worktree: Callable[[Path, str], str | None],
-    registry: RuntimeRegistry,
 ) -> Run:
     """Revalidate a durable reviewer response and continue without relaunching."""
+    store = context.store
+    runs_directory = context.runs_directory
+    digest_worktree = context.digest_worktree
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
     sequence = int(request['sequence'])
@@ -2315,21 +2390,16 @@ def _resume_reviewer_validation(
     _write_json_atomic(remediation_path, remediation, 'remediation_request')
     developing = transition(decided, RunState.DEVELOPING)
     return _resume_developer_request(
-        store=store,
+        context=context,
+        plan=ReviewPlan.from_execution_record(
+            execution,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
+        ),
         run=developing,
         request=remediation,
         current_digest=run.diff_digest or '',
         allow_unchanged_ready=False,
-        reviewer_command=execution.reviewer.command,
-        developer_command=execution.developer.command,
-        runs_directory=runs_directory,
-        timeout_seconds=execution.reviewer.timeout_seconds,
-        developer_timeout_seconds=execution.developer.timeout_seconds,
-        max_iterations=execution.max_review_iterations,
-        digest_worktree=digest_worktree,
-        reviewer_identity=reviewer_identity,
-        developer_identity=developer_identity,
-        registry=registry,
         attempt=1,
         resume_expected_state=RunState.CHANGES_REQUESTED,
     )
@@ -2337,7 +2407,7 @@ def _resume_reviewer_validation(
 
 def _resume_developer_validation(
     *,
-    store: RunStore,
+    context: WorkerContext,
     run: Run,
     request: dict[str, Any],
     record: InvocationRecord,
@@ -2345,11 +2415,11 @@ def _resume_developer_validation(
     execution: ExecutionRecordSchema,
     reviewer_identity: InvocationIdentity,
     developer_identity: InvocationIdentity,
-    runs_directory: Path,
-    digest_worktree: Callable[[Path, str], str | None],
-    registry: RuntimeRegistry,
 ) -> Run:
     """Revalidate a durable developer response and continue without relaunching."""
+    store = context.store
+    runs_directory = context.runs_directory
+    digest_worktree = context.digest_worktree
 
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
     sequence = int(request['sequence'])
@@ -2446,19 +2516,13 @@ def _resume_developer_validation(
     )
     store.update(reviewing, expected_state=RunState.DEVELOPING)
     return _run_queued_review(
-        store=store,
+        context=context,
+        plan=ReviewPlan.from_execution_record(
+            execution,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
+        ),
         run=reviewing,
-        objective=execution.objective,
-        reviewer_command=execution.reviewer.command,
-        developer_command=execution.developer.command,
-        runs_directory=runs_directory,
-        timeout_seconds=execution.reviewer.timeout_seconds,
-        developer_timeout_seconds=execution.developer.timeout_seconds,
-        max_iterations=execution.max_review_iterations,
-        digest_worktree=digest_worktree,
-        reviewer_identity=reviewer_identity,
-        developer_identity=developer_identity,
-        registry=registry,
         continuation_sequence=sequence + 2,
         continuation_prior_review_path=review_result_path,
     )
@@ -2466,17 +2530,15 @@ def _resume_developer_validation(
 
 def _resume_active_attempt(
     *,
-    store: RunStore,
+    context: WorkerContext,
     run: Run,
     chain: tuple[tuple[Path, dict[str, Any]], ...],
     execution: ExecutionRecordSchema,
     reviewer_identity: InvocationIdentity,
     developer_identity: InvocationIdentity,
-    runs_directory: Path,
-    digest_worktree: Callable[[Path, str], str | None],
-    registry: RuntimeRegistry,
 ) -> Run:
     """Recover an active workflow state from its latest durable task evidence."""
+    runs_directory = context.runs_directory
 
     expected_type = (
         'review_request' if run.state is RunState.REVIEWING else 'remediation_request'
@@ -2513,39 +2575,28 @@ def _resume_active_attempt(
     if action is RecoveryAction.LAUNCH:
         if role == 'reviewer':
             return _run_queued_review(
-                store=store,
+                context=context,
+                plan=ReviewPlan.from_execution_record(
+                    execution,
+                    reviewer_identity=reviewer_identity,
+                    developer_identity=developer_identity,
+                ),
                 run=run,
-                objective=execution.objective,
-                reviewer_command=execution.reviewer.command,
-                developer_command=execution.developer.command,
-                runs_directory=runs_directory,
-                timeout_seconds=execution.reviewer.timeout_seconds,
-                developer_timeout_seconds=execution.developer.timeout_seconds,
-                max_iterations=execution.max_review_iterations,
-                digest_worktree=digest_worktree,
-                reviewer_identity=reviewer_identity,
-                developer_identity=developer_identity,
-                registry=registry,
                 continuation_sequence=sequence,
                 continuation_prior_review_path=None,
                 retry_review_request=request,
             )
         return _resume_developer_request(
-            store=store,
+            context=context,
+            plan=ReviewPlan.from_execution_record(
+                execution,
+                reviewer_identity=reviewer_identity,
+                developer_identity=developer_identity,
+            ),
             run=run,
             request=request,
             current_digest=run.diff_digest or '',
             allow_unchanged_ready=False,
-            reviewer_command=execution.reviewer.command,
-            developer_command=execution.developer.command,
-            runs_directory=runs_directory,
-            timeout_seconds=execution.reviewer.timeout_seconds,
-            developer_timeout_seconds=execution.developer.timeout_seconds,
-            max_iterations=execution.max_review_iterations,
-            digest_worktree=digest_worktree,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-            registry=registry,
             attempt=1,
         )
     if action is RecoveryAction.FAIL_ACTIVATION_UNCERTAIN or latest is None:
@@ -2569,7 +2620,7 @@ def _resume_active_attempt(
         else _resume_developer_validation
     )
     return resume_validation(
-        store=store,
+        context=context,
         run=run,
         request=request,
         record=latest,
@@ -2577,15 +2628,12 @@ def _resume_active_attempt(
         execution=execution,
         reviewer_identity=reviewer_identity,
         developer_identity=developer_identity,
-        registry=registry,
-        runs_directory=runs_directory,
-        digest_worktree=digest_worktree,
     )
 
 
 def _resume_intermediate_state(
     *,
-    store: RunStore,
+    context: WorkerContext,
     run: Run,
     run_directory: Path,
     chain: list[tuple[Path, dict[str, Any]]],
@@ -2593,11 +2641,9 @@ def _resume_intermediate_state(
     reviewer_identity: InvocationIdentity,
     developer_identity: InvocationIdentity,
     measured_digest: str,
-    runs_directory: Path,
-    digest_worktree: Callable[[Path, str], str | None],
-    registry: RuntimeRegistry,
 ) -> Run:
     """Continue one crash-stopped review decision without rerunning review."""
+    store = context.store
 
     if run.state is RunState.APPROVED:
         last_message = chain[-1][1]
@@ -2672,21 +2718,16 @@ def _resume_intermediate_state(
         raise WorkerError(message)
     developing = transition(run, RunState.DEVELOPING)
     return _resume_developer_request(
-        store=store,
+        context=context,
+        plan=ReviewPlan.from_execution_record(
+            execution,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
+        ),
         run=developing,
         request=request,
         current_digest=measured_digest,
         allow_unchanged_ready=False,
-        reviewer_command=execution.reviewer.command,
-        developer_command=execution.developer.command,
-        runs_directory=runs_directory,
-        timeout_seconds=execution.reviewer.timeout_seconds,
-        developer_timeout_seconds=execution.developer.timeout_seconds,
-        max_iterations=execution.max_review_iterations,
-        digest_worktree=digest_worktree,
-        reviewer_identity=reviewer_identity,
-        developer_identity=developer_identity,
-        registry=registry,
         attempt=_next_attempt(
             run_directory,
             int(request['sequence']),
@@ -2699,13 +2740,14 @@ def _resume_intermediate_state(
 
 def _resume_review(
     *,
-    store: RunStore,
+    context: WorkerContext,
     run: Run,
-    runs_directory: Path,
-    digest_worktree: Callable[[Path, str], str | None],
-    registry: RuntimeRegistry,
 ) -> Run:
     """Resume one recoverable run from its canonical execution evidence."""
+    store = context.store
+    runs_directory = context.runs_directory
+    digest_worktree = context.digest_worktree
+    registry = context.registry
 
     if run.state not in {
         RunState.VALIDATION_REQUIRED,
@@ -2750,7 +2792,7 @@ def _resume_review(
 
     if run.state in {RunState.APPROVED, RunState.CHANGES_REQUESTED}:
         return _resume_intermediate_state(
-            store=store,
+            context=context,
             run=run,
             run_directory=run_directory,
             chain=chain,
@@ -2758,9 +2800,6 @@ def _resume_review(
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
             measured_digest=measured_digest,
-            runs_directory=runs_directory,
-            digest_worktree=digest_worktree,
-            registry=registry,
         )
 
     if run.state in {RunState.REVIEWING, RunState.DEVELOPING}:
@@ -2770,15 +2809,12 @@ def _resume_review(
             message = 'resume scope changed during active task recovery'
             raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
         return _resume_active_attempt(
-            store=store,
+            context=context,
             run=run,
             chain=tuple(chain),
             execution=execution,
             reviewer_identity=reviewer_identity,
             developer_identity=developer_identity,
-            runs_directory=runs_directory,
-            digest_worktree=digest_worktree,
-            registry=registry,
         )
 
     if run.state is RunState.INTERRUPTED:
@@ -2810,19 +2846,13 @@ def _resume_review(
         resumed = replace(run, state=origin, updated_at=utc_now())
         if origin is RunState.REVIEWING:
             return _run_queued_review(
-                store=store,
+                context=context,
+                plan=ReviewPlan.from_execution_record(
+                    execution,
+                    reviewer_identity=reviewer_identity,
+                    developer_identity=developer_identity,
+                ),
                 run=resumed,
-                objective=execution.objective,
-                reviewer_command=execution.reviewer.command,
-                developer_command=execution.developer.command,
-                runs_directory=runs_directory,
-                timeout_seconds=execution.reviewer.timeout_seconds,
-                developer_timeout_seconds=execution.developer.timeout_seconds,
-                max_iterations=execution.max_review_iterations,
-                digest_worktree=digest_worktree,
-                reviewer_identity=reviewer_identity,
-                developer_identity=developer_identity,
-                registry=registry,
                 continuation_sequence=int(request['sequence']),
                 continuation_prior_review_path=None,
                 retry_review_request=request,
@@ -2836,21 +2866,16 @@ def _resume_review(
             and previous_message['payload']['status'] in {'blocked', 'failed'}
         )
         return _resume_developer_request(
-            store=store,
+            context=context,
+            plan=ReviewPlan.from_execution_record(
+                execution,
+                reviewer_identity=reviewer_identity,
+                developer_identity=developer_identity,
+            ),
             run=resumed,
             request=request,
             current_digest=run.diff_digest or '',
             allow_unchanged_ready=retrying_recovery_request,
-            reviewer_command=execution.reviewer.command,
-            developer_command=execution.developer.command,
-            runs_directory=runs_directory,
-            timeout_seconds=execution.reviewer.timeout_seconds,
-            developer_timeout_seconds=execution.developer.timeout_seconds,
-            max_iterations=execution.max_review_iterations,
-            digest_worktree=digest_worktree,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-            registry=registry,
             attempt=attempt,
             resume_expected_state=RunState.INTERRUPTED,
         )
@@ -2871,21 +2896,16 @@ def _resume_review(
         )
         resumed = transition(run, RunState.DEVELOPING)
         return _resume_developer_request(
-            store=store,
+            context=context,
+            plan=ReviewPlan.from_execution_record(
+                execution,
+                reviewer_identity=reviewer_identity,
+                developer_identity=developer_identity,
+            ),
             run=resumed,
             request=request,
             current_digest=measured_digest,
             allow_unchanged_ready=True,
-            reviewer_command=execution.reviewer.command,
-            developer_command=execution.developer.command,
-            runs_directory=runs_directory,
-            timeout_seconds=execution.reviewer.timeout_seconds,
-            developer_timeout_seconds=execution.developer.timeout_seconds,
-            max_iterations=execution.max_review_iterations,
-            digest_worktree=digest_worktree,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-            registry=registry,
             attempt=attempt,
             resume_expected_state=RunState.VALIDATION_REQUIRED,
         )
@@ -2937,21 +2957,16 @@ def _resume_review(
     _write_json_atomic(request_path, recovery_request, 'remediation_request')
     resumed = transition(run, RunState.DEVELOPING)
     return _resume_developer_request(
-        store=store,
+        context=context,
+        plan=ReviewPlan.from_execution_record(
+            execution,
+            reviewer_identity=reviewer_identity,
+            developer_identity=developer_identity,
+        ),
         run=resumed,
         request=recovery_request,
         current_digest=measured_digest,
         allow_unchanged_ready=True,
-        reviewer_command=execution.reviewer.command,
-        developer_command=execution.developer.command,
-        runs_directory=runs_directory,
-        timeout_seconds=execution.reviewer.timeout_seconds,
-        developer_timeout_seconds=execution.developer.timeout_seconds,
-        max_iterations=execution.max_review_iterations,
-        digest_worktree=digest_worktree,
-        reviewer_identity=reviewer_identity,
-        developer_identity=developer_identity,
-        registry=registry,
         attempt=1,
         resume_expected_state=RunState.VALIDATION_REQUIRED,
     )
@@ -2970,11 +2985,13 @@ def resume_review(
     run_directory = _run_evidence_directory(runs_directory, str(run.id))
     try:
         return _resume_review(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=runs_directory,
+                digest_worktree=digest_worktree,
+                registry=registry,
+            ),
             run=run,
-            runs_directory=runs_directory,
-            digest_worktree=digest_worktree,
-            registry=registry,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
@@ -3028,19 +3045,23 @@ def run_queued_review(
     )
     try:
         return _run_queued_review(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=runs_directory,
+                digest_worktree=digest_worktree,
+                registry=registry,
+            ),
+            plan=ReviewPlan(
+                objective=objective,
+                reviewer_command=reviewer_command,
+                developer_command=developer_command,
+                timeout_seconds=timeout_seconds,
+                developer_timeout_seconds=developer_timeout_seconds,
+                max_iterations=max_iterations,
+                reviewer_identity=reviewer_identity,
+                developer_identity=developer_identity,
+            ),
             run=run,
-            objective=objective,
-            reviewer_command=reviewer_command,
-            developer_command=developer_command,
-            runs_directory=runs_directory,
-            timeout_seconds=timeout_seconds,
-            developer_timeout_seconds=developer_timeout_seconds,
-            max_iterations=max_iterations,
-            digest_worktree=digest_worktree,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-            registry=registry,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
