@@ -14,10 +14,83 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FIELDS,
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
+    ReviewerExecutionPlanSchema,
     SchemaValidationError,
     validate_developer_result,
     validate_review_result,
 )
+
+
+def reviewer_execution_plan() -> dict[str, Any]:
+    """Return one valid canonical reviewer execution plan."""
+
+    reviewer = {
+        'command': ['/python', '-m', 'reviewer'],
+        'identity': {'vendor': 'vendor', 'model': None, 'runtime': 'runtime'},
+        'timeout_seconds': 90,
+    }
+    return {
+        'schema_version': 1,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'reviewers': [
+            {'reviewer_id': 'security', **reviewer},
+            {'reviewer_id': 'portability', **reviewer},
+        ],
+    }
+
+
+def test_reviewer_execution_plan_schema_is_strict_and_ordered() -> None:
+    """Accept an ordered plan while rejecting unknown persisted fields."""
+
+    document = reviewer_execution_plan()
+    record = ReviewerExecutionPlanSchema.model_validate(document)
+    assert [reviewer.reviewer_id for reviewer in record.reviewers] == [
+        'security',
+        'portability',
+    ]
+    document['policy_version'] = 1
+    with pytest.raises(ValueError, match='Extra inputs are not permitted'):
+        ReviewerExecutionPlanSchema.model_validate(document)
+
+    schema = ReviewerExecutionPlanSchema.model_json_schema()
+    assert schema['properties']['reviewer_set_id']['pattern'] == (
+        '^[a-z0-9][a-z0-9_-]*$'
+    )
+    assert (
+        schema['$defs']['ReviewerExecutionSchema']['properties']['reviewer_id'][
+            'pattern'
+        ]
+        == '^[a-z0-9][a-z0-9_-]*$'
+    )
+
+
+def test_reviewer_execution_plan_schema_rejects_duplicate_members() -> None:
+    """Prevent two persisted reviewers from sharing one evidence namespace."""
+
+    document = reviewer_execution_plan()
+    document['reviewers'][1]['reviewer_id'] = 'security'
+    with pytest.raises(ValueError, match='duplicate reviewer IDs'):
+        ReviewerExecutionPlanSchema.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [('reviewer_set_id', 'Unsafe ID'), ('reviewer_id', 'also bad!')],
+)
+def test_reviewer_execution_plan_schema_rejects_partial_id_matches(
+    field: str, value: str
+) -> None:
+    """Apply canonical full-match semantics to every persisted identifier."""
+
+    document = reviewer_execution_plan()
+    if field == 'reviewer_set_id':
+        document[field] = value
+    else:
+        document['reviewers'][0][field] = value
+
+    with pytest.raises(ValueError, match='String should match pattern'):
+        ReviewerExecutionPlanSchema.model_validate(document)
 
 
 def review_result() -> dict[str, Any]:
