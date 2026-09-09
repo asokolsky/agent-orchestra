@@ -29,9 +29,9 @@ from agent_orchestra.cli import (
 )
 from agent_orchestra.evidence import resolve_evidence_path
 from agent_orchestra.invocations import (
+    InvocationEvidenceStore,
     InvocationIdentity,
     InvocationRecord,
-    write_record,
 )
 from agent_orchestra.manifests import ENGINE_TOO_OLD, ManifestError
 from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
@@ -2691,10 +2691,10 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
     counter = tmp_path / 'reviewer-count.txt'
     write_reviewer(reviewer, 'approved')
     add_execution_counter(reviewer, counter)
-    original_write_record = write_record
+    original_write = InvocationEvidenceStore.write
 
     def fail_validation_record(
-        path: Path, record: InvocationRecord, **kwargs: Any
+        self: InvocationEvidenceStore, path: Path, record: InvocationRecord
     ) -> None:
         """Simulate a crash before the reviewer validation milestone is durable."""
 
@@ -2705,9 +2705,9 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
         ):
             message = 'simulated validation milestone failure'
             raise OSError(message)
-        original_write_record(path, record, **kwargs)
+        original_write(self, path, record)
 
-    monkeypatch.setattr(worker, 'write_record', fail_validation_record)
+    monkeypatch.setattr(InvocationEvidenceStore, 'write', fail_validation_record)
     with pytest.raises(OSError, match='simulated validation milestone failure'):
         run_queued_review(
             store=enqueued_run.store,
@@ -2721,7 +2721,7 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
 
-    monkeypatch.setattr(worker, 'write_record', original_write_record)
+    monkeypatch.setattr(InvocationEvidenceStore, 'write', original_write)
     assert main(resume_arguments(enqueued_run)) == 0
 
     assert counter.read_text().splitlines() == ['1']
@@ -3101,10 +3101,10 @@ def test_resume_revalidates_developer_response_without_relaunching(
     write_loop_reviewer(reviewer)
     write_developer(developer)
     add_execution_counter(developer, counter)
-    original_write_record = write_record
+    original_write = InvocationEvidenceStore.write
 
     def fail_validation_record(
-        path: Path, record: InvocationRecord, **kwargs: Any
+        self: InvocationEvidenceStore, path: Path, record: InvocationRecord
     ) -> None:
         """Simulate a crash before the developer validation milestone is durable."""
 
@@ -3115,9 +3115,9 @@ def test_resume_revalidates_developer_response_without_relaunching(
         ):
             message = 'simulated developer validation milestone failure'
             raise OSError(message)
-        original_write_record(path, record, **kwargs)
+        original_write(self, path, record)
 
-    monkeypatch.setattr(worker, 'write_record', fail_validation_record)
+    monkeypatch.setattr(InvocationEvidenceStore, 'write', fail_validation_record)
     with pytest.raises(
         OSError, match='simulated developer validation milestone failure'
     ):
@@ -3134,7 +3134,7 @@ def test_resume_revalidates_developer_response_without_relaunching(
         )
     assert context.store.get(context.run.id).state is RunState.DEVELOPING
 
-    monkeypatch.setattr(worker, 'write_record', original_write_record)
+    monkeypatch.setattr(InvocationEvidenceStore, 'write', original_write)
     assert main(resume_arguments(context)) == 0
 
     assert counter.read_text().splitlines() == ['1']

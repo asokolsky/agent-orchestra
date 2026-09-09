@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Never, cast
+from typing import TYPE_CHECKING, Any, Literal, Never, cast
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 from agent_orchestra.evidence import (
     EvidencePathError,
@@ -435,14 +439,10 @@ def _job_relative_streams(
     }
 
 
-def write_record(
-    path: Path,
-    record: InvocationRecord,
-    *,
-    evidence_root: Path | None = None,
-    job_id: str | None = None,
-) -> None:
-    """Write an invocation record atomically."""
+def _validated_document(
+    path: Path, record: InvocationRecord
+) -> tuple[dict[str, object], bool]:
+    """Validate one attempt against any persisted record and render it."""
 
     validate_attempt_record(record)
     document = _job_relative_streams(asdict(record), path.parent.parent)
@@ -515,6 +515,13 @@ def write_record(
                 _fail(
                     'attempt completed before activation cannot have response milestones'
                 )
+    return document, new_record
+
+
+@contextmanager
+def _prepared_record(path: Path, document: dict[str, object]) -> Iterator[Path]:
+    """Write one attempt document to a sibling temporary awaiting publication."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
     try:
@@ -523,24 +530,32 @@ def write_record(
             file.write('\n')
             file.flush()
             os.fsync(file.fileno())
-        if evidence_root is not None and job_id is not None:
-            try:
-                JobEvidence(evidence_root, job_id).finalize_write(
-                    temporary, path, 'invocation_record', exclusive=new_record
-                )
-            except EvidencePathError as error:
-                if new_record and str(error) == 'finalized evidence already exists':
-                    _fail('attempt record already exists', error)
-                _fail(str(error), error)
-        elif new_record:
+        yield temporary
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_record_unindexed(path: Path, record: InvocationRecord) -> None:
+    """
+    Write one attempt record atomically without indexing it as evidence.
+
+    Private on purpose. Publishing an attempt is
+    ``InvocationEvidenceStore.write``, which validates containment and updates
+    the integrity index, and there is no supported way to persist a record
+    without that. This primitive exists for tests that exercise the record
+    protocol -- validation, transitions, and immutability -- against a bare
+    directory that is not an evidence root.
+    """
+
+    document, new_record = _validated_document(path, record)
+    with _prepared_record(path, document) as temporary:
+        if new_record:
             try:
                 os.link(temporary, path)
             except FileExistsError as error:
                 _fail('attempt record already exists', error)
         else:
             temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _safe_file(root: Path, value: str, *, description: str) -> Path:
@@ -559,140 +574,163 @@ def _safe_file(root: Path, value: str, *, description: str) -> Path:
     return resolved.resolve()
 
 
-def read_records(run_directory: Path, run_id: str) -> tuple[InvocationRecord, ...]:
-    """Read validated invocation records in deterministic order."""
+class InvocationEvidenceStore:
+    """Own one job's invocation records and their contained evidence."""
 
-    root = run_directory.resolve()
-    try:
-        evidence_root = evidence_root_for_job(root)
-        manifests = resolve_evidence_path(evidence_root, root.name, 'invocations')
-    except EvidencePathError:
-        _fail(INVOCATION_DIRECTORY_ESCAPE)
-    if not manifests.is_dir():
-        return ()
-    records: list[InvocationRecord] = []
-    seen_attempts: set[tuple[str, int]] = set()
-    for candidate_path in sorted(manifests.glob('*.json')):
+    def __init__(self, job_directory: Path) -> None:
+        """Create the store for one established job evidence directory."""
+
+        self.job_directory = job_directory
+
+    def write(self, path: Path, record: InvocationRecord) -> None:
+        """Publish one attempt record as contained, integrity-indexed evidence."""
+
+        document, new_record = _validated_document(path, record)
+        with _prepared_record(path, document) as temporary:
+            try:
+                JobEvidence.for_directory(self.job_directory).finalize_write(
+                    temporary, path, 'invocation_record', exclusive=new_record
+                )
+            except EvidencePathError as error:
+                if new_record and str(error) == 'finalized evidence already exists':
+                    _fail('attempt record already exists', error)
+                _fail(str(error), error)
+
+    def read_all(self, run_id: str) -> tuple[InvocationRecord, ...]:
+        """Read validated invocation records in deterministic order."""
+
+        root = self.job_directory.resolve()
         try:
-            path = resolve_evidence_path(
-                evidence_root, root.name, 'invocations', candidate_path.name
-            )
+            evidence_root = evidence_root_for_job(root)
+            manifests = resolve_evidence_path(evidence_root, root.name, 'invocations')
         except EvidencePathError:
-            _fail(INVOCATION_RECORD_ESCAPE)
-        try:
-            document = json.loads(path.read_text(encoding='utf-8'))
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-            _fail(f'invalid invocation record {path.name}: {error}', error)
-        if not isinstance(document, dict):
-            _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
-        schema_version = document.get('schema_version')
-        if schema_version not in {4, 5}:
-            _fail(f'unsupported invocation record schema in {path.name}')
-        required = set(InvocationRecord.__dataclass_fields__)
-        if schema_version == 4:
-            required.remove('reviewer_id')
-        if set(document) != required:
-            _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
-        if schema_version == 4:
-            document['reviewer_id'] = None
-        try:
-            record = InvocationRecord(**document)
-        except TypeError as error:
-            _fail(f'invalid invocation record {path.name}: {error}', error)
-        if not _valid_record_types(record):
-            _fail(f'invalid invocation record {path.name}')
-        validate_attempt_record(record)
-        if record.run_id != run_id:
-            _fail(f'invocation record {path.name} does not match run {run_id}')
-        attempt_key = (record.task_id, record.attempt)
-        if attempt_key in seen_attempts:
-            _fail(f'duplicate task attempt in {path.name}')
-        seen_attempts.add(attempt_key)
-        if (
-            record.role not in {'developer', 'reviewer', 'issue_reviewer'}
-            or record.iteration < 1
-            or record.attempt < 1
-            or not record.task_id
-            or (record.status == 'completed') != (record.conclusion is not None)
-            or (
-                record.effective_model_status == 'reported'
-                and not record.effective_models
+            _fail(INVOCATION_DIRECTORY_ESCAPE)
+        if not manifests.is_dir():
+            return ()
+        records: list[InvocationRecord] = []
+        seen_attempts: set[tuple[str, int]] = set()
+        for candidate_path in sorted(manifests.glob('*.json')):
+            try:
+                path = resolve_evidence_path(
+                    evidence_root, root.name, 'invocations', candidate_path.name
+                )
+            except EvidencePathError:
+                _fail(INVOCATION_RECORD_ESCAPE)
+            try:
+                document = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                _fail(f'invalid invocation record {path.name}: {error}', error)
+            if not isinstance(document, dict):
+                _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
+            schema_version = document.get('schema_version')
+            if schema_version not in {4, 5}:
+                _fail(f'unsupported invocation record schema in {path.name}')
+            required = set(InvocationRecord.__dataclass_fields__)
+            if schema_version == 4:
+                required.remove('reviewer_id')
+            if set(document) != required:
+                _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
+            if schema_version == 4:
+                document['reviewer_id'] = None
+            try:
+                record = InvocationRecord(**document)
+            except TypeError as error:
+                _fail(f'invalid invocation record {path.name}: {error}', error)
+            if not _valid_record_types(record):
+                _fail(f'invalid invocation record {path.name}')
+            validate_attempt_record(record)
+            if record.run_id != run_id:
+                _fail(f'invocation record {path.name} does not match run {run_id}')
+            attempt_key = (record.task_id, record.attempt)
+            if attempt_key in seen_attempts:
+                _fail(f'duplicate task attempt in {path.name}')
+            seen_attempts.add(attempt_key)
+            if (
+                record.role not in {'developer', 'reviewer', 'issue_reviewer'}
+                or record.iteration < 1
+                or record.attempt < 1
+                or not record.task_id
+                or (record.status == 'completed') != (record.conclusion is not None)
+                or (
+                    record.effective_model_status == 'reported'
+                    and not record.effective_models
+                )
+                or (
+                    record.effective_model_status == 'unavailable'
+                    and bool(record.effective_models)
+                )
+            ):
+                _fail(f'invalid invocation record {path.name}')
+            stdout_path = _safe_file(root, record.stdout_path, description='stdout log')
+            stderr_path = _safe_file(root, record.stderr_path, description='stderr log')
+            records.append(
+                replace(
+                    record,
+                    effective_models=tuple(record.effective_models),
+                    stdout_path=str(stdout_path),
+                    stderr_path=str(stderr_path),
+                )
             )
-            or (
-                record.effective_model_status == 'unavailable'
-                and bool(record.effective_models)
-            )
-        ):
-            _fail(f'invalid invocation record {path.name}')
-        stdout_path = _safe_file(root, record.stdout_path, description='stdout log')
-        stderr_path = _safe_file(root, record.stderr_path, description='stderr log')
-        records.append(
-            replace(
-                record,
-                effective_models=tuple(record.effective_models),
-                stdout_path=str(stdout_path),
-                stderr_path=str(stderr_path),
-            )
-        )
-    return tuple(records)
+        return tuple(records)
 
+    def recover_completed(self, run_id: str) -> None:
+        """Add only missing index entries from fully validated completed attempts."""
 
-def recover_completed_invocation_evidence(run_directory: Path, run_id: str) -> None:
-    """Add only missing index entries from fully validated completed attempts."""
-
-    records = read_records(run_directory, run_id)
-    for record in records:
-        if record.status != 'completed':
-            continue
-        task_stem = record.task_id.rsplit(':', 1)[-1]
-        if record.role == 'issue_reviewer':
-            stem = f'{record.iteration:06d}-issue-reviewer-attempt-{record.attempt:04d}'
-        elif record.reviewer_id is not None:
-            stem = f'{task_stem}.attempt-{record.attempt:04d}'
-        else:
-            stem = (
-                task_stem
-                if record.attempt == 1
-                else f'{task_stem}-attempt-{record.attempt:04d}'
+        records = self.read_all(run_id)
+        for record in records:
+            if record.status != 'completed':
+                continue
+            task_stem = record.task_id.rsplit(':', 1)[-1]
+            if record.role == 'issue_reviewer':
+                stem = f'{record.iteration:06d}-issue-reviewer-attempt-{record.attempt:04d}'
+            elif record.reviewer_id is not None:
+                stem = f'{task_stem}.attempt-{record.attempt:04d}'
+            else:
+                stem = (
+                    task_stem
+                    if record.attempt == 1
+                    else f'{task_stem}-attempt-{record.attempt:04d}'
+                )
+            manifest = resolve_evidence_path(
+                evidence_root_for_job(self.job_directory),
+                run_id,
+                'invocations',
+                f'{stem}.json',
             )
-        manifest = resolve_evidence_path(
-            evidence_root_for_job(run_directory),
-            run_id,
-            'invocations',
-            f'{stem}.json',
-        )
-        expected_streams = (
-            (
-                resolve_evidence_path(
-                    evidence_root_for_job(run_directory),
-                    run_id,
-                    'logs',
-                    f'{stem}.stdout.log',
+            expected_streams = (
+                (
+                    resolve_evidence_path(
+                        evidence_root_for_job(self.job_directory),
+                        run_id,
+                        'logs',
+                        f'{stem}.stdout.log',
+                    ),
+                    Path(record.stdout_path),
+                    'process_stdout',
                 ),
-                Path(record.stdout_path),
-                'process_stdout',
-            ),
-            (
-                resolve_evidence_path(
-                    evidence_root_for_job(run_directory),
-                    run_id,
-                    'logs',
-                    f'{stem}.stderr.log',
+                (
+                    resolve_evidence_path(
+                        evidence_root_for_job(self.job_directory),
+                        run_id,
+                        'logs',
+                        f'{stem}.stderr.log',
+                    ),
+                    Path(record.stderr_path),
+                    'process_stderr',
                 ),
-                Path(record.stderr_path),
-                'process_stderr',
-            ),
-        )
-        if not manifest.is_file() or any(
-            declared != expected for expected, declared, _kind in expected_streams
-        ):
-            _fail(f'invocation record does not match evidence filenames: {stem}')
-        JobEvidence(evidence_root_for_job(run_directory), run_id).record_finalized(
-            manifest, 'invocation_record', replace_existing=False
-        )
-        for expected, _declared, kind in expected_streams:
-            if not expected.is_file():
-                _fail(f'completed invocation stream is missing: {expected.name}')
-            JobEvidence(evidence_root_for_job(run_directory), run_id).record_finalized(
-                expected, cast('EvidenceType', kind), replace_existing=False
             )
+            if not manifest.is_file() or any(
+                declared != expected for expected, declared, _kind in expected_streams
+            ):
+                _fail(f'invocation record does not match evidence filenames: {stem}')
+            JobEvidence(
+                evidence_root_for_job(self.job_directory), run_id
+            ).record_finalized(manifest, 'invocation_record', replace_existing=False)
+            for expected, _declared, kind in expected_streams:
+                if not expected.is_file():
+                    _fail(f'completed invocation stream is missing: {expected.name}')
+                JobEvidence(
+                    evidence_root_for_job(self.job_directory), run_id
+                ).record_finalized(
+                    expected, cast('EvidenceType', kind), replace_existing=False
+                )

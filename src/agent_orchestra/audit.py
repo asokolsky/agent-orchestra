@@ -18,7 +18,10 @@ from agent_orchestra.evidence import (
     HASH_CHUNK_SIZE,
     resolve_evidence_path,
 )
-from agent_orchestra.invocations import InvocationEvidenceError, read_records
+from agent_orchestra.invocations import (
+    InvocationEvidenceError,
+    InvocationEvidenceStore,
+)
 from agent_orchestra.manifests import (
     canonical_evidence_type,
     canonical_message_evidence,
@@ -605,7 +608,11 @@ def _tasks(
 
     try:
         job_directory = resolve_evidence_path(root, job_id)
-        records = read_records(job_directory, job_id) if job_directory.is_dir() else ()
+        records = (
+            InvocationEvidenceStore(job_directory).read_all(job_id)
+            if job_directory.is_dir()
+            else ()
+        )
     except (InvocationEvidenceError, OSError, ValueError) as error:
         return [], [], [_finding('invalid_invocation_evidence', str(error))]
     grouped: dict[str, list[dict[str, Any]]] = {}

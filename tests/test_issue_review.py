@@ -16,7 +16,7 @@ from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
 from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import resolve_evidence_path
-from agent_orchestra.invocations import read_records
+from agent_orchestra.invocations import InvocationEvidenceStore
 from agent_orchestra.issue_review import (
     IssueReviewError,
     publish_issue_feedback,
@@ -213,7 +213,9 @@ def test_run_issue_review_persists_result_and_feedback(
     assert finished.state is RunState.APPROVED
     assert json.loads((iteration / 'result.json').read_text())['verdict'] == 'ready'
     assert '**Verdict:** ready' in (iteration / 'feedback.md').read_text()
-    records = read_records(resolve_evidence_path(runs, job.id), job.id)
+    records = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )
     assert len(records) == 1
     assert records[0].conclusion == 'succeeded'
     assert Path(records[0].stdout_path).read_text() == ''
@@ -329,7 +331,9 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
 
     assert json.loads(capsys.readouterr().out)['state'] == 'approved'
     assert store.get_issue(job.id).state is RunState.APPROVED
-    records = read_records(resolve_evidence_path(runs, job.id), job.id)
+    records = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )
     assert [record.conclusion for record in records] == ['timed_out', 'succeeded']
     assert records[-1].requested_model == 'codex-test'
 
@@ -372,7 +376,9 @@ def test_fake_issue_runtime_dispatches_resumes_and_attributes_vendor(
     )
 
     assert finished.state is RunState.APPROVED
-    records = read_records(resolve_evidence_path(runs, job.id), job.id)
+    records = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )
     assert [record.agent_vendor for record in records] == [
         'example-vendor',
         'example-vendor',
@@ -428,9 +434,9 @@ def test_run_issue_review_dispatches_claude_code_adapter(
 
     assert finished.state is RunState.APPROVED
     assert len(calls) == 1
-    assert read_records(resolve_evidence_path(runs, job.id), job.id)[
-        0
-    ].effective_models == ('claude-test',)
+    assert InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )[0].effective_models == ('claude-test',)
 
 
 def test_run_issue_review_rejects_change_during_review(
@@ -462,7 +468,9 @@ def test_run_issue_review_rejects_change_during_review(
         )
 
     assert store.get_issue(job.id).state is RunState.FAILED
-    records = read_records(resolve_evidence_path(runs, job.id), job.id)
+    records = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )
     assert records[0].conclusion == 'failed'
     assert 'changed during review' in Path(records[0].stderr_path).read_text()
 
@@ -509,7 +517,9 @@ def test_run_issue_review_retries_failed_attempt_for_same_snapshot(
             / 'request.json'
         ).read_text()
     )
-    records = read_records(resolve_evidence_path(runs, job.id), job.id)
+    records = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )
     assert finished.state is RunState.APPROVED
     assert request['objective'] == 'Review readiness.'
     assert [(record.attempt, record.conclusion) for record in records] == [
@@ -615,7 +625,14 @@ def test_run_issue_review_recovers_after_terminal_state_write_failure(
     )
 
     assert recovered.state is RunState.APPROVED
-    assert len(read_records(resolve_evidence_path(runs, job.id), job.id)) == 1
+    assert (
+        len(
+            InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+                job.id
+            )
+        )
+        == 1
+    )
 
 
 def test_run_issue_review_does_not_relaunch_running_attempt(
@@ -649,7 +666,14 @@ def test_run_issue_review_does_not_relaunch_running_attempt(
             command=(str(tmp_path / 'must-not-run'),),
         )
 
-    assert len(read_records(resolve_evidence_path(runs, job.id), job.id)) == 1
+    assert (
+        len(
+            InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+                job.id
+            )
+        )
+        == 1
+    )
 
 
 def test_run_issue_review_rejects_nested_evidence_symlink(
@@ -775,7 +799,9 @@ def test_issue_review_records_timeout_truthfully(
             command=('reviewer',),
         )
 
-    record = read_records(resolve_evidence_path(runs, job.id), job.id)[0]
+    record = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )[0]
     assert record.conclusion == 'timed_out'
     assert record.timed_out is True
     assert Path(record.stdout_path).read_text() == 'partial'
