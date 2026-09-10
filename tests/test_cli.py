@@ -36,6 +36,9 @@ from agent_orchestra.evidence import (
     WorkerError,
     resolve_evidence_path,
 )
+from agent_orchestra.execution_context import (
+    WorkerContext,
+)
 from agent_orchestra.invocations import (
     AttemptIdentity,
     InvocationEvidenceStore,
@@ -52,7 +55,6 @@ from agent_orchestra.settings import load_settings
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
-    WorkerContext,
     resume_review,
     run_queued_review,
 )

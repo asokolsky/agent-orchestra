@@ -25,11 +25,12 @@ from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import (
     WorkerError,
 )
+from agent_orchestra.execution_context import WorkerContext
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import WorkerContext, resume_review, run_queued_reviewer_set
+from agent_orchestra.worker import resume_review, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -35,6 +35,9 @@ from agent_orchestra.evidence import (
     WorkerError,
     resolve_evidence_path,
 )
+from agent_orchestra.execution_context import (
+    WorkerContext,
+)
 from agent_orchestra.invocations import (
     InvocationEvidenceError,
     InvocationEvidenceStore,
@@ -85,7 +88,6 @@ from agent_orchestra.store import (
     UnreadableJob,
 )
 from agent_orchestra.worker import (
-    WorkerContext,
     resume_review,
     run_queued_review,
     run_queued_reviewer_set,

@@ -16,6 +16,10 @@ from agent_orchestra.evidence import (
     require_unchanged,
     worktree_digest,
 )
+from agent_orchestra.execution_context import (
+    ReviewerSetReviewPlan,
+    _execution_record,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import evidence_path
 from agent_orchestra.messages import (
@@ -39,8 +43,6 @@ from agent_orchestra.messages import (
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.schemas import CHANGES_REQUESTED_WITHOUT_FINDINGS
 from agent_orchestra.worker import (
-    ReviewerSetReviewPlan,
-    _execution_record,
     _read_execution_record,
 )
 
