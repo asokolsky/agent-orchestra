@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from agent_orchestra import cli, invocations, worker
+from agent_orchestra import cli, invocations, queued_review, worker
 from agent_orchestra import evidence as evidence_module
 from agent_orchestra.adapter.registry import (
     RuntimeDefinition,
@@ -37,6 +37,7 @@ from agent_orchestra.evidence import (
     resolve_evidence_path,
 )
 from agent_orchestra.execution_context import (
+    ITERATION_LIMIT,
     WorkerContext,
 )
 from agent_orchestra.invocations import (
@@ -50,13 +51,14 @@ from agent_orchestra.messages import (
     NO_REMEDIATION_CHANGE,
 )
 from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
+from agent_orchestra.queued_review import (
+    run_queued_review,
+)
 from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
 from agent_orchestra.settings import load_settings
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
-    ITERATION_LIMIT,
     resume_review,
-    run_queued_review,
 )
 
 
@@ -3405,7 +3407,7 @@ def test_concurrent_active_resumes_launch_one_process(
             raise OSError(message)
         return original_record(attempt, *args, **kwargs)
 
-    monkeypatch.setattr(worker, 'record_invocation', crash_before_attempt)
+    monkeypatch.setattr(queued_review, 'record_invocation', crash_before_attempt)
     with pytest.raises(OSError, match='simulated crash before attempt persistence'):
         run_queued_review(
             context=WorkerContext(
@@ -3420,7 +3422,7 @@ def test_concurrent_active_resumes_launch_one_process(
             timeout_seconds=30,
             max_iterations=3,
         )
-    monkeypatch.setattr(worker, 'record_invocation', original_record)
+    monkeypatch.setattr(queued_review, 'record_invocation', original_record)
     active = context.store.get(context.run.id)
     expected_state = RunState.REVIEWING if role == 'reviewer' else RunState.DEVELOPING
     assert active.state is expected_state

@@ -42,6 +42,13 @@ if TYPE_CHECKING:
     from agent_orchestra.store import JobStore
 
 
+EMPTY_OBJECTIVE = 'objective must not be empty'
+EVIDENCE_INSIDE_WORKTREE = 'run evidence directory must be outside the worktree'
+INVALID_DEVELOPER_TIMEOUT = 'developer timeout must be positive'
+INVALID_ITERATION_LIMIT = 'maximum review iterations must be positive'
+ITERATION_LIMIT = 'maximum review iteration count exhausted'
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerContext:
     """
