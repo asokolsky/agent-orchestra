@@ -852,15 +852,15 @@ An expected failure also remains JSON on stdout and exits 2:
 
 Stable error codes are `state_database_not_found`, `job_not_found`,
 `job_not_resumable`, `concurrent_update`, `resume_metadata_unsupported`,
-`resume_reviewer_set_unsupported`, `resume_scope_changed`, `resume_interrupted`,
+`resume_scope_changed`, `resume_interrupted`,
 `resume_execution_failed`, `resume_activation_uncertain`, `resume_cancelled`, and
 `resume_evidence_invalid`.
 Historical jobs whose
 `execution.json` lacks the version 2 resume context fail closed with
 `resume_metadata_unsupported`; start an explicitly linked replacement with
 [`enqueue-local --supersedes`](#enqueue-local) only after the old job is
-terminal. Valid version 3 reviewer-set execution records return
-`resume_reviewer_set_unsupported` until reviewer-batch recovery is implemented.
+terminal. Valid version 3 reviewer-set execution records preserve completed
+responses and retry only incomplete members with incremented attempt ordinals.
 `audit --verify` validates each reviewer-qualified request, result, artifact,
 and invocation together with the canonical aggregate decision and its member
 result references.

@@ -676,6 +676,7 @@ def _validate_canonical_json(
             )
             for review_iteration in reviewing_digests
             if review_iteration in reviewing_outcomes
+            if reviewing_outcomes[review_iteration] != str(RunState.INTERRUPTED)
             if aggregate_iterations.count(review_iteration) != 1
         )
     if isinstance(job, IssueJob):

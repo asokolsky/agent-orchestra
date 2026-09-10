@@ -24,7 +24,7 @@ from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import WorkerError, run_queued_reviewer_set
+from agent_orchestra.worker import WorkerError, resume_review, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -462,10 +462,10 @@ def test_reviewer_set_mutation_fails_terminally(
 
 
 @pytest.mark.parametrize('mode', ['timeout', 'nonzero', 'invalid', 'blocked'])
-def test_incomplete_reviewer_set_fails_terminally(
+def test_incomplete_reviewer_set_is_resumable(
     mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Finish every blocked reviewer-batch path in a terminal state."""
+    """Interrupt operationally incomplete batches while blocked results fail."""
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
@@ -532,7 +532,8 @@ def test_incomplete_reviewer_set_fails_terminally(
         )
 
     assert caught.value.code == 'reviewer_batch_incomplete'
-    assert store.get(run.id).state is RunState.FAILED
+    expected_state = RunState.FAILED if mode == 'blocked' else RunState.INTERRUPTED
+    assert store.get(run.id).state is expected_state
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     failure = json.loads((run_directory / 'failure.json').read_text(encoding='utf-8'))
     assert failure['error'] == {
@@ -562,12 +563,154 @@ def test_incomplete_reviewer_set_fails_terminally(
         and item.get('path') == 'review-batches/000001.json'
         for item in cast('list[dict[str, object]]', audit['findings'])
     )
-    if mode in {'timeout', 'nonzero'}:
-        assert audit['result'] != 'incomplete'
+    aggregate_path = run_directory / 'review-batches/000001.json'
+    assert aggregate_path.exists() is (mode == 'blocked')
+
+
+def test_resume_reviewer_set_retries_only_incomplete_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preserve an accepted peer and increment only the missing attempt."""
+
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+    calls: list[str] = []
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        assert isinstance(request, ReviewerRequest)
+        reviewer_id = request.artifact_path.stem.rsplit('-', 1)[-1]
+        calls.append(reviewer_id)
+        if request.on_started is not None:
+            request.on_started()
+        if reviewer_id == 'portability' and calls.count(reviewer_id) == 1:
+            command = 'reviewer'
+            raise subprocess.TimeoutExpired(command, 30)
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        request.artifact_path.write_text('# Review\n', encoding='utf-8')
+        request.response_path.write_text(
+            json.dumps(_approved_response(document, request.artifact_path)),
+            encoding='utf-8',
+        )
+        return AgentResult(
+            succeeded=True,
+            summary='approved',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+    plan = ReviewerExecutionPlan(
+        'default',
+        (
+            _reviewer('security', 'codex', 'openai'),
+            _reviewer('portability', 'claude-code', 'anthropic'),
+        ),
+    )
+    with pytest.raises(WorkerError, match='reviewer batch did not complete'):
+        run_queued_reviewer_set(
+            store=store,
+            run=run,
+            objective='Review the change.',
+            reviewer_plan=plan,
+            developer_command=(),
+            runs_directory=tmp_path / 'runs',
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            digest_worktree=lambda _path, _base: DIGEST,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
+        )
+
+    interrupted = store.get(run.id)
+    assert interrupted.state is RunState.INTERRUPTED
+    run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
+    assert not (run_directory / 'review-batches/000001.json').exists()
+
+    active = replace(interrupted, state=RunState.REVIEWING)
+    store.update(active, expected_state=RunState.INTERRUPTED)
+    with pytest.raises(WorkerError, match='reviewer batch did not complete'):
+        resume_review(
+            store=store,
+            run=active,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+        )
+    interrupted = store.get(run.id)
+    assert interrupted.state is RunState.INTERRUPTED
+    assert calls.count('portability') == 1
+
+    original_latest_attempt = worker_module._latest_reviewer_attempt
+
+    def missing_security_attempt(path: Path, sequence: int, reviewer_id: str) -> object:
+        if reviewer_id == 'security':
+            return None
+        return original_latest_attempt(path, sequence, reviewer_id)
+
+    monkeypatch.setattr(
+        worker_module, '_latest_reviewer_attempt', missing_security_attempt
+    )
+    with pytest.raises(
+        WorkerError,
+        match='canonical reviewer result lacks a completed successful attempt',
+    ) as caught:
+        resume_review(
+            store=store,
+            run=interrupted,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+        )
+    assert caught.value.code == 'resume_activation_uncertain'
+    assert store.get(run.id).state is RunState.INTERRUPTED
+    monkeypatch.setattr(
+        worker_module, '_latest_reviewer_attempt', original_latest_attempt
+    )
+
+    request_path = run_directory / 'messages/000001-security-review-request.json'
+    result_path = run_directory / 'messages/000002-security-review-result.json'
+    request = json.loads(request_path.read_text(encoding='utf-8'))
+    result_document = json.loads(result_path.read_text(encoding='utf-8'))
+    request['run_id'] = result_document['run_id'] = '20260910T000000Z-deadbeef'
+    request_path.write_text(json.dumps(request), encoding='utf-8')
+    result_path.write_text(json.dumps(result_document), encoding='utf-8')
+    with pytest.raises(WorkerError, match='durable run scope'):
+        resume_review(
+            store=store,
+            run=interrupted,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+        )
+    assert store.get(run.id).state is RunState.INTERRUPTED
+    request['run_id'] = result_document['run_id'] = str(run.id)
+    request_path.write_text(json.dumps(request), encoding='utf-8')
+    result_path.write_text(json.dumps(result_document), encoding='utf-8')
+
+    resumed = resume_review(
+        store=store,
+        run=interrupted,
+        runs_directory=tmp_path / 'runs',
+        digest_worktree=lambda _path, _base: DIGEST,
+    )
+
+    assert resumed.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    assert calls.count('security') == 1
+    assert calls.count('portability') == 2
+    assert (
+        run_directory / 'invocations/000001-reviewer-portability.attempt-0002.json'
+    ).is_file()
+    assert not (
+        run_directory / 'invocations/000001-reviewer-security.attempt-0002.json'
+    ).exists()
+    assert (run_directory / 'review-batches/000001.json').is_file()
 
 
 @pytest.mark.parametrize('mode', ['timeout', 'nonzero', 'invalid', 'blocked'])
-def test_mixed_incomplete_reviewer_set_fails_terminally(
+def test_mixed_incomplete_reviewer_set_is_resumable(
     mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Let incomplete required reviews outrank an actionable peer finding."""
@@ -638,7 +781,8 @@ def test_mixed_incomplete_reviewer_set_fails_terminally(
         )
 
     assert caught.value.code == 'reviewer_batch_incomplete'
-    assert store.get(run.id).state is RunState.FAILED
+    expected_state = RunState.FAILED if mode == 'blocked' else RunState.INTERRUPTED
+    assert store.get(run.id).state is expected_state
 
 
 @pytest.mark.parametrize('failure_point', ['preparation', 'dispatch'])

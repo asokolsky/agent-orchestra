@@ -2689,10 +2689,8 @@ def test_resume_interrupted_reviewer_reuses_request(
     execution_path.write_text(json.dumps(execution))
 
     assert main(resume_arguments(enqueued_run)) == 2
-    reviewer_set_unsupported = json.loads(capsys.readouterr().out)
-    assert (
-        reviewer_set_unsupported['error']['code'] == 'resume_reviewer_set_unsupported'
-    )
+    invalid_reviewer_set = json.loads(capsys.readouterr().out)
+    assert invalid_reviewer_set['error']['code'] == 'resume_evidence_invalid'
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
     execution['schema_version'] = 2
     execution['reviewer'] = reviewer_record
