@@ -988,8 +988,8 @@ single `reviewer` with an immutable `reviewer_plan` containing the reviewer-set
 identity, aggregation policy, and every ordered required reviewer's stable ID,
 command, identity, and timeout. Version 3 is readable at the execution-record
 boundary. New reviewer-set runs may select and persist the plan with
-`run --reviewer-set`; `resume` fails closed with
-`resume_reviewer_set_unsupported` until reviewer-batch recovery is implemented.
+`run --reviewer-set`. Resume preserves each validated canonical peer response
+and redispatches only incomplete members with incremented attempt ordinals.
 Every required member executes concurrently with reviewer-qualified evidence;
 the worker waits for the complete batch and applies the deterministic
 all-required decision before changing workflow state. This initial execution
@@ -997,10 +997,10 @@ boundary does not launch developer remediation after a rejected batch. It
 persists `review-batches/{iteration:06d}.json` before changing workflow state;
 the strict document binds the reviewer set and policy, immutable diff digest,
 ordered member outcomes and canonical result paths, aggregate verdict, and its
-ordered rationale groups. A timed-out, failed,
-blocked, invalid, or mutation-invalidated batch transitions to terminal
-`failed`; no reviewer-set job is left in a state whose unsupported `resume`
-operation would be required for progress.
+ordered rationale groups. A timed-out, failed, or invalid member leaves the
+batch `interrupted` without a premature aggregate. A complete blocked batch and
+any mutation-invalidated batch transition to terminal `failed`; resumed work
+remains bound to the same immutable diff digest.
 
 A retry keeps the original request message and writes a new invocation record
 with the same `task_id`, a new `invocation_id`, and an incremented `attempt`. A

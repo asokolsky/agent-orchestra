@@ -57,7 +57,11 @@ from agent_orchestra.reviewer_paths import (
     reviewer_task_id,
     validate_reviewer_id,
 )
-from agent_orchestra.reviewer_plan import reviewer_execution_plan_record
+from agent_orchestra.reviewer_plan import (
+    ReviewerExecution,
+    ReviewerExecutionPlan,
+    reviewer_execution_plan_record,
+)
 from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
     DUPLICATE_REVIEW_FINDING_IDS,
@@ -76,7 +80,6 @@ from agent_orchestra.workflow import transition
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
     from agent_orchestra.store import JobStore
 
 
@@ -125,7 +128,6 @@ REVIEWER_BATCH_INCOMPLETE = 'reviewer batch did not complete'
 REVIEWER_BATCH_INCOMPLETE_CODE = 'reviewer_batch_incomplete'
 RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
 RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
-RESUME_REVIEWER_SET_UNSUPPORTED_CODE = 'resume_reviewer_set_unsupported'
 RESUME_SCOPE_CHANGED_CODE = 'resume_scope_changed'
 RESUME_INTERRUPTED_CODE = 'resume_interrupted'
 RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
@@ -1158,6 +1160,56 @@ def _latest_task_attempt(
     task_id = f'{run_directory.name}:{sequence:06d}-{role}'
     attempts = [record for record in records if record.task_id == task_id]
     return max(attempts, key=lambda record: record.attempt) if attempts else None
+
+
+def _latest_reviewer_attempt(
+    run_directory: Path, sequence: int, reviewer_id: str
+) -> InvocationRecord | None:
+    """Return the latest validated attempt for one reviewer-set member."""
+
+    try:
+        records = InvocationEvidenceStore(run_directory).read_all(run_directory.name)
+        task_id = reviewer_task_id(run_directory.name, sequence, reviewer_id)
+    except (InvocationEvidenceError, ReviewerIdentityError) as error:
+        message = 'invalid reviewer invocation evidence'
+        raise WorkerError(message) from error
+    attempts = [record for record in records if record.task_id == task_id]
+    return max(attempts, key=lambda record: record.attempt) if attempts else None
+
+
+def _next_reviewer_attempt(run_directory: Path, sequence: int, reviewer_id: str) -> int:
+    """Return the next non-overwriting attempt for one incomplete reviewer."""
+
+    latest = _latest_reviewer_attempt(run_directory, sequence, reviewer_id)
+    if latest is None:
+        return 1
+    if latest.status is not AttemptStatus.COMPLETED:
+        message = 'cannot retry reviewer with uncertain active attempt'
+        raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
+    return latest.attempt + 1
+
+
+def _require_completed_reviewer_attempt(record: InvocationRecord) -> None:
+    """Reject active reviewer evidence whose activation remains uncertain."""
+
+    if record.status is not AttemptStatus.COMPLETED:
+        message = 'cannot recover reviewer with uncertain active attempt'
+        raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
+
+
+def _require_successful_reviewer_attempt(
+    run_directory: Path, sequence: int, reviewer_id: str
+) -> None:
+    """Require successful invocation evidence for one canonical result."""
+
+    latest = _latest_reviewer_attempt(run_directory, sequence, reviewer_id)
+    if (
+        latest is None
+        or latest.status is not AttemptStatus.COMPLETED
+        or latest.conclusion is not AttemptConclusion.SUCCEEDED
+    ):
+        message = 'canonical reviewer result lacks a completed successful attempt'
+        raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
 
 
 def _attempt_activation_was_persisted(
@@ -2944,7 +2996,306 @@ def _resume_intermediate_state(
     )
 
 
-def _resume_review(
+def _reviewer_plan_from_execution(
+    execution: ReviewerSetExecutionRecordSchema, registry: RuntimeRegistry
+) -> ReviewerExecutionPlan:
+    """Rebuild and validate one persisted reviewer-set execution plan."""
+
+    return ReviewerExecutionPlan(
+        execution.reviewer_plan.reviewer_set_id,
+        tuple(
+            ReviewerExecution(
+                reviewer_id=reviewer.reviewer_id,
+                command=tuple(reviewer.command),
+                identity=_resolve_resume_identity(
+                    _identity_from_record(
+                        reviewer.identity.vendor,
+                        reviewer.identity.model,
+                        reviewer.identity.runtime,
+                    ),
+                    RuntimeRole.REVIEWER,
+                    registry,
+                ),
+                timeout_seconds=reviewer.timeout_seconds,
+            )
+            for reviewer in execution.reviewer_plan.reviewers
+        ),
+    )
+
+
+def _reviewer_batch_sequence(
+    run_directory: Path,
+    *,
+    run: Run,
+    reviewer_plan: ReviewerExecutionPlan,
+) -> int:
+    """Return the current batch sequence from canonical reviewer requests."""
+
+    expected_ids = {reviewer.reviewer_id for reviewer in reviewer_plan.reviewers}
+    sequences: dict[str, int] = {}
+    message_directory = _run_evidence_path(run_directory, 'messages')
+    try:
+        entries = tuple(message_directory.iterdir())
+    except OSError as error:
+        message = 'reviewer-set request evidence is unreadable'
+        raise WorkerError(message) from error
+    for path in entries:
+        identity = canonical_message_evidence(
+            path.relative_to(run_directory).as_posix()
+        )
+        if identity is None or identity[0] != 'review_request':
+            continue
+        sequence = identity[1]
+        reviewer_id = _reviewer_id_from_message_path(
+            path, sequence=sequence, message_type='review_request'
+        )
+        if reviewer_id is None:
+            continue
+        request = _read_object(path)
+        if request.get('iteration') != run.iteration:
+            continue
+        if reviewer_id not in expected_ids or reviewer_id in sequences:
+            message = 'reviewer-set request evidence does not match its execution plan'
+            raise WorkerError(message)
+        sequences[reviewer_id] = sequence
+    if set(sequences) != expected_ids or len(set(sequences.values())) != 1:
+        message = 'reviewer-set request evidence has no single durable sequence'
+        raise WorkerError(message)
+    return next(iter(sequences.values()))
+
+
+def _completed_reviewer_result(
+    run_directory: Path,
+    dispatch: ReviewerDispatch,
+    *,
+    run: Run,
+    objective: str,
+    current_digest: str,
+) -> tuple[ReviewerDispatchResult, dict[str, Any]] | None:
+    """Return one validated canonical peer result, if it already exists."""
+
+    request_path = _reviewer_dispatch_path(run_directory, dispatch.paths.request)
+    result_path = _reviewer_dispatch_path(run_directory, dispatch.paths.result)
+    if not result_path.is_file():
+        return None
+    request = _read_object(request_path)
+    _require_successful_reviewer_attempt(
+        run_directory, int(request['sequence']), dispatch.reviewer_id
+    )
+    result = _read_object(result_path)
+    artifact_path = _reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
+    _validate_review_request(request, run_directory=run_directory)
+    _validate_reviewer_set_request_scope(
+        request,
+        run=run,
+        objective=objective,
+        current_digest=current_digest,
+        sequence=int(request['sequence']),
+        dispatch=dispatch,
+        artifact_path=artifact_path,
+    )
+    verdict = _validate_review_response(
+        result, request=request, artifact_path=artifact_path
+    )
+    message_id = result.get('message_id')
+    if not isinstance(message_id, str):
+        message = 'review result message ID is missing'
+        raise WorkerError(message)
+    return (
+        ReviewerDispatchResult(
+            ReviewerDecision(dispatch.reviewer_id, cast('Any', verdict)), message_id
+        ),
+        request,
+    )
+
+
+def _validate_reviewer_set_request_scope(
+    request: dict[str, Any],
+    *,
+    run: Run,
+    objective: str,
+    current_digest: str,
+    sequence: int,
+    dispatch: ReviewerDispatch,
+    artifact_path: Path,
+) -> None:
+    """Bind one persisted reviewer request to its durable run and plan member."""
+
+    expected = {
+        'run_id': str(run.id),
+        'sequence': sequence,
+        'iteration': run.iteration,
+        'scope': {
+            'worktree_path': str(run.worktree_path),
+            'base_sha': run.base_sha,
+            'head_sha': run.head_sha,
+            'diff_digest': current_digest,
+        },
+    }
+    if any(request.get(field) != value for field, value in expected.items()):
+        message = 'reviewer-set request does not match the durable run scope'
+        raise WorkerError(message)
+    payload = request['payload']
+    if (
+        payload['objective'] != objective
+        or payload['timeout_seconds'] != dispatch.timeout_seconds
+        or payload['artifact_path'] != str(artifact_path)
+    ):
+        message = 'reviewer-set request does not match its execution plan'
+        raise WorkerError(message)
+
+
+def _resume_reviewer_set(
+    *,
+    context: WorkerContext,
+    run: Run,
+    run_directory: Path,
+    execution: ReviewerSetExecutionRecordSchema,
+) -> Run:
+    """Resume only incomplete members of one immutable reviewer batch."""
+
+    interrupted_review = run.state is RunState.INTERRUPTED and (
+        context.store.interrupted_origin(str(run.id)) is RunState.REVIEWING
+    )
+    active_review = run.state is RunState.REVIEWING
+    if not interrupted_review and not active_review:
+        raise WorkerError(
+            f'reviewer-set job is not resumable from {run.state}',
+            code=RUN_NOT_RESUMABLE_CODE,
+        )
+    current_digest = _digest(context.digest_worktree, run.worktree_path, run.base_sha)
+    if current_digest is None or not same_diff_digest(current_digest, run.diff_digest):
+        message = 'resume scope changed since the interrupted reviewer batch'
+        raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
+    reviewer_plan = _reviewer_plan_from_execution(execution, context.registry)
+    sequence = _reviewer_batch_sequence(
+        run_directory, run=run, reviewer_plan=reviewer_plan
+    )
+    reviewing = replace(run, state=RunState.REVIEWING, updated_at=utc_now())
+    base_dispatches = build_review_fanout(
+        reviewer_plan,
+        run_id=str(run.id),
+        sequence=sequence,
+        iteration=reviewing.iteration,
+        attempt=1,
+    )
+    results_by_id: dict[str, ReviewerDispatchResult] = {}
+    retry_requests: dict[str, dict[str, Any]] = {}
+    retry_attempts: dict[str, int] = {}
+    retry_dispatches: list[ReviewerDispatch] = []
+    activated = False
+    try:
+        for base_dispatch in base_dispatches:
+            completed = _completed_reviewer_result(
+                run_directory,
+                base_dispatch,
+                run=run,
+                objective=execution.objective,
+                current_digest=current_digest,
+            )
+            if completed is not None:
+                result, _ = completed
+                results_by_id[base_dispatch.reviewer_id] = result
+                continue
+            request = _read_object(
+                _reviewer_dispatch_path(run_directory, base_dispatch.paths.request)
+            )
+            artifact_path = _reviewer_dispatch_path(
+                run_directory, base_dispatch.paths.artifact
+            )
+            _validate_review_request(request, run_directory=run_directory)
+            _validate_reviewer_set_request_scope(
+                request,
+                run=run,
+                objective=execution.objective,
+                current_digest=current_digest,
+                sequence=sequence,
+                dispatch=base_dispatch,
+                artifact_path=artifact_path,
+            )
+            latest = _latest_reviewer_attempt(
+                run_directory, sequence, base_dispatch.reviewer_id
+            )
+            if active_review and latest is not None:
+                _require_completed_reviewer_attempt(latest)
+                results_by_id[base_dispatch.reviewer_id] = ReviewerDispatchResult(
+                    ReviewerDecision(base_dispatch.reviewer_id, 'incomplete'), None
+                )
+                continue
+            attempt = _next_reviewer_attempt(
+                run_directory, sequence, base_dispatch.reviewer_id
+            )
+            attempt_dispatches = build_review_fanout(
+                reviewer_plan,
+                run_id=str(run.id),
+                sequence=sequence,
+                iteration=reviewing.iteration,
+                attempt=attempt,
+            )
+            retry_dispatch = next(
+                item
+                for item in attempt_dispatches
+                if item.reviewer_id == base_dispatch.reviewer_id
+            )
+            retry_dispatches.append(retry_dispatch)
+            retry_requests[retry_dispatch.reviewer_id] = request
+            retry_attempts[retry_dispatch.reviewer_id] = attempt
+        if interrupted_review:
+            context.store.update(reviewing, expected_state=RunState.INTERRUPTED)
+        activated = True
+        if retry_dispatches:
+            with ThreadPoolExecutor(max_workers=len(retry_dispatches)) as executor:
+                retry_results = tuple(
+                    executor.map(
+                        lambda dispatch: _execute_reviewer_dispatch(
+                            context=context,
+                            run=run,
+                            reviewing=reviewing,
+                            objective=execution.objective,
+                            current_digest=current_digest,
+                            dispatch=dispatch,
+                            sequence=sequence,
+                            attempt=retry_attempts[dispatch.reviewer_id],
+                            retry_request=retry_requests[dispatch.reviewer_id],
+                        ),
+                        retry_dispatches,
+                    )
+                )
+            results_by_id.update(
+                (dispatch.reviewer_id, result)
+                for dispatch, result in zip(
+                    retry_dispatches, retry_results, strict=True
+                )
+            )
+        results = tuple(
+            results_by_id[dispatch.reviewer_id] for dispatch in base_dispatches
+        )
+        return _finish_reviewer_batch(
+            context=context,
+            run=run,
+            reviewing=reviewing,
+            reviewer_plan=reviewer_plan,
+            current_digest=current_digest,
+            dispatches=base_dispatches,
+            results=results,
+        )
+    except WorkerError as error:
+        if not activated:
+            raise
+        if error.code == REVIEWER_BATCH_INCOMPLETE_CODE:
+            raise
+        failed = transition(reviewing, RunState.FAILED)
+        context.store.update(failed, expected_state=RunState.REVIEWING)
+        raise
+    except BaseException:
+        if not activated:
+            raise
+        failed = transition(reviewing, RunState.FAILED)
+        context.store.update(failed, expected_state=RunState.REVIEWING)
+        raise
+
+
+def _resume_review(  # noqa: PLR0911
     *,
     context: WorkerContext,
     run: Run,
@@ -2971,8 +3322,12 @@ def _resume_review(
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
     execution = _read_execution_record(run_directory, str(run.id))
     if isinstance(execution, ReviewerSetExecutionRecordSchema):
-        message = 'reviewer-set execution resume is not implemented'
-        raise WorkerError(message, code=RESUME_REVIEWER_SET_UNSUPPORTED_CODE)
+        return _resume_reviewer_set(
+            context=context,
+            run=run,
+            run_directory=run_directory,
+            execution=execution,
+        )
     chain = read_message_chain(run_directory.resolve(), str(run.id))
     if not execution.reviewer.command:
         message = 'resume reviewer command is missing'
@@ -3243,6 +3598,7 @@ def _execute_reviewer_dispatch(
     dispatch: ReviewerDispatch,
     sequence: int,
     attempt: int,
+    retry_request: dict[str, Any] | None = None,
 ) -> ReviewerDispatchResult:
     """Execute and validate one reviewer without changing workflow state."""
 
@@ -3260,7 +3616,7 @@ def _execute_reviewer_dispatch(
     metadata_path = _reviewer_dispatch_path(
         run_directory, dispatch.paths.runtime_metadata
     )
-    request: dict[str, Any] = {
+    request: dict[str, Any] = retry_request or {
         'schema_version': 1,
         'message_id': str(uuid4()),
         'in_reply_to': None,
@@ -3286,7 +3642,11 @@ def _execute_reviewer_dispatch(
         },
     }
     _validate_review_request(request, run_directory=run_directory)
-    _write_json_atomic(request_path, request, 'review_request')
+    if retry_request is None:
+        _write_json_atomic(request_path, request, 'review_request')
+    elif _read_object(request_path) != request:
+        message = 'retry review request differs from canonical evidence'
+        raise WorkerError(message)
     started_at = timestamp()
     invocation_id = _record_invocation(
         run=run,
@@ -3540,6 +3900,83 @@ def _execute_reviewer_dispatch(
     )
 
 
+def _finish_reviewer_batch(
+    *,
+    context: WorkerContext,
+    run: Run,
+    reviewing: Run,
+    reviewer_plan: ReviewerExecutionPlan,
+    current_digest: str,
+    dispatches: tuple[ReviewerDispatch, ...],
+    results: tuple[ReviewerDispatchResult, ...],
+) -> Run:
+    """Persist one complete aggregate or interrupt an incomplete batch."""
+
+    _require_unchanged(
+        _digest(context.digest_worktree, run.worktree_path, run.base_sha),
+        current_digest,
+    )
+    _require_unique_batch_message_ids(results)
+    decision = aggregate_review_batch(tuple(result.decision for result in results))
+    if decision.incomplete_reviewers:
+        interrupted = transition(reviewing, RunState.INTERRUPTED)
+        context.store.update(interrupted, expected_state=RunState.REVIEWING)
+        raise WorkerError(
+            REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
+        )
+    batch_result = ReviewerBatchResultSchema.model_validate(
+        {
+            'schema_version': 1,
+            'run_id': str(run.id),
+            'iteration': reviewing.iteration,
+            'reviewer_set_id': reviewer_plan.reviewer_set_id,
+            'aggregation_policy': 'all_required',
+            'diff_digest': current_digest,
+            'verdict': decision.verdict,
+            'reviewers': [
+                {
+                    'reviewer_id': dispatch.reviewer_id,
+                    'outcome': result.decision.outcome,
+                    'result_path': dispatch.paths.result,
+                }
+                for dispatch, result in zip(dispatches, results, strict=True)
+            ],
+            'changes_requested_by': list(decision.changes_requested_by),
+            'blocked_by': list(decision.blocked_by),
+            'incomplete_reviewers': [],
+        }
+    )
+    run_directory = _run_evidence_directory(context.runs_directory, str(run.id))
+    _write_json_atomic(
+        _run_evidence_path(
+            run_directory,
+            *Path(
+                evidence_path('review_batch_result', ordinal=reviewing.iteration)
+            ).parts,
+        ),
+        batch_result.model_dump(mode='json'),
+        'review_batch_result',
+    )
+    if decision.verdict == 'blocked':
+        failed = transition(reviewing, RunState.FAILED)
+        context.store.update(failed, expected_state=RunState.REVIEWING)
+        raise WorkerError(
+            REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
+        )
+    decided = transition(
+        reviewing,
+        RunState.APPROVED
+        if decision.verdict == 'approved'
+        else RunState.CHANGES_REQUESTED,
+    )
+    context.store.update(decided, expected_state=RunState.REVIEWING)
+    if decision.verdict == 'changes_requested':
+        return decided
+    awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
+    context.store.update(awaiting, expected_state=RunState.APPROVED)
+    return awaiting
+
+
 def _run_queued_reviewer_set(
     *,
     store: JobStore,
@@ -3643,69 +4080,25 @@ def _run_queued_reviewer_set(
                     dispatches,
                 )
             )
-        _require_unchanged(
-            _digest(digest_worktree, run.worktree_path, run.base_sha), current_digest
+        return _finish_reviewer_batch(
+            context=context,
+            run=run,
+            reviewing=reviewing,
+            reviewer_plan=reviewer_plan,
+            current_digest=current_digest,
+            dispatches=dispatches,
+            results=results,
         )
-        _require_unique_batch_message_ids(results)
-        decision = aggregate_review_batch(tuple(result.decision for result in results))
-        batch_result = ReviewerBatchResultSchema.model_validate(
-            {
-                'schema_version': 1,
-                'run_id': str(run.id),
-                'iteration': reviewing.iteration,
-                'reviewer_set_id': reviewer_plan.reviewer_set_id,
-                'aggregation_policy': 'all_required',
-                'diff_digest': current_digest,
-                'verdict': decision.verdict,
-                'reviewers': [
-                    {
-                        'reviewer_id': dispatch.reviewer_id,
-                        'outcome': result.decision.outcome,
-                        'result_path': (
-                            dispatch.paths.result
-                            if result.message_id is not None
-                            else None
-                        ),
-                    }
-                    for dispatch, result in zip(dispatches, results, strict=True)
-                ],
-                'changes_requested_by': list(decision.changes_requested_by),
-                'blocked_by': list(decision.blocked_by),
-                'incomplete_reviewers': list(decision.incomplete_reviewers),
-            }
-        )
-        _write_json_atomic(
-            _run_evidence_path(
-                run_directory,
-                *Path(
-                    evidence_path('review_batch_result', ordinal=reviewing.iteration)
-                ).parts,
-            ),
-            batch_result.model_dump(mode='json'),
-            'review_batch_result',
-        )
+    except WorkerError as error:
+        if error.code == REVIEWER_BATCH_INCOMPLETE_CODE:
+            raise
+        failed = transition(reviewing, RunState.FAILED)
+        store.update(failed, expected_state=RunState.REVIEWING)
+        raise
     except BaseException:
         failed = transition(reviewing, RunState.FAILED)
         store.update(failed, expected_state=RunState.REVIEWING)
         raise
-    if decision.verdict == 'blocked':
-        failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.REVIEWING)
-        raise WorkerError(
-            REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
-        )
-    decided = transition(
-        reviewing,
-        RunState.APPROVED
-        if decision.verdict == 'approved'
-        else RunState.CHANGES_REQUESTED,
-    )
-    store.update(decided, expected_state=RunState.REVIEWING)
-    if decision.verdict == 'changes_requested':
-        return decided
-    awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
-    store.update(awaiting, expected_state=RunState.APPROVED)
-    return awaiting
 
 
 def run_queued_reviewer_set(
