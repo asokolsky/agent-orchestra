@@ -334,7 +334,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-15 CLI. This
+column and field names. Those names are not exposed by the schema-16 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -384,9 +384,9 @@ reviewers, duplicate member identifiers, or an identifier the path layer
 rejects, because a batch that cannot own distinct evidence must not start.
 
 Required source-review batches use one completion-order-independent aggregation
-policy. Any `changes_requested` member makes the batch `changes_requested`.
-Otherwise, a `blocked` or incomplete member makes the batch `blocked`. The batch
-is `approved` only when every required member approves. The rationale preserves
+policy. Any `blocked` or incomplete member makes the batch `blocked`. Otherwise,
+any `changes_requested` member makes the batch `changes_requested`. The batch is
+`approved` only when every required member approves. The rationale preserves
 the configured reviewer order in separate `changes_requested_by`, `blocked_by`,
 and `incomplete_reviewers` lists so later persisted evidence can explain the
 decision without recomputing policy from logs.
@@ -854,9 +854,17 @@ sufficient to restart an agent safely. Execution schema version 3 replaces the
 single `reviewer` with an immutable `reviewer_plan` containing the reviewer-set
 identity, aggregation policy, and every ordered required reviewer's stable ID,
 command, identity, and timeout. Version 3 is readable at the execution-record
-boundary, but no command writes or dispatches it yet, and `resume` fails closed
-with `resume_reviewer_set_unsupported` until reviewer-batch recovery is
-implemented.
+boundary. New reviewer-set runs may select and persist the plan with
+`run --reviewer-set`; `resume` fails closed with
+`resume_reviewer_set_unsupported` until reviewer-batch recovery is implemented.
+Every required member executes concurrently with reviewer-qualified evidence;
+the worker waits for the complete batch and applies the deterministic
+all-required decision before changing workflow state. This initial execution
+boundary does not launch developer remediation after a rejected batch and does
+not yet persist a separate aggregate-result document. A timed-out, failed,
+blocked, invalid, or mutation-invalidated batch transitions to terminal
+`failed`; no reviewer-set job is left in a state whose unsupported `resume`
+operation would be required for progress.
 
 A retry keeps the original request message and writes a new invocation record
 with the same `task_id`, a new `invocation_id`, and an incremented `attempt`. A

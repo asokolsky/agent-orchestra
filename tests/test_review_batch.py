@@ -31,8 +31,8 @@ def test_all_required_approvals_aggregate_to_approval() -> None:
     assert decision.incomplete_reviewers == ()
 
 
-def test_changes_requested_precedes_blocked_and_incomplete() -> None:
-    """Preserve actionable findings as the highest-priority batch result."""
+def test_blocked_and_incomplete_precede_changes_requested() -> None:
+    """Fail closed when an actionable batch also lacks a required review."""
 
     decision = aggregate_review_batch(
         (
@@ -42,7 +42,7 @@ def test_changes_requested_precedes_blocked_and_incomplete() -> None:
         )
     )
 
-    assert decision.verdict == 'changes_requested'
+    assert decision.verdict == 'blocked'
     assert decision.changes_requested_by == ('second',)
     assert decision.blocked_by == ('first',)
     assert decision.incomplete_reviewers == ('third',)
