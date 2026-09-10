@@ -6,6 +6,7 @@ from dataclasses import fields
 
 import pytest
 
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.attempt_documents import (
     AUDIT_ATTEMPT_FIELDS,
     AUDIT_WITHHELD_FIELDS,
@@ -14,7 +15,12 @@ from agent_orchestra.attempt_documents import (
     OMITTED_WHEN_NONE,
     project_attempt,
 )
-from agent_orchestra.invocations import InvocationRecord
+from agent_orchestra.invocations import (
+    AttemptConclusion,
+    AttemptStatus,
+    EffectiveModelStatus,
+    InvocationRecord,
+)
 
 
 def _record(*, reviewer_id: str | None = None) -> InvocationRecord:
@@ -25,11 +31,11 @@ def _record(*, reviewer_id: str | None = None) -> InvocationRecord:
         run_id='job-1',
         task_id='job-1:000001-reviewer',
         invocation_id='job-1:000001-reviewer:attempt-0001',
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         agent_vendor='vendor',
         requested_model=None,
         effective_models=('model-a',),
-        effective_model_status='reported',
+        effective_model_status=EffectiveModelStatus.REPORTED,
         runtime='runtime',
         iteration=1,
         started_at='2026-09-10T10:00:00Z',
@@ -40,8 +46,8 @@ def _record(*, reviewer_id: str | None = None) -> InvocationRecord:
         stdout_path='logs/000001-reviewer.stdout.log',
         stderr_path='logs/000001-reviewer.stderr.log',
         attempt=1,
-        status='completed',
-        conclusion='succeeded',
+        status=AttemptStatus.COMPLETED,
+        conclusion=AttemptConclusion.SUCCEEDED,
         response_received_at='2026-09-10T10:00:30Z',
         validation_started_at='2026-09-10T10:00:45Z',
         reviewer_id=reviewer_id,

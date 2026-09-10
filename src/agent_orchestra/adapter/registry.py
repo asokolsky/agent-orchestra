@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 
 from agent_orchestra.adapter.base import (
@@ -12,6 +11,7 @@ from agent_orchestra.adapter.base import (
     IssueReviewerAdapter,
     ReviewerAdapter,
 )
+from agent_orchestra.persisted_enum import PersistedEnum
 
 RUNTIME_REGISTRY_EMPTY = 'runtime registry requires non-empty identifiers'
 RUNTIME_REGISTRY_DUPLICATE = 'runtime registry contains duplicate identifiers'
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
 
-class RuntimeRole(StrEnum):
+class RuntimeRole(PersistedEnum):
     """Canonical roles implemented by runtime adapters."""
 
     REVIEWER = 'reviewer'

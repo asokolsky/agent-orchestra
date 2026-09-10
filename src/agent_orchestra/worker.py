@@ -36,6 +36,7 @@ from agent_orchestra.evidence import (
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
+    EffectiveModelStatus,
     InvocationEvidenceError,
     InvocationEvidenceStore,
     InvocationIdentity,
@@ -430,7 +431,7 @@ def _output_text(value: str | bytes | None) -> str:
 
 def _exception_runtime_metadata(
     error: BaseException,
-) -> tuple[tuple[str, ...], Literal['reported', 'unavailable']]:
+) -> tuple[tuple[str, ...], EffectiveModelStatus]:
     """Return validated provenance preserved by a failed command adapter."""
 
     models = getattr(error, 'effective_models', ())
@@ -439,11 +440,11 @@ def _exception_runtime_metadata(
         isinstance(models, tuple)
         and all(isinstance(model, str) and model for model in models)
         and len(models) == len(set(models))
-        and status in {'reported', 'unavailable'}
-        and (status == 'reported') == bool(models)
+        and status in EffectiveModelStatus.values()
+        and (status == EffectiveModelStatus.REPORTED) == bool(models)
     ):
-        return tuple(models), cast('Literal["reported", "unavailable"]', status)
-    return (), 'unavailable'
+        return tuple(models), EffectiveModelStatus(status)
+    return (), EffectiveModelStatus.UNAVAILABLE
 
 
 def _runtime_metadata_path(
@@ -488,7 +489,7 @@ def _persist_attempt_record(path: Path, record: InvocationRecord) -> None:
 def _record_invocation(
     *,
     run: Run,
-    role: Literal['developer', 'reviewer'],
+    role: Literal[RuntimeRole.DEVELOPER, RuntimeRole.REVIEWER],
     identity: InvocationIdentity,
     iteration: int,
     sequence: int,
@@ -504,10 +505,9 @@ def _record_invocation(
     finished: bool = True,
     attempt: int = 1,
     effective_models: tuple[str, ...] = (),
-    effective_model_status: Literal['reported', 'unavailable'] = 'unavailable',
-    status: Literal['pending', 'running', 'completed'] | None = None,
-    conclusion: Literal['succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted']
-    | None = None,
+    effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE,
+    status: AttemptStatus | None = None,
+    conclusion: AttemptConclusion | None = None,
     response_received_at: str | None = None,
     validation_started_at: str | None = None,
     finished_at_value: str | None = None,
@@ -516,7 +516,7 @@ def _record_invocation(
     """Persist separate streams and their adapter-neutral invocation record."""
 
     if reviewer_id is not None:
-        if role != 'reviewer':
+        if role is not RuntimeRole.REVIEWER:
             message = 'only reviewer invocations can have a reviewer ID'
             raise WorkerError(message)
         try:
@@ -533,14 +533,20 @@ def _record_invocation(
         invocation_id = invocation_id or f'{task_id}:attempt-{attempt:04d}'
         log_stem = _invocation_stem(sequence, role, attempt)
         schema_version = 4
-    attempt_status = status or ('completed' if finished else 'pending')
-    if attempt_status == 'completed' and conclusion is None:
+    attempt_status = status or (
+        AttemptStatus.COMPLETED if finished else AttemptStatus.PENDING
+    )
+    if attempt_status is AttemptStatus.COMPLETED and conclusion is None:
         if timed_out:
-            conclusion = 'timed_out'
+            conclusion = AttemptConclusion.TIMED_OUT
         elif interrupted:
-            conclusion = 'interrupted'
+            conclusion = AttemptConclusion.INTERRUPTED
         else:
-            conclusion = 'succeeded' if exit_code == 0 else 'failed'
+            conclusion = (
+                AttemptConclusion.SUCCEEDED
+                if exit_code == 0
+                else AttemptConclusion.FAILED
+            )
     stdout_path = logs / f'{log_stem}.stdout.log'
     stderr_path = logs / f'{log_stem}.stderr.log'
     if stdout is not None or not stdout_path.exists():
@@ -1157,7 +1163,7 @@ def _latest_task_attempt(
 def _attempt_activation_was_persisted(
     run_directory: Path,
     sequence: int,
-    role: Literal['developer', 'reviewer'],
+    role: Literal[RuntimeRole.DEVELOPER, RuntimeRole.REVIEWER],
     attempt: int,
 ) -> bool:
     """Return whether activation is durable enough to finalize interruption."""
@@ -1349,7 +1355,7 @@ def _run_queued_review(
         started_at = timestamp()
         invocation_id = _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             identity=reviewer_identity,
             iteration=reviewing.iteration,
             sequence=sequence,
@@ -1387,7 +1393,7 @@ def _run_queued_review(
                     on_started=partial(
                         _record_invocation,
                         run=run,
-                        role='reviewer',
+                        role=RuntimeRole.REVIEWER,
                         identity=reviewer_identity,
                         iteration=reviewing.iteration,
                         sequence=sequence,
@@ -1400,7 +1406,7 @@ def _run_queued_review(
                         invocation_id=invocation_id,
                         finished=False,
                         attempt=reviewer_attempt,
-                        status='running',
+                        status=AttemptStatus.RUNNING,
                     ),
                 )
             )
@@ -1412,7 +1418,7 @@ def _run_queued_review(
             )
             _record_invocation(
                 run=run,
-                role='reviewer',
+                role=RuntimeRole.REVIEWER,
                 identity=reviewer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1451,11 +1457,11 @@ def _run_queued_review(
                 error
             )
             if _attempt_activation_was_persisted(
-                run_directory, sequence, 'reviewer', reviewer_attempt
+                run_directory, sequence, RuntimeRole.REVIEWER, reviewer_attempt
             ):
                 _record_invocation(
                     run=run,
-                    role='reviewer',
+                    role=RuntimeRole.REVIEWER,
                     identity=reviewer_identity,
                     iteration=reviewing.iteration,
                     sequence=sequence,
@@ -1492,7 +1498,7 @@ def _run_queued_review(
             )
             _record_invocation(
                 run=run,
-                role='reviewer',
+                role=RuntimeRole.REVIEWER,
                 identity=reviewer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1517,7 +1523,7 @@ def _run_queued_review(
         if not completed.succeeded:
             _record_invocation(
                 run=run,
-                role='reviewer',
+                role=RuntimeRole.REVIEWER,
                 identity=reviewer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1531,7 +1537,7 @@ def _run_queued_review(
                 attempt=reviewer_attempt,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
-                conclusion='failed',
+                conclusion=AttemptConclusion.FAILED,
                 finished_at_value=process_finished_at,
             )
             failed = transition(reviewing, RunState.FAILED)
@@ -1549,7 +1555,7 @@ def _run_queued_review(
         validation_started_at = timestamp()
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             identity=reviewer_identity,
             iteration=reviewing.iteration,
             sequence=sequence,
@@ -1561,7 +1567,7 @@ def _run_queued_review(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=reviewer_attempt,
-            status='running',
+            status=AttemptStatus.RUNNING,
             response_received_at=response_received_at,
             validation_started_at=validation_started_at,
             finished_at_value=process_finished_at,
@@ -1582,7 +1588,7 @@ def _run_queued_review(
         except WorkerError:
             _record_invocation(
                 run=run,
-                role='reviewer',
+                role=RuntimeRole.REVIEWER,
                 identity=reviewer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1594,7 +1600,7 @@ def _run_queued_review(
                 exit_code=completed.exit_code,
                 invocation_id=invocation_id,
                 attempt=reviewer_attempt,
-                conclusion='failed',
+                conclusion=AttemptConclusion.FAILED,
                 response_received_at=response_received_at,
                 validation_started_at=validation_started_at,
                 finished_at_value=process_finished_at,
@@ -1619,7 +1625,7 @@ def _run_queued_review(
 
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             identity=reviewer_identity,
             iteration=reviewing.iteration,
             sequence=sequence,
@@ -1631,7 +1637,7 @@ def _run_queued_review(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=reviewer_attempt,
-            conclusion='succeeded',
+            conclusion=AttemptConclusion.SUCCEEDED,
             response_received_at=response_received_at,
             validation_started_at=validation_started_at,
             finished_at_value=process_finished_at,
@@ -1694,7 +1700,7 @@ def _run_queued_review(
         started_at = timestamp()
         invocation_id = _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=reviewing.iteration,
             sequence=sequence,
@@ -1724,7 +1730,7 @@ def _run_queued_review(
                     on_started=partial(
                         _record_invocation,
                         run=run,
-                        role='developer',
+                        role=RuntimeRole.DEVELOPER,
                         identity=developer_identity,
                         iteration=reviewing.iteration,
                         sequence=sequence,
@@ -1736,7 +1742,7 @@ def _run_queued_review(
                         exit_code=None,
                         invocation_id=invocation_id,
                         finished=False,
-                        status='running',
+                        status=AttemptStatus.RUNNING,
                     ),
                 )
             )
@@ -1746,7 +1752,7 @@ def _run_queued_review(
             )
             _record_invocation(
                 run=run,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 identity=developer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1778,11 +1784,11 @@ def _run_queued_review(
                 error
             )
             if _attempt_activation_was_persisted(
-                run_directory, sequence, 'developer', 1
+                run_directory, sequence, RuntimeRole.DEVELOPER, 1
             ):
                 _record_invocation(
                     run=run,
-                    role='developer',
+                    role=RuntimeRole.DEVELOPER,
                     identity=developer_identity,
                     iteration=reviewing.iteration,
                     sequence=sequence,
@@ -1812,7 +1818,7 @@ def _run_queued_review(
             )
             _record_invocation(
                 run=run,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 identity=developer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1836,7 +1842,7 @@ def _run_queued_review(
         if not completed.succeeded:
             _record_invocation(
                 run=run,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 identity=developer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1847,7 +1853,7 @@ def _run_queued_review(
                 stderr=completed.stderr,
                 exit_code=completed.exit_code,
                 invocation_id=invocation_id,
-                conclusion='failed',
+                conclusion=AttemptConclusion.FAILED,
                 finished_at_value=process_finished_at,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
@@ -1866,7 +1872,7 @@ def _run_queued_review(
         validation_started_at = timestamp()
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=reviewing.iteration,
             sequence=sequence,
@@ -1877,7 +1883,7 @@ def _run_queued_review(
             stderr=completed.stderr,
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
-            status='running',
+            status=AttemptStatus.RUNNING,
             response_received_at=response_received_at,
             validation_started_at=validation_started_at,
             finished_at_value=process_finished_at,
@@ -1909,7 +1915,7 @@ def _run_queued_review(
                 )
             _record_invocation(
                 run=run,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 identity=developer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1920,7 +1926,7 @@ def _run_queued_review(
                 stderr=None,
                 exit_code=completed.exit_code,
                 invocation_id=invocation_id,
-                conclusion='succeeded',
+                conclusion=AttemptConclusion.SUCCEEDED,
                 response_received_at=response_received_at,
                 validation_started_at=validation_started_at,
                 finished_at_value=process_finished_at,
@@ -1960,7 +1966,7 @@ def _run_queued_review(
         except WorkerError:
             _record_invocation(
                 run=run,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 identity=developer_identity,
                 iteration=reviewing.iteration,
                 sequence=sequence,
@@ -1971,7 +1977,7 @@ def _run_queued_review(
                 stderr=None,
                 exit_code=completed.exit_code,
                 invocation_id=invocation_id,
-                conclusion='failed',
+                conclusion=AttemptConclusion.FAILED,
                 response_received_at=response_received_at,
                 validation_started_at=validation_started_at,
                 finished_at_value=process_finished_at,
@@ -2059,7 +2065,7 @@ def _resume_developer_request(
         store.update(run, expected_state=resume_expected_state)
     invocation_id = _record_invocation(
         run=run,
-        role='developer',
+        role=RuntimeRole.DEVELOPER,
         identity=developer_identity,
         iteration=run.iteration,
         sequence=sequence,
@@ -2092,7 +2098,7 @@ def _resume_developer_request(
                 on_started=partial(
                     _record_invocation,
                     run=run,
-                    role='developer',
+                    role=RuntimeRole.DEVELOPER,
                     identity=developer_identity,
                     iteration=run.iteration,
                     sequence=sequence,
@@ -2105,7 +2111,7 @@ def _resume_developer_request(
                     invocation_id=invocation_id,
                     finished=False,
                     attempt=attempt,
-                    status='running',
+                    status=AttemptStatus.RUNNING,
                 ),
             )
         )
@@ -2113,7 +2119,7 @@ def _resume_developer_request(
         effective_models, effective_model_status = _exception_runtime_metadata(error)
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=run.iteration,
             sequence=sequence,
@@ -2144,11 +2150,11 @@ def _resume_developer_request(
     except KeyboardInterrupt as error:
         effective_models, effective_model_status = _exception_runtime_metadata(error)
         if _attempt_activation_was_persisted(
-            run_directory, sequence, 'developer', attempt
+            run_directory, sequence, RuntimeRole.DEVELOPER, attempt
         ):
             _record_invocation(
                 run=run,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 identity=developer_identity,
                 iteration=run.iteration,
                 sequence=sequence,
@@ -2177,7 +2183,7 @@ def _resume_developer_request(
         effective_models, effective_model_status = _exception_runtime_metadata(error)
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=run.iteration,
             sequence=sequence,
@@ -2202,7 +2208,7 @@ def _resume_developer_request(
     if not completed.succeeded:
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=run.iteration,
             sequence=sequence,
@@ -2214,7 +2220,7 @@ def _resume_developer_request(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=attempt,
-            conclusion='failed',
+            conclusion=AttemptConclusion.FAILED,
             finished_at_value=process_finished_at,
             effective_models=completed.effective_models,
             effective_model_status=completed.effective_model_status,
@@ -2231,7 +2237,7 @@ def _resume_developer_request(
     validation_started_at = timestamp()
     _record_invocation(
         run=run,
-        role='developer',
+        role=RuntimeRole.DEVELOPER,
         identity=developer_identity,
         iteration=run.iteration,
         sequence=sequence,
@@ -2243,7 +2249,7 @@ def _resume_developer_request(
         exit_code=completed.exit_code,
         invocation_id=invocation_id,
         attempt=attempt,
-        status='running',
+        status=AttemptStatus.RUNNING,
         response_received_at=response_received_at,
         validation_started_at=validation_started_at,
         finished_at_value=process_finished_at,
@@ -2265,7 +2271,7 @@ def _resume_developer_request(
         )
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=run.iteration,
             sequence=sequence,
@@ -2277,7 +2283,7 @@ def _resume_developer_request(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=attempt,
-            conclusion='succeeded',
+            conclusion=AttemptConclusion.SUCCEEDED,
             response_received_at=response_received_at,
             validation_started_at=validation_started_at,
             finished_at_value=process_finished_at,
@@ -2304,7 +2310,7 @@ def _resume_developer_request(
     except WorkerError:
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=developer_identity,
             iteration=run.iteration,
             sequence=sequence,
@@ -2316,7 +2322,7 @@ def _resume_developer_request(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=attempt,
-            conclusion='failed',
+            conclusion=AttemptConclusion.FAILED,
             response_received_at=response_received_at,
             validation_started_at=validation_started_at,
             finished_at_value=process_finished_at,
@@ -2386,7 +2392,7 @@ def _prepare_recovered_validation(
     *,
     run_directory: Path,
     sequence: int,
-    role: Literal['developer', 'reviewer'],
+    role: Literal[RuntimeRole.DEVELOPER, RuntimeRole.REVIEWER],
     record: InvocationRecord,
     response_present: bool,
 ) -> InvocationRecord:
@@ -2418,7 +2424,7 @@ def _complete_recovered_validation(
     *,
     run_directory: Path,
     sequence: int,
-    role: Literal['developer', 'reviewer'],
+    role: Literal[RuntimeRole.DEVELOPER, RuntimeRole.REVIEWER],
     record: InvocationRecord,
     conclusion: AttemptConclusion,
 ) -> InvocationRecord:
@@ -2493,13 +2499,13 @@ def _resume_reviewer_validation(
         record = _prepare_recovered_validation(
             run_directory=run_directory,
             sequence=sequence,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             record=record,
             response_present=response_path.is_file(),
         )
     if record.conclusion not in {None, 'succeeded'}:
         _raise_recovered_conclusion(
-            store=store, run=run, role='reviewer', record=record
+            store=store, run=run, role=RuntimeRole.REVIEWER, record=record
         )
     artifact_path = Path(request['payload']['artifact_path'])
     try:
@@ -2518,7 +2524,7 @@ def _resume_reviewer_validation(
             _complete_recovered_validation(
                 run_directory=run_directory,
                 sequence=sequence,
-                role='reviewer',
+                role=RuntimeRole.REVIEWER,
                 record=record,
                 conclusion=AttemptConclusion.FAILED,
             )
@@ -2540,7 +2546,7 @@ def _resume_reviewer_validation(
     _complete_recovered_validation(
         run_directory=run_directory,
         sequence=sequence,
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         record=record,
         conclusion=AttemptConclusion.SUCCEEDED,
     )
@@ -2632,13 +2638,13 @@ def _resume_developer_validation(
         record = _prepare_recovered_validation(
             run_directory=run_directory,
             sequence=sequence,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             record=record,
             response_present=response_path.is_file(),
         )
     if record.conclusion not in {None, 'succeeded'}:
         _raise_recovered_conclusion(
-            store=store, run=run, role='developer', record=record
+            store=store, run=run, role=RuntimeRole.DEVELOPER, record=record
         )
     review_result_path = Path(request['payload']['review_result_path']).resolve()
     review_result = _read_object(review_result_path)
@@ -2671,7 +2677,7 @@ def _resume_developer_validation(
             _complete_recovered_validation(
                 run_directory=run_directory,
                 sequence=sequence,
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 record=record,
                 conclusion=AttemptConclusion.FAILED,
             )
@@ -2693,7 +2699,7 @@ def _resume_developer_validation(
     _complete_recovered_validation(
         run_directory=run_directory,
         sequence=sequence,
-        role='developer',
+        role=RuntimeRole.DEVELOPER,
         record=record,
         conclusion=AttemptConclusion.SUCCEEDED,
     )
@@ -3284,7 +3290,7 @@ def _execute_reviewer_dispatch(
     started_at = timestamp()
     invocation_id = _record_invocation(
         run=run,
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         reviewer_id=dispatch.reviewer_id,
         identity=dispatch.identity,
         iteration=reviewing.iteration,
@@ -3322,7 +3328,7 @@ def _execute_reviewer_dispatch(
                 on_started=partial(
                     _record_invocation,
                     run=run,
-                    role='reviewer',
+                    role=RuntimeRole.REVIEWER,
                     reviewer_id=dispatch.reviewer_id,
                     identity=dispatch.identity,
                     iteration=reviewing.iteration,
@@ -3336,7 +3342,7 @@ def _execute_reviewer_dispatch(
                     invocation_id=invocation_id,
                     finished=False,
                     attempt=attempt,
-                    status='running',
+                    status=AttemptStatus.RUNNING,
                 ),
             )
         )
@@ -3344,7 +3350,7 @@ def _execute_reviewer_dispatch(
         models, model_status = _exception_runtime_metadata(error)
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             reviewer_id=dispatch.reviewer_id,
             identity=dispatch.identity,
             iteration=reviewing.iteration,
@@ -3379,7 +3385,7 @@ def _execute_reviewer_dispatch(
     except OSError as error:
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             reviewer_id=dispatch.reviewer_id,
             identity=dispatch.identity,
             iteration=reviewing.iteration,
@@ -3392,7 +3398,7 @@ def _execute_reviewer_dispatch(
             exit_code=None,
             invocation_id=invocation_id,
             attempt=attempt,
-            conclusion='failed',
+            conclusion=AttemptConclusion.FAILED,
         )
         _archive_unaccepted_response(
             response_path,
@@ -3412,7 +3418,7 @@ def _execute_reviewer_dispatch(
     except BaseException as error:
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             reviewer_id=dispatch.reviewer_id,
             identity=dispatch.identity,
             iteration=reviewing.iteration,
@@ -3425,7 +3431,7 @@ def _execute_reviewer_dispatch(
             exit_code=None,
             invocation_id=invocation_id,
             attempt=attempt,
-            conclusion='failed',
+            conclusion=AttemptConclusion.FAILED,
         )
         _archive_unaccepted_response(
             response_path,
@@ -3444,7 +3450,7 @@ def _execute_reviewer_dispatch(
     if not completed.succeeded:
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             reviewer_id=dispatch.reviewer_id,
             identity=dispatch.identity,
             iteration=reviewing.iteration,
@@ -3457,7 +3463,7 @@ def _execute_reviewer_dispatch(
             exit_code=completed.exit_code,
             invocation_id=invocation_id,
             attempt=attempt,
-            conclusion='failed',
+            conclusion=AttemptConclusion.FAILED,
             finished_at_value=finished_at,
             effective_models=completed.effective_models,
             effective_model_status=completed.effective_model_status,
@@ -3505,7 +3511,7 @@ def _execute_reviewer_dispatch(
         )
     _record_invocation(
         run=run,
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         reviewer_id=dispatch.reviewer_id,
         identity=dispatch.identity,
         iteration=reviewing.iteration,
@@ -3518,7 +3524,7 @@ def _execute_reviewer_dispatch(
         exit_code=completed.exit_code,
         invocation_id=invocation_id,
         attempt=attempt,
-        conclusion='succeeded' if valid else 'failed',
+        conclusion=(AttemptConclusion.SUCCEEDED if valid else AttemptConclusion.FAILED),
         response_received_at=received_at,
         validation_started_at=validation_started_at if received_at else None,
         finished_at_value=finished_at,

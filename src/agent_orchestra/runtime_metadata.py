@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 from uuid import uuid4
+
+from agent_orchestra.invocations import EffectiveModelStatus
 
 RUNTIME_METADATA_ENV = 'AGENT_ORCHESTRA_RUNTIME_METADATA_PATH'
 
@@ -54,7 +56,11 @@ def write_runtime_metadata(models: tuple[str, ...]) -> None:
     document = {
         'schema_version': 1,
         'effective_models': list(dict.fromkeys(models)),
-        'status': 'reported' if models else 'unavailable',
+        'status': (
+            EffectiveModelStatus.REPORTED
+            if models
+            else EffectiveModelStatus.UNAVAILABLE
+        ).value,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
@@ -71,7 +77,7 @@ def write_runtime_metadata(models: tuple[str, ...]) -> None:
 
 def read_runtime_metadata(
     path: Path,
-) -> tuple[tuple[str, ...], Literal['reported', 'unavailable']]:
+) -> tuple[tuple[str, ...], EffectiveModelStatus]:
     """Read and remove one validated adapter metadata exchange file."""
 
     try:
@@ -94,9 +100,9 @@ def read_runtime_metadata(
         or not isinstance(models, list)
         or not all(isinstance(model, str) and model for model in models)
         or len(models) != len(set(models))
-        or status not in {'reported', 'unavailable'}
-        or (status == 'reported') != bool(models)
+        or status not in EffectiveModelStatus.values()
+        or (status == EffectiveModelStatus.REPORTED) != bool(models)
     ):
         message = 'invalid runtime metadata values'
         raise RuntimeMetadataError(message)
-    return tuple(models), cast('Literal["reported", "unavailable"]', status)
+    return tuple(models), EffectiveModelStatus(status)

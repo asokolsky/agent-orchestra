@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from agent_orchestra.invocations import InvocationEvidenceStore, InvocationIdentity
+from agent_orchestra.adapter.registry import RuntimeRole
+from agent_orchestra.invocations import (
+    AttemptStatus,
+    InvocationEvidenceStore,
+    InvocationIdentity,
+)
 from agent_orchestra.models import Run
 from agent_orchestra.worker import WorkerError, _record_invocation
 
@@ -26,7 +31,7 @@ def _complete_reviewer_invocation(
 
     invocation_id = _record_invocation(
         run=run,
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         identity=identity,
         iteration=1,
         sequence=1,
@@ -41,7 +46,7 @@ def _complete_reviewer_invocation(
     )
     _record_invocation(
         run=run,
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         identity=identity,
         iteration=1,
         sequence=1,
@@ -53,12 +58,12 @@ def _complete_reviewer_invocation(
         exit_code=None,
         invocation_id=invocation_id,
         finished=False,
-        status='running',
+        status=AttemptStatus.RUNNING,
         reviewer_id=reviewer_id,
     )
     _record_invocation(
         run=run,
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         identity=identity,
         iteration=1,
         sequence=1,
@@ -125,7 +130,7 @@ def test_record_invocation_rejects_reviewer_id_for_developer(tmp_path: Path) -> 
     with pytest.raises(WorkerError, match='only reviewer invocations'):
         _record_invocation(
             run=run,
-            role='developer',
+            role=RuntimeRole.DEVELOPER,
             identity=identity,
             iteration=1,
             sequence=1,
@@ -148,7 +153,7 @@ def test_record_invocation_normalizes_invalid_reviewer_id(tmp_path: Path) -> Non
     with pytest.raises(WorkerError, match="invalid reviewer ID: 'Security'"):
         _record_invocation(
             run=run,
-            role='reviewer',
+            role=RuntimeRole.REVIEWER,
             identity=identity,
             iteration=1,
             sequence=1,

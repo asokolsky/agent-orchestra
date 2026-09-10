@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Never, cast
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agent_orchestra.persisted_enum import PersistedEnum
+
 import pytest
 
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
+    EffectiveModelStatus,
     InvocationEvidenceError,
     InvocationEvidenceStore,
     InvocationRecord,
@@ -28,6 +32,12 @@ from agent_orchestra.invocations import (
 from agent_orchestra.models import RunState
 
 
+def _fail_test(message: str) -> Never:
+    """Fail closed with the invocation-evidence error, as production does."""
+
+    raise InvocationEvidenceError(message)
+
+
 def pending_attempt() -> InvocationRecord:
     """Return a valid pending schema-4 attempt record."""
 
@@ -36,11 +46,11 @@ def pending_attempt() -> InvocationRecord:
         run_id='run',
         task_id='run:000001-reviewer',
         invocation_id='run:000001-reviewer:attempt-0001',
-        role='reviewer',
+        role=RuntimeRole.REVIEWER,
         agent_vendor='openai',
         requested_model=None,
         effective_models=(),
-        effective_model_status='unavailable',
+        effective_model_status=EffectiveModelStatus.UNAVAILABLE,
         runtime='codex',
         iteration=1,
         started_at='2026-09-07T10:00:00Z',
@@ -51,7 +61,7 @@ def pending_attempt() -> InvocationRecord:
         stdout_path='/run/stdout.log',
         stderr_path='/run/stderr.log',
         attempt=1,
-        status='pending',
+        status=AttemptStatus.PENDING,
         conclusion=None,
     )
 
@@ -102,7 +112,7 @@ def test_schema_5_record_round_trip_preserves_reviewer_id(tmp_path: Path) -> Non
         validate_attempt_record(
             replace(
                 reviewer_attempt(),
-                role='developer',
+                role=RuntimeRole.DEVELOPER,
                 task_id='run:000001-developer',
             )
         )
@@ -181,15 +191,46 @@ def test_pending_rejects_terminal_outcomes_that_require_activation(
 
 
 @pytest.mark.parametrize(
+    'enum_type',
+    [AttemptStatus, AttemptConclusion, RuntimeRole, EffectiveModelStatus],
+)
+def test_persisted_enums_generate_their_own_value_set(
+    enum_type: type[PersistedEnum],
+) -> None:
+    """Keep every legal value generated from members rather than copied."""
+
+    assert enum_type.values() == {member.value for member in enum_type}
+    assert all(
+        enum_type.decode(value, fail=_fail_test) is not None
+        for value in enum_type.values()
+    )
+
+
+@pytest.mark.parametrize(
+    'enum_type',
+    [AttemptStatus, AttemptConclusion, RuntimeRole, EffectiveModelStatus],
+)
+def test_persisted_enums_fail_closed_on_an_unknown_value(
+    enum_type: type[PersistedEnum],
+) -> None:
+    """Reject a value this build does not know without raising ValueError."""
+
+    with pytest.raises(InvocationEvidenceError, match='invalid persisted'):
+        enum_type.decode('not_a_member', fail=_fail_test)
+
+
+@pytest.mark.parametrize(
     ('field', 'value', 'message'),
     [
-        ('conclusion', 'failed', 'invalid attempt status and conclusion'),
+        (
+            'conclusion',
+            AttemptConclusion.FAILED,
+            'invalid attempt status and conclusion',
+        ),
         ('response_received_at', '2026-09-07T09:59:59Z', 'pending attempt'),
         ('task_id', None, 'requires task_id'),
         ('task_id', 'other:000001-reviewer', 'does not match run and role'),
         ('invocation_id', 'random', 'does not match task and attempt'),
-        ('status', 'unknown', 'invalid attempt status'),
-        ('effective_model_status', 'unknown', 'invalid effective_model_status'),
         ('attempt', 0, 'must be positive'),
         ('exit_code', 1, 'pending attempt'),
     ],
@@ -205,19 +246,62 @@ def test_invalid_attempt_fields_fail_with_stable_diagnostics(
         )
 
 
-def test_unknown_attempt_conclusion_fails_with_stable_diagnostic() -> None:
-    """Reject a terminal outcome outside the schema-4 vocabulary."""
+def test_task_status_rejects_a_bare_string_status() -> None:
+    """Refuse to derive a status from a record validation would reject."""
 
-    running = transition_attempt(pending_attempt(), AttemptStatus.RUNNING)
-    invalid = replace(
-        running,
-        status='completed',
-        conclusion=cast('Any', 'unknown'),
-        finished_at='2026-09-07T10:00:01Z',
-    )
+    invalid = replace(pending_attempt(), **cast('Any', {'status': 'pending'}))
 
-    with pytest.raises(InvocationEvidenceError, match='invalid attempt conclusion'):
+    with pytest.raises(InvocationEvidenceError, match='valid lifecycle evidence'):
+        derive_task_status((invalid,))
+
+
+@pytest.mark.parametrize(
+    ('field', 'message'),
+    [
+        ('role', 'invalid attempt role'),
+        ('status', 'invalid attempt status'),
+        ('conclusion', 'invalid attempt conclusion'),
+        ('effective_model_status', 'invalid effective_model_status'),
+    ],
+)
+def test_in_memory_record_rejects_a_bare_string_for_an_enum_field(
+    tmp_path: Path, field: str, message: str
+) -> None:
+    """Reject an unenforced annotation: a str is not the enum it claims to be."""
+
+    invalid = replace(pending_attempt(), **cast('Any', {field: 'from_a_newer_build'}))
+
+    with pytest.raises(InvocationEvidenceError, match=message):
         validate_attempt_record(invalid)
+
+    with pytest.raises(InvocationEvidenceError, match=message):
+        _write_record_unindexed(
+            tmp_path / 'run/invocations/000001-reviewer.json', invalid
+        )
+
+
+@pytest.mark.parametrize(
+    'field', ['role', 'status', 'conclusion', 'effective_model_status']
+)
+def test_unknown_persisted_enum_value_fails_with_stable_diagnostic(
+    tmp_path: Path, field: str
+) -> None:
+    """Read each persisted enum field seeded with a value this build lacks."""
+
+    job_directory = tmp_path / 'run'
+    record = replace(
+        pending_attempt(),
+        stdout_path='logs/000001-reviewer.stdout.log',
+        stderr_path='logs/000001-reviewer.stderr.log',
+    )
+    path = job_directory / 'invocations/000001-reviewer.json'
+    _write_record_unindexed(path, record)
+    document = json.loads(path.read_text(encoding='utf-8'))
+    document[field] = 'from_a_newer_build'
+    path.write_text(json.dumps(document), encoding='utf-8')
+
+    with pytest.raises(InvocationEvidenceError, match='invalid persisted'):
+        InvocationEvidenceStore(job_directory).read_all('run')
 
 
 def test_succeeded_attempt_requires_zero_exit_code() -> None:
@@ -389,7 +473,7 @@ def test_validation_milestone_cannot_precede_response() -> None:
         )
 
 
-@pytest.mark.parametrize('role', ['developer', 'reviewer', 'issue_reviewer'])
+@pytest.mark.parametrize('role', list(RuntimeRole))
 @pytest.mark.parametrize(
     ('origin', 'conclusion', 'response', 'validation'),
     [
@@ -409,7 +493,7 @@ def test_validation_milestone_cannot_precede_response() -> None:
     ],
 )
 def test_all_terminal_transitions_for_both_roles(
-    role: str,
+    role: RuntimeRole,
     origin: AttemptStatus,
     conclusion: AttemptConclusion,
     response: str | None,
@@ -417,12 +501,12 @@ def test_all_terminal_transitions_for_both_roles(
 ) -> None:
     """Accept every documented terminal edge for all agent-role attempts."""
 
-    task_id = f'run:000001-{role}'
+    task_id = f'run:000001-{role.value}'
     record = replace(
         pending_attempt(),
         task_id=task_id,
         invocation_id=f'{task_id}:attempt-0001',
-        role=cast('Any', role),
+        role=role,
     )
     if origin is AttemptStatus.RUNNING:
         record = transition_attempt(record, AttemptStatus.RUNNING)

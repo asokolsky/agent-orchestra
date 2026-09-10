@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
     read_runtime_metadata,
@@ -71,7 +72,7 @@ class AgentResult:
     stderr: str | None
     exit_code: int
     effective_models: tuple[str, ...] = ()
-    effective_model_status: Literal['reported', 'unavailable'] = 'unavailable'
+    effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
 
 
 class AgentAdapter(Protocol):
@@ -90,15 +91,15 @@ class CommandAgentAdapter:
     @staticmethod
     def _consume_runtime_metadata(
         path: Path | None,
-    ) -> tuple[tuple[str, ...], Literal['reported', 'unavailable']]:
+    ) -> tuple[tuple[str, ...], EffectiveModelStatus]:
         """Read and remove runtime provenance, treating invalid data as unavailable."""
 
         if path is None:
-            return (), 'unavailable'
+            return (), EffectiveModelStatus.UNAVAILABLE
         try:
             return read_runtime_metadata(path)
         except OSError:
-            return (), 'unavailable'
+            return (), EffectiveModelStatus.UNAVAILABLE
         finally:
             with suppress(OSError):
                 path.unlink(missing_ok=True)
