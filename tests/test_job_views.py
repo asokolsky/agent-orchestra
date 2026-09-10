@@ -18,6 +18,7 @@ from agent_orchestra.agents import (
 )
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
+from agent_orchestra.execution_context import WorkerContext
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
@@ -31,7 +32,7 @@ from agent_orchestra.models import Run
 from agent_orchestra.reviewer_paths import reviewer_invocation_stem, reviewer_task_id
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import WorkerContext, run_queued_reviewer_set
+from agent_orchestra.worker import run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from pathlib import Path

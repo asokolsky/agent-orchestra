@@ -38,6 +38,9 @@ from agent_orchestra.evidence import (
     WorkerError,
     resolve_evidence_path,
 )
+from agent_orchestra.execution_context import (
+    WorkerContext,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import parse_manifest
 from agent_orchestra.models import Run, RunState
@@ -47,7 +50,6 @@ from agent_orchestra.runtime_metadata import (
 from agent_orchestra.skill_install import install_skills
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
-    WorkerContext,
     resume_review,
 )
 
