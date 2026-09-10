@@ -524,6 +524,15 @@ the configured reviewer order in separate `changes_requested_by`, `blocked_by`,
 and `incomplete_reviewers` lists so later persisted evidence can explain the
 decision without recomputing policy from logs.
 
+New batch evidence also copies every actionable member finding into an ordered
+aggregate `findings` list. Each entry retains its `reviewer_id` and original
+`source_finding_id`; its aggregate `finding_id` is namespaced as
+`{reviewer_id}:{source_finding_id}` so independent reviewers may use the same
+local identifier without colliding. Audit derives the same list from the
+correlated member results and rejects any aggregate that omits, alters, or
+reorders a finding. Older batch evidence without this additive field remains
+readable.
+
 A source-code job's worktree binding is durable and may outlive the directory
 it names. Read paths observe whether that path is absent or no longer a Git
 worktree without mutating state. Only the explicit cancellation command may

@@ -167,7 +167,10 @@ def write_review_batch(job: Run, job_directory: Path) -> dict[str, object]:
 
 
 def create_reviewed_batch_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    request_changes: bool = False,
 ) -> tuple[Path, Run, Path]:
     """Run one real reviewer set and return its persisted job state."""
 
@@ -209,6 +212,20 @@ def create_reviewed_batch_job(
                 'artifact_path': str(request.artifact_path),
             },
         }
+        if request_changes:
+            response['payload']['verdict'] = 'changes_requested'
+            response['payload']['summary'] = 'changes requested'
+            response['payload']['findings'] = [
+                {
+                    'finding_id': 'finding-1',
+                    'severity': 'medium',
+                    'title': 'Cross-cutting finding',
+                    'path': None,
+                    'line': None,
+                    'explanation': 'The finding spans multiple files.',
+                    'acceptance_criterion': 'Address the shared behavior.',
+                }
+            ]
         request.response_path.write_text(json.dumps(response), encoding='utf-8')
         return AgentResult(
             succeeded=True,
@@ -287,7 +304,7 @@ def test_four_views_use_public_vocabulary_and_current_array(
 
     assert main(arguments(database, 'jobs', None, root)) == 0
     jobs = json.loads(capsys.readouterr().out)
-    assert jobs['schema_version'] == 17
+    assert jobs['schema_version'] == 18
     assert jobs['jobs'][0]['job_id'] == str(job.id)
     assert 'id' not in jobs['jobs'][0]
 
@@ -411,6 +428,24 @@ def test_real_reviewer_batch_is_visible_from_all_batch_views(
     assert main(arguments(database, 'task', task_id, root)) == 0
     task_document = json.loads(capsys.readouterr().out)['task']
     assert task_document['review_batch'] == job_document['review_batches'][0]
+
+
+def test_batch_view_preserves_null_finding_locations(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep required nullable finding fields in the public batch contract."""
+
+    database, job, root = create_reviewed_batch_job(
+        tmp_path, monkeypatch, request_changes=True
+    )
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 0
+    batch = json.loads(capsys.readouterr().out)['job']['review_batches'][0]
+    finding = batch['findings'][0]
+    assert finding['path'] is None
+    assert finding['line'] is None
 
 
 def test_job_view_rejects_modified_real_reviewer_batch(
@@ -587,7 +622,7 @@ def test_views_treat_absent_issue_tables_as_empty(
 
     assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 17,
+        'schema_version': 18,
         'jobs': [],
         'error': None,
     }

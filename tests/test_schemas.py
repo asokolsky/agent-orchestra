@@ -16,6 +16,7 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
     ReviewerBatchResultSchema,
+    ReviewerBatchResultV2Schema,
     ReviewerExecutionPlanSchema,
     ReviewerSetExecutionRecordSchema,
     SchemaValidationError,
@@ -47,6 +48,35 @@ def _reviewer_batch_result() -> dict[str, Any]:
         'blocked_by': [],
         'incomplete_reviewers': [],
     }
+
+
+def test_reviewer_batch_finding_ids_are_reviewer_namespaced() -> None:
+    """Require aggregate findings to retain source and reviewer identity."""
+
+    document = _reviewer_batch_result()
+    document['schema_version'] = 2
+    document['verdict'] = 'changes_requested'
+    document['reviewers'][0]['outcome'] = 'changes_requested'
+    document['changes_requested_by'] = ['security']
+    document['findings'] = [
+        {
+            'finding_id': 'security:finding-1',
+            'source_finding_id': 'finding-1',
+            'reviewer_id': 'security',
+            'severity': 'high',
+            'title': 'Finding',
+            'path': 'src/example.py',
+            'line': 1,
+            'explanation': 'The behavior is incorrect.',
+            'acceptance_criterion': 'Correct the behavior.',
+        }
+    ]
+
+    ReviewerBatchResultV2Schema.model_validate(document)
+
+    document['findings'][0]['finding_id'] = 'finding-1'
+    with pytest.raises(ValueError, match='uncorrelated finding'):
+        ReviewerBatchResultV2Schema.model_validate(document)
 
 
 @pytest.mark.parametrize(

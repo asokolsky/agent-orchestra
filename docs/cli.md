@@ -53,7 +53,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "jobs": [],
   "error": null
 }
@@ -228,7 +228,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -252,7 +252,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `17`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `18`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -517,10 +517,14 @@ history. `task` derives the parent job from the globally unique task ID and
 returns every attempt, including contained stdout and stderr paths and content.
 A source reviewer task includes its iteration's aggregate decision as
 `review_batch` once that batch is complete.
+New reviewer batches include an aggregate `findings` array. Every finding keeps
+its reviewer identity and source identifier, while its public `finding_id` is
+namespaced as `{reviewer_id}:{source_finding_id}`. Batch evidence written by an
+earlier version remains readable and omits this field.
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -719,7 +723,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -728,7 +732,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `17`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `18`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -771,7 +775,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -835,7 +839,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -846,7 +850,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

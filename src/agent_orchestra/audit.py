@@ -44,12 +44,12 @@ from agent_orchestra.models import (
 )
 from agent_orchestra.schemas import (
     EXECUTION_RECORD_ADAPTER,
+    REVIEWER_BATCH_RESULT_ADAPTER,
     DeveloperHandoffMessageSchema,
     IssueReviewRequestSchema,
     IssueReviewResultSchema,
     IssueSourceSchema,
     RemediationRequestMessageSchema,
-    ReviewerBatchResultSchema,
     ReviewerExecutionPlanSchema,
     ReviewerSetExecutionRecordSchema,
     ReviewRequestMessageSchema,
@@ -436,7 +436,26 @@ def _validate_canonical_json(
         elif evidence_type == 'issue_review_result':
             schema = IssueReviewResultSchema
         elif evidence_type == 'review_batch_result':
-            schema = ReviewerBatchResultSchema
+            try:
+                path = resolve_evidence_path(
+                    root, str(job.id), *Path(str(entry['path'])).parts
+                )
+                raw = json.loads(path.read_text(encoding='utf-8'))
+                parsed_batch = REVIEWER_BATCH_RESULT_ADAPTER.validate_python(raw)
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                ValidationError,
+            ) as error:
+                findings.append(
+                    _finding('invalid_canonical_json', str(error), str(entry['path']))
+                )
+                continue
+            canonical_documents[str(entry['path'])] = parsed_batch.model_dump(
+                mode='json'
+            )
+            schema = type(parsed_batch)
         if schema is None:
             continue
         relative = str(entry['path'])
@@ -555,6 +574,36 @@ def _validate_canonical_json(
                         _finding(
                             'message_correlation_failure',
                             'review batch member result path is not canonical evidence',
+                            relative,
+                        )
+                    )
+            aggregate_findings = document.get('findings')
+            if aggregate_findings is not None:
+                expected_findings: list[dict[str, object]] = []
+                for reviewer in document['reviewers']:
+                    if reviewer['outcome'] != 'changes_requested':
+                        continue
+                    result = canonical_documents.get(str(reviewer['result_path']))
+                    payload = result.get('payload') if result is not None else None
+                    if not isinstance(payload, dict):
+                        continue
+                    for source_finding in payload.get('findings', []):
+                        source_finding_id = str(source_finding['finding_id'])
+                        expected_findings.append(
+                            {
+                                **source_finding,
+                                'finding_id': (
+                                    f'{reviewer["reviewer_id"]}:{source_finding_id}'
+                                ),
+                                'reviewer_id': reviewer['reviewer_id'],
+                                'source_finding_id': source_finding_id,
+                            }
+                        )
+                if aggregate_findings != expected_findings:
+                    findings.append(
+                        _finding(
+                            'message_correlation_failure',
+                            'review batch findings differ from member results',
                             relative,
                         )
                     )

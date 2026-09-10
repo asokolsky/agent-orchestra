@@ -203,11 +203,13 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             run_directory
             / f'invocations/000001-reviewer-{reviewer_id}.attempt-0001.json'
         ).is_file()
-    aggregate = json.loads(
-        (run_directory / 'review-batches/000001.json').read_text(encoding='utf-8')
+    aggregate_text = (run_directory / 'review-batches/000001.json').read_text(
+        encoding='utf-8'
     )
+    assert aggregate_text.startswith('{\n  "schema_version": 2,')
+    aggregate = json.loads(aggregate_text)
     assert aggregate == {
-        'schema_version': 1,
+        'schema_version': 2,
         'run_id': str(run.id),
         'iteration': 1,
         'reviewer_set_id': 'default',
@@ -225,6 +227,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         'changes_requested_by': [],
         'blocked_by': [],
         'incomplete_reviewers': [],
+        'findings': [],
     }
     audit = build_audit_document(
         result,
@@ -405,6 +408,103 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         item.get('code') == 'message_correlation_failure'
         and item.get('path') == 'review-batches/000001.json'
         for item in cast('list[dict[str, object]]', contradictory['findings'])
+    )
+
+
+def test_reviewer_set_persists_namespaced_aggregate_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep colliding member finding IDs distinct in canonical batch evidence."""
+
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+
+    def request_changes(
+        _adapter: CommandAgentAdapter, request: AgentRequest
+    ) -> AgentResult:
+        """Return the same source finding ID from each required reviewer."""
+
+        assert isinstance(request, ReviewerRequest)
+        if request.on_started is not None:
+            request.on_started()
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        request.artifact_path.write_text('# Review\n', encoding='utf-8')
+        request.response_path.write_text(
+            json.dumps(_changes_requested_response(document, request.artifact_path)),
+            encoding='utf-8',
+        )
+        return AgentResult(
+            succeeded=True,
+            summary='changes requested',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', request_changes)
+    result = run_queued_reviewer_set(
+        store=store,
+        run=run,
+        objective='Review the change.',
+        reviewer_plan=ReviewerExecutionPlan(
+            'default',
+            (
+                _reviewer('security', 'codex', 'openai'),
+                _reviewer('portability', 'claude-code', 'anthropic'),
+            ),
+        ),
+        developer_command=(),
+        runs_directory=tmp_path / 'runs',
+        developer_timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=lambda _path, _base: DIGEST,
+        developer_identity=InvocationIdentity(
+            vendor='openai', model=None, runtime='codex'
+        ),
+    )
+
+    assert result.state is RunState.CHANGES_REQUESTED
+    run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
+    aggregate = json.loads(
+        (run_directory / 'review-batches/000001.json').read_text(encoding='utf-8')
+    )
+    assert [finding['finding_id'] for finding in aggregate['findings']] == [
+        'security:finding-1',
+        'portability:finding-1',
+    ]
+    assert [finding['reviewer_id'] for finding in aggregate['findings']] == [
+        'security',
+        'portability',
+    ]
+    assert all(
+        finding['source_finding_id'] == 'finding-1' for finding in aggregate['findings']
+    )
+    audit = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert audit['result'] == 'verified', audit['findings']
+    aggregate['findings'][0]['title'] = 'Altered aggregate finding'
+    aggregate_path = run_directory / 'review-batches/000001.json'
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+    altered = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        finding.get('code') == 'message_correlation_failure'
+        and finding.get('message') == 'review batch findings differ from member results'
+        for finding in cast('list[dict[str, object]]', altered['findings'])
     )
 
 
