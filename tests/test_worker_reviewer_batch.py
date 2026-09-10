@@ -12,8 +12,7 @@ from uuid import uuid4
 import pytest
 
 from agent_orchestra import evidence as evidence_module
-from agent_orchestra import invocations
-from agent_orchestra import worker as worker_module
+from agent_orchestra import invocations, reviewer_batch_run
 from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY
 from agent_orchestra.agents import (
     AgentRequest,
@@ -28,9 +27,10 @@ from agent_orchestra.evidence import (
 from agent_orchestra.execution_context import WorkerContext
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
+from agent_orchestra.reviewer_batch_run import run_queued_reviewer_set
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import resume_review, run_queued_reviewer_set
+from agent_orchestra.worker import resume_review
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -158,7 +158,9 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             inspected_in_flight = True
         original_write_json_atomic(path, document, cast('Any', evidence_type))
 
-    monkeypatch.setattr(worker_module, 'write_json_atomic', inspect_before_aggregate)
+    monkeypatch.setattr(
+        reviewer_batch_run, 'write_json_atomic', inspect_before_aggregate
+    )
     plan = ReviewerExecutionPlan(
         'default',
         (
@@ -852,7 +854,7 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     assert interrupted.state is RunState.INTERRUPTED
     assert calls.count('portability') == 1
 
-    original_latest_attempt = worker_module._latest_reviewer_attempt
+    original_latest_attempt = reviewer_batch_run._latest_reviewer_attempt
 
     def missing_security_attempt(path: Path, sequence: int, reviewer_id: str) -> object:
         if reviewer_id == 'security':
@@ -860,7 +862,7 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
         return original_latest_attempt(path, sequence, reviewer_id)
 
     monkeypatch.setattr(
-        worker_module, '_latest_reviewer_attempt', missing_security_attempt
+        reviewer_batch_run, '_latest_reviewer_attempt', missing_security_attempt
     )
     with pytest.raises(
         WorkerError,
@@ -877,7 +879,7 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     assert caught.value.code == 'resume_activation_uncertain'
     assert store.get(run.id).state is RunState.INTERRUPTED
     monkeypatch.setattr(
-        worker_module, '_latest_reviewer_attempt', original_latest_attempt
+        reviewer_batch_run, '_latest_reviewer_attempt', original_latest_attempt
     )
 
     request_path = run_directory / 'messages/000001-security-review-request.json'
@@ -901,14 +903,16 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     request_path.write_text(json.dumps(request), encoding='utf-8')
     result_path.write_text(json.dumps(result_document), encoding='utf-8')
 
-    original_next_attempt = worker_module._next_reviewer_attempt
+    original_next_attempt = reviewer_batch_run._next_reviewer_attempt
     next_attempt_calls: list[str] = []
 
     def track_next_attempt(path: Path, sequence: int, reviewer_id: str) -> int:
         next_attempt_calls.append(reviewer_id)
         return original_next_attempt(path, sequence, reviewer_id)
 
-    monkeypatch.setattr(worker_module, '_next_reviewer_attempt', track_next_attempt)
+    monkeypatch.setattr(
+        reviewer_batch_run, '_next_reviewer_attempt', track_next_attempt
+    )
 
     resumed = resume_review(
         context=WorkerContext(
@@ -958,7 +962,7 @@ def test_reviewer_batch_sequence_comes_from_canonical_requests(tmp_path: Path) -
         )
 
     assert (
-        worker_module._reviewer_batch_sequence(
+        reviewer_batch_run._reviewer_batch_sequence(
             run_directory, run=run, reviewer_plan=plan
         )
         == 7
@@ -1061,9 +1065,9 @@ def test_unexpected_batch_exception_fails_terminally(
         raise OSError(message)
 
     if failure_point == 'preparation':
-        monkeypatch.setattr(worker_module, 'write_json_atomic', fail)
+        monkeypatch.setattr(reviewer_batch_run, 'write_json_atomic', fail)
     else:
-        monkeypatch.setattr(worker_module, '_execute_reviewer_dispatch', fail)
+        monkeypatch.setattr(reviewer_batch_run, '_execute_reviewer_dispatch', fail)
 
     with pytest.raises(OSError, match='injected evidence failure'):
         run_queued_reviewer_set(
