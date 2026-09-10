@@ -19,7 +19,11 @@ import pytest
 
 from agent_orchestra import cli, worker
 from agent_orchestra import evidence as evidence_module
-from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
+from agent_orchestra.adapter.registry import (
+    RuntimeDefinition,
+    RuntimeRegistry,
+    RuntimeRole,
+)
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
 from agent_orchestra.audit import _canonical_evidence_type
 from agent_orchestra.cli import (
@@ -33,6 +37,7 @@ from agent_orchestra.evidence import (
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import (
+    AttemptIdentity,
     InvocationEvidenceStore,
     InvocationIdentity,
     InvocationRecord,
@@ -2996,13 +3001,15 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
     monkeypatch.setattr(context.store, 'update', original_update)
     original_record = worker._record_invocation
 
-    def fail_developer_record(**kwargs: Any) -> str:
+    def fail_developer_record(
+        attempt: AttemptIdentity, *args: Any, **kwargs: Any
+    ) -> str:
         """Simulate a crash after activating development but before evidence."""
 
-        if kwargs['role'] == 'developer':
+        if attempt.role is RuntimeRole.DEVELOPER:
             message = 'simulated developer record failure'
             raise OSError(message)
-        return original_record(**kwargs)
+        return original_record(attempt, *args, **kwargs)
 
     monkeypatch.setattr(worker, '_record_invocation', fail_developer_record)
     with pytest.raises(OSError, match='simulated developer record failure'):
@@ -3335,13 +3342,15 @@ def test_concurrent_active_resumes_launch_one_process(
     write_developer(developer)
     original_record = worker._record_invocation
 
-    def crash_before_attempt(**kwargs: Any) -> str:
+    def crash_before_attempt(
+        attempt: AttemptIdentity, *args: Any, **kwargs: Any
+    ) -> str:
         """Leave the selected role active with a request but no attempt record."""
 
-        if kwargs['role'] == role:
+        if attempt.role == role:
             message = 'simulated crash before attempt persistence'
             raise OSError(message)
-        return original_record(**kwargs)
+        return original_record(attempt, *args, **kwargs)
 
     monkeypatch.setattr(worker, '_record_invocation', crash_before_attempt)
     with pytest.raises(OSError, match='simulated crash before attempt persistence'):

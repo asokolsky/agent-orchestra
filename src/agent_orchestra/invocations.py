@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Never, cast
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.evidence import (
@@ -23,11 +23,18 @@ from agent_orchestra.evidence import (
     JobEvidence,
     WorkerError,
     evidence_root_for_job,
+    invocation_stem,
     resolve_evidence_path,
 )
 from agent_orchestra.models import RunState
 from agent_orchestra.persisted_enum import PersistedEnum
-from agent_orchestra.reviewer_paths import validate_reviewer_id
+from agent_orchestra.reviewer_paths import (
+    ReviewerIdentityError,
+    reviewer_invocation_id,
+    reviewer_invocation_stem,
+    reviewer_task_id,
+    validate_reviewer_id,
+)
 
 INVOCATION_DIRECTORY_ESCAPE = 'invocation directory escapes the run directory'
 INVOCATION_RECORD_ESCAPE = 'invocation record escapes the run directory'
@@ -134,6 +141,150 @@ class InvocationRecord:
     response_received_at: str | None = None
     validation_started_at: str | None = None
     reviewer_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttemptIdentity:
+    """
+    Which agent ran, for which round of which job, and on which try.
+
+    These values travel together through every function that records attempt
+    evidence, and they alone determine the durable task ID, invocation ID,
+    evidence stem, and record schema. Keeping them as one value type puts those
+    four derivations beside the fields they derive from, instead of repeating
+    the branch at each caller.
+    """
+
+    run_id: str
+    role: RuntimeRole
+    agent: InvocationIdentity
+    iteration: int
+    sequence: int
+    attempt: int = 1
+    reviewer_id: str | None = None
+    invocation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject a reviewer identifier on a role that cannot own one."""
+
+        if self.reviewer_id is not None and self.role is not RuntimeRole.REVIEWER:
+            message = 'only reviewer invocations can have a reviewer ID'
+            raise WorkerError(message)
+
+    @property
+    def schema_version(self) -> int:
+        """Return the record schema this attempt's identity requires."""
+
+        return 5 if self.reviewer_id is not None else 4
+
+    @property
+    def task_id(self) -> str:
+        """Return the durable task this attempt belongs to."""
+
+        if self.reviewer_id is None:
+            return f'{self.run_id}:{self.sequence:06d}-{self.role}'
+        return self._reviewer_qualified(
+            reviewer_task_id, self.run_id, self.sequence, self.reviewer_id
+        )
+
+    @property
+    def durable_invocation_id(self) -> str:
+        """Return the supplied invocation ID or the one this identity implies."""
+
+        if self.invocation_id is not None:
+            return self.invocation_id
+        if self.reviewer_id is None:
+            return f'{self.task_id}:attempt-{self.attempt:04d}'
+        return self._reviewer_qualified(
+            reviewer_invocation_id,
+            self.run_id,
+            self.sequence,
+            self.reviewer_id,
+            self.attempt,
+        )
+
+    @property
+    def evidence_stem(self) -> str:
+        """Return the filename stem shared by this attempt's evidence."""
+
+        if self.reviewer_id is None:
+            return invocation_stem(self.sequence, self.role, self.attempt)
+        return self._reviewer_qualified(
+            reviewer_invocation_stem, self.sequence, self.reviewer_id, self.attempt
+        )
+
+    @staticmethod
+    def _reviewer_qualified(builder: Callable[..., str], *arguments: object) -> str:
+        """Build one reviewer-qualified identifier inside this error boundary."""
+
+        try:
+            return str(builder(*arguments))
+        except ReviewerIdentityError as error:
+            raise WorkerError(str(error)) from error
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProcessOutcome:
+    """What one agent process produced and how it ended."""
+
+    started_at: str
+    stdout: str | bytes | None
+    stderr: str | bytes | None
+    exit_code: int | None
+    timed_out: bool = False
+    interrupted: bool = False
+    finished: bool = True
+    finished_at: str | None = None
+    effective_models: tuple[str, ...] = ()
+    effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
+
+    @property
+    def derived_conclusion(self) -> AttemptConclusion:
+        """Return the terminal outcome this process result implies."""
+
+        if self.timed_out:
+            return AttemptConclusion.TIMED_OUT
+        if self.interrupted:
+            return AttemptConclusion.INTERRUPTED
+        if self.exit_code == 0:
+            return AttemptConclusion.SUCCEEDED
+        return AttemptConclusion.FAILED
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttemptLifecycle:
+    """One attempt's durable status, outcome, and response milestones."""
+
+    status: AttemptStatus | None = None
+    conclusion: AttemptConclusion | None = None
+    response_received_at: str | None = None
+    validation_started_at: str | None = None
+
+    def resolved(self, outcome: ProcessOutcome) -> ResolvedLifecycle:
+        """Fill the status and conclusion a finished process implies."""
+
+        status = self.status or (
+            AttemptStatus.COMPLETED if outcome.finished else AttemptStatus.PENDING
+        )
+        conclusion = self.conclusion
+        if status is AttemptStatus.COMPLETED and conclusion is None:
+            conclusion = outcome.derived_conclusion
+        return ResolvedLifecycle(
+            status=status,
+            conclusion=conclusion,
+            response_received_at=self.response_received_at,
+            validation_started_at=self.validation_started_at,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResolvedLifecycle:
+    """One attempt's lifecycle after the implied status and outcome are filled."""
+
+    status: AttemptStatus
+    conclusion: AttemptConclusion | None
+    response_received_at: str | None
+    validation_started_at: str | None
 
 
 def transition_attempt(
