@@ -632,6 +632,49 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     assert not (run_directory / 'review-batches/000001.json').exists()
 
+    premature_aggregate = run_directory / 'review-batches/000001.json'
+    premature_aggregate.parent.mkdir(parents=True, exist_ok=True)
+    premature_aggregate.write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'run_id': str(run.id),
+                'iteration': interrupted.iteration,
+                'reviewer_set_id': 'default',
+                'aggregation_policy': 'all_required',
+                'diff_digest': DIGEST,
+                'verdict': 'blocked',
+                'reviewers': [
+                    {
+                        'reviewer_id': reviewer_id,
+                        'outcome': 'incomplete',
+                        'result_path': None,
+                    }
+                    for reviewer_id in ('security', 'portability')
+                ],
+                'changes_requested_by': [],
+                'blocked_by': [],
+                'incomplete_reviewers': ['security', 'portability'],
+            }
+        ),
+        encoding='utf-8',
+    )
+    interrupted_audit = build_audit_document(
+        interrupted,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'review-batches/000001.json'
+        and item.get('message')
+        == 'interrupted reviewer-set iteration must not have an aggregate result'
+        for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+    )
+    premature_aggregate.unlink()
+
     active = replace(interrupted, state=RunState.REVIEWING)
     store.update(active, expected_state=RunState.INTERRUPTED)
     with pytest.raises(WorkerError, match='reviewer batch did not complete'):
@@ -690,6 +733,15 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     request_path.write_text(json.dumps(request), encoding='utf-8')
     result_path.write_text(json.dumps(result_document), encoding='utf-8')
 
+    original_next_attempt = worker_module._next_reviewer_attempt
+    next_attempt_calls: list[str] = []
+
+    def track_next_attempt(path: Path, sequence: int, reviewer_id: str) -> int:
+        next_attempt_calls.append(reviewer_id)
+        return original_next_attempt(path, sequence, reviewer_id)
+
+    monkeypatch.setattr(worker_module, '_next_reviewer_attempt', track_next_attempt)
+
     resumed = resume_review(
         store=store,
         run=interrupted,
@@ -700,6 +752,7 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     assert resumed.state is RunState.AWAITING_COMMIT_AUTHORIZATION
     assert calls.count('security') == 1
     assert calls.count('portability') == 2
+    assert next_attempt_calls == ['portability']
     assert (
         run_directory / 'invocations/000001-reviewer-portability.attempt-0002.json'
     ).is_file()
@@ -707,6 +760,39 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
         run_directory / 'invocations/000001-reviewer-security.attempt-0002.json'
     ).exists()
     assert (run_directory / 'review-batches/000001.json').is_file()
+
+
+def test_reviewer_batch_sequence_comes_from_canonical_requests(tmp_path: Path) -> None:
+    """Derive a later reviewer batch sequence from durable request paths."""
+
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    run_directory = worker_module._run_evidence_directory(
+        tmp_path / 'runs', str(run.id)
+    )
+    messages = run_directory / 'messages'
+    messages.mkdir(parents=True)
+    plan = ReviewerExecutionPlan(
+        'default',
+        (
+            _reviewer('security', 'codex', 'openai'),
+            _reviewer('portability', 'claude-code', 'anthropic'),
+        ),
+    )
+    for reviewer_id in ('security', 'portability'):
+        path = messages / f'000007-{reviewer_id}-review-request.json'
+        path.write_text(
+            json.dumps({'run_id': str(run.id), 'iteration': run.iteration}),
+            encoding='utf-8',
+        )
+
+    assert (
+        worker_module._reviewer_batch_sequence(
+            run_directory, run=run, reviewer_plan=plan
+        )
+        == 7
+    )
 
 
 @pytest.mark.parametrize('mode', ['timeout', 'nonzero', 'invalid', 'blocked'])

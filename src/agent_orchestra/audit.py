@@ -671,13 +671,21 @@ def _validate_canonical_json(
         findings.extend(
             _finding(
                 'message_correlation_failure',
-                'reviewer-set iteration requires exactly one aggregate result',
+                (
+                    'interrupted reviewer-set iteration must not have an aggregate result'
+                    if reviewing_outcomes[review_iteration] == str(RunState.INTERRUPTED)
+                    else 'reviewer-set iteration requires exactly one aggregate result'
+                ),
                 evidence_path('review_batch_result', ordinal=review_iteration),
             )
             for review_iteration in reviewing_digests
             if review_iteration in reviewing_outcomes
-            if reviewing_outcomes[review_iteration] != str(RunState.INTERRUPTED)
-            if aggregate_iterations.count(review_iteration) != 1
+            if aggregate_iterations.count(review_iteration)
+            != (
+                0
+                if reviewing_outcomes[review_iteration] == str(RunState.INTERRUPTED)
+                else 1
+            )
         )
     if isinstance(job, IssueJob):
         if issue_snapshot_digests:

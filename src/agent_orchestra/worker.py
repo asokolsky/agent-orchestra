@@ -1183,7 +1183,7 @@ def _next_reviewer_attempt(run_directory: Path, sequence: int, reviewer_id: str)
     latest = _latest_reviewer_attempt(run_directory, sequence, reviewer_id)
     if latest is None:
         return 1
-    if latest.status != AttemptStatus.COMPLETED.value:
+    if latest.status is not AttemptStatus.COMPLETED:
         message = 'cannot retry reviewer with uncertain active attempt'
         raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
     return latest.attempt + 1
@@ -1192,7 +1192,7 @@ def _next_reviewer_attempt(run_directory: Path, sequence: int, reviewer_id: str)
 def _require_completed_reviewer_attempt(record: InvocationRecord) -> None:
     """Reject active reviewer evidence whose activation remains uncertain."""
 
-    if record.status != AttemptStatus.COMPLETED.value:
+    if record.status is not AttemptStatus.COMPLETED:
         message = 'cannot recover reviewer with uncertain active attempt'
         raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
 
@@ -1205,8 +1205,8 @@ def _require_successful_reviewer_attempt(
     latest = _latest_reviewer_attempt(run_directory, sequence, reviewer_id)
     if (
         latest is None
-        or latest.status != AttemptStatus.COMPLETED.value
-        or latest.conclusion != AttemptConclusion.SUCCEEDED.value
+        or latest.status is not AttemptStatus.COMPLETED
+        or latest.conclusion is not AttemptConclusion.SUCCEEDED
     ):
         message = 'canonical reviewer result lacks a completed successful attempt'
         raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
@@ -3023,6 +3023,47 @@ def _reviewer_plan_from_execution(
     )
 
 
+def _reviewer_batch_sequence(
+    run_directory: Path,
+    *,
+    run: Run,
+    reviewer_plan: ReviewerExecutionPlan,
+) -> int:
+    """Return the current batch sequence from canonical reviewer requests."""
+
+    expected_ids = {reviewer.reviewer_id for reviewer in reviewer_plan.reviewers}
+    sequences: dict[str, int] = {}
+    message_directory = _run_evidence_path(run_directory, 'messages')
+    try:
+        entries = tuple(message_directory.iterdir())
+    except OSError as error:
+        message = 'reviewer-set request evidence is unreadable'
+        raise WorkerError(message) from error
+    for path in entries:
+        identity = canonical_message_evidence(
+            path.relative_to(run_directory).as_posix()
+        )
+        if identity is None or identity[0] != 'review_request':
+            continue
+        sequence = identity[1]
+        reviewer_id = _reviewer_id_from_message_path(
+            path, sequence=sequence, message_type='review_request'
+        )
+        if reviewer_id is None:
+            continue
+        request = _read_object(path)
+        if request.get('iteration') != run.iteration:
+            continue
+        if reviewer_id not in expected_ids or reviewer_id in sequences:
+            message = 'reviewer-set request evidence does not match its execution plan'
+            raise WorkerError(message)
+        sequences[reviewer_id] = sequence
+    if set(sequences) != expected_ids or len(set(sequences.values())) != 1:
+        message = 'reviewer-set request evidence has no single durable sequence'
+        raise WorkerError(message)
+    return next(iter(sequences.values()))
+
+
 def _completed_reviewer_result(
     run_directory: Path,
     dispatch: ReviewerDispatch,
@@ -3037,8 +3078,10 @@ def _completed_reviewer_result(
     result_path = _reviewer_dispatch_path(run_directory, dispatch.paths.result)
     if not result_path.is_file():
         return None
-    _require_successful_reviewer_attempt(run_directory, 1, dispatch.reviewer_id)
     request = _read_object(request_path)
+    _require_successful_reviewer_attempt(
+        run_directory, int(request['sequence']), dispatch.reviewer_id
+    )
     result = _read_object(result_path)
     artifact_path = _reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
     _validate_review_request(request, run_directory=run_directory)
@@ -3047,6 +3090,7 @@ def _completed_reviewer_result(
         run=run,
         objective=objective,
         current_digest=current_digest,
+        sequence=int(request['sequence']),
         dispatch=dispatch,
         artifact_path=artifact_path,
     )
@@ -3071,6 +3115,7 @@ def _validate_reviewer_set_request_scope(
     run: Run,
     objective: str,
     current_digest: str,
+    sequence: int,
     dispatch: ReviewerDispatch,
     artifact_path: Path,
 ) -> None:
@@ -3078,7 +3123,7 @@ def _validate_reviewer_set_request_scope(
 
     expected = {
         'run_id': str(run.id),
-        'sequence': 1,
+        'sequence': sequence,
         'iteration': run.iteration,
         'scope': {
             'worktree_path': str(run.worktree_path),
@@ -3123,16 +3168,20 @@ def _resume_reviewer_set(
         message = 'resume scope changed since the interrupted reviewer batch'
         raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
     reviewer_plan = _reviewer_plan_from_execution(execution, context.registry)
+    sequence = _reviewer_batch_sequence(
+        run_directory, run=run, reviewer_plan=reviewer_plan
+    )
     reviewing = replace(run, state=RunState.REVIEWING, updated_at=utc_now())
     base_dispatches = build_review_fanout(
         reviewer_plan,
         run_id=str(run.id),
-        sequence=1,
+        sequence=sequence,
         iteration=reviewing.iteration,
         attempt=1,
     )
     results_by_id: dict[str, ReviewerDispatchResult] = {}
     retry_requests: dict[str, dict[str, Any]] = {}
+    retry_attempts: dict[str, int] = {}
     retry_dispatches: list[ReviewerDispatch] = []
     activated = False
     try:
@@ -3160,11 +3209,12 @@ def _resume_reviewer_set(
                 run=run,
                 objective=execution.objective,
                 current_digest=current_digest,
+                sequence=sequence,
                 dispatch=base_dispatch,
                 artifact_path=artifact_path,
             )
             latest = _latest_reviewer_attempt(
-                run_directory, 1, base_dispatch.reviewer_id
+                run_directory, sequence, base_dispatch.reviewer_id
             )
             if active_review and latest is not None:
                 _require_completed_reviewer_attempt(latest)
@@ -3173,12 +3223,12 @@ def _resume_reviewer_set(
                 )
                 continue
             attempt = _next_reviewer_attempt(
-                run_directory, 1, base_dispatch.reviewer_id
+                run_directory, sequence, base_dispatch.reviewer_id
             )
             attempt_dispatches = build_review_fanout(
                 reviewer_plan,
                 run_id=str(run.id),
-                sequence=1,
+                sequence=sequence,
                 iteration=reviewing.iteration,
                 attempt=attempt,
             )
@@ -3189,11 +3239,10 @@ def _resume_reviewer_set(
             )
             retry_dispatches.append(retry_dispatch)
             retry_requests[retry_dispatch.reviewer_id] = request
+            retry_attempts[retry_dispatch.reviewer_id] = attempt
         if interrupted_review:
             context.store.update(reviewing, expected_state=RunState.INTERRUPTED)
-            activated = True
-        else:
-            activated = True
+        activated = True
         if retry_dispatches:
             with ThreadPoolExecutor(max_workers=len(retry_dispatches)) as executor:
                 retry_results = tuple(
@@ -3205,10 +3254,8 @@ def _resume_reviewer_set(
                             objective=execution.objective,
                             current_digest=current_digest,
                             dispatch=dispatch,
-                            sequence=1,
-                            attempt=_next_reviewer_attempt(
-                                run_directory, 1, dispatch.reviewer_id
-                            ),
+                            sequence=sequence,
+                            attempt=retry_attempts[dispatch.reviewer_id],
                             retry_request=retry_requests[dispatch.reviewer_id],
                         ),
                         retry_dispatches,
