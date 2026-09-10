@@ -33,3 +33,7 @@ pattern = "messages/\\d{6}-remediation-request\\.json"
 [evidence.developer_handoff]
 template = "messages/{ordinal:06d}-developer-handoff.json"
 pattern = "messages/\\d{6}-developer-handoff\\.json"
+
+[evidence.review_batch_result]
+template = "review-batches/{ordinal:06d}.json"
+pattern = "review-batches/\\d{6}\\.json"

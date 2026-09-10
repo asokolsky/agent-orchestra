@@ -41,11 +41,15 @@ from agent_orchestra.models import (
     RunState,
 )
 from agent_orchestra.schemas import (
+    EXECUTION_RECORD_ADAPTER,
     DeveloperHandoffMessageSchema,
     IssueReviewRequestSchema,
     IssueReviewResultSchema,
     IssueSourceSchema,
     RemediationRequestMessageSchema,
+    ReviewerBatchResultSchema,
+    ReviewerExecutionPlanSchema,
+    ReviewerSetExecutionRecordSchema,
     ReviewRequestMessageSchema,
     ReviewResultMessageSchema,
 )
@@ -385,12 +389,34 @@ def _validate_canonical_json(
 
     findings: list[AuditFinding] = []
     history: list[dict[str, object]] = []
+    entries = tuple(entries)
     issue_request_digests: dict[int, str] = {}
     issue_snapshot_digests: dict[int, str] = {}
     root_issue_digest: str | None = None
     reviewing_digests: dict[int, str | None] = {}
+    reviewing_outcomes: dict[int, str] = {}
+    indexed_paths = {str(entry['path']) for entry in entries}
+    canonical_documents: dict[str, dict[str, object]] = {}
+    reviewer_plan: ReviewerExecutionPlanSchema | None = None
+    aggregate_iterations: list[int] = []
+    if 'execution.json' in indexed_paths:
+        try:
+            execution_raw = json.loads(
+                resolve_evidence_path(root, str(job.id), 'execution.json').read_text(
+                    encoding='utf-8'
+                )
+            )
+            execution = EXECUTION_RECORD_ADAPTER.validate_python(execution_raw)
+            if isinstance(execution, ReviewerSetExecutionRecordSchema):
+                reviewer_plan = execution.reviewer_plan
+        except (OSError, ValueError, json.JSONDecodeError, ValidationError) as error:
+            findings.append(
+                _finding('invalid_canonical_json', str(error), 'execution.json')
+            )
     iteration = 0
     for transition in transitions:
+        if transition.from_state is RunState.REVIEWING and iteration > 0:
+            reviewing_outcomes[iteration] = str(transition.to_state)
         if str(transition.to_state) != 'reviewing':
             continue
         if transition.from_state is RunState.INTERRUPTED:
@@ -408,6 +434,8 @@ def _validate_canonical_json(
             schema = IssueReviewRequestSchema
         elif evidence_type == 'issue_review_result':
             schema = IssueReviewResultSchema
+        elif evidence_type == 'review_batch_result':
+            schema = ReviewerBatchResultSchema
         if schema is None:
             continue
         relative = str(entry['path'])
@@ -419,6 +447,7 @@ def _validate_canonical_json(
             findings.append(_finding('invalid_canonical_json', str(error), relative))
             continue
         document = parsed.model_dump(mode='json')
+        canonical_documents[relative] = document
         candidate_job_id = document.get('run_id', document.get('job_id'))
         if candidate_job_id is not None and candidate_job_id != str(job.id):
             findings.append(
@@ -444,12 +473,10 @@ def _validate_canonical_json(
                 scope['worktree_path'] != str(job.worktree_path)
                 or scope['base_sha'] != job.base_sha
                 or scope['head_sha'] != job.head_sha
+                or document['iteration'] not in reviewing_digests
                 or (
-                    document['iteration'] not in reviewing_digests
-                    or (
-                        expected_digest is not None
-                        and scope['diff_digest'] != expected_digest
-                    )
+                    expected_digest is not None
+                    and scope['diff_digest'] != expected_digest
                 )
             ):
                 findings.append(
@@ -464,6 +491,95 @@ def _validate_canonical_json(
                     _finding(
                         'iteration_mismatch',
                         'source message iteration exceeds the selected job',
+                        relative,
+                    )
+                )
+        elif evidence_type == 'review_batch_result' and isinstance(job, Run):
+            aggregate_iterations.append(document['iteration'])
+            if document['iteration'] != path_iteration:
+                findings.append(
+                    _finding(
+                        'iteration_mismatch',
+                        'review batch iteration differs from its path',
+                        relative,
+                    )
+                )
+            expected_digest = reviewing_digests.get(document['iteration'])
+            if expected_digest is None or document['diff_digest'] != expected_digest:
+                findings.append(
+                    _finding(
+                        'scope_digest_mismatch',
+                        'review batch result digest differs from its review transition',
+                        relative,
+                    )
+                )
+            for reviewer in document['reviewers']:
+                result_path = reviewer['result_path']
+                result = (
+                    canonical_documents.get(result_path)
+                    if result_path is not None
+                    else None
+                )
+                result_scope = result.get('scope') if result is not None else None
+                result_payload = result.get('payload') if result is not None else None
+                expected_suffix = f'-{reviewer["reviewer_id"]}-review-result.json'
+                matching_paths = [
+                    candidate_path
+                    for candidate_path, candidate in canonical_documents.items()
+                    if canonical_evidence_type(candidate_path) == 'review_result'
+                    and candidate_path.endswith(expected_suffix)
+                    and candidate.get('iteration') == document['iteration']
+                ]
+                correlated = (
+                    reviewer['outcome'] == 'incomplete'
+                    and result_path is None
+                    and not matching_paths
+                )
+                correlated = correlated or (
+                    result_path is not None
+                    and matching_paths == [result_path]
+                    and result_path in indexed_paths
+                    and canonical_evidence_type(result_path) == 'review_result'
+                    and result_path.endswith(expected_suffix)
+                    and result is not None
+                    and result.get('run_id') == document['run_id']
+                    and result.get('iteration') == document['iteration']
+                    and isinstance(result_scope, dict)
+                    and result_scope.get('diff_digest') == document['diff_digest']
+                    and isinstance(result_payload, dict)
+                    and result_payload.get('verdict') == reviewer['outcome']
+                )
+                if not correlated:
+                    findings.append(
+                        _finding(
+                            'message_correlation_failure',
+                            'review batch member result path is not canonical evidence',
+                            relative,
+                        )
+                    )
+            expected_state = {
+                'approved': 'approved',
+                'changes_requested': 'changes_requested',
+                'blocked': 'failed',
+            }[document['verdict']]
+            if reviewing_outcomes.get(document['iteration']) != expected_state:
+                findings.append(
+                    _finding(
+                        'message_correlation_failure',
+                        'review batch verdict differs from durable workflow state',
+                        relative,
+                    )
+                )
+            if reviewer_plan is None or (
+                document['reviewer_set_id'] != reviewer_plan.reviewer_set_id
+                or document['aggregation_policy'] != reviewer_plan.aggregation_policy
+                or [item['reviewer_id'] for item in document['reviewers']]
+                != [item.reviewer_id for item in reviewer_plan.reviewers]
+            ):
+                findings.append(
+                    _finding(
+                        'message_correlation_failure',
+                        'review batch members differ from the persisted reviewer plan',
                         relative,
                     )
                 )
@@ -550,6 +666,16 @@ def _validate_canonical_json(
                 'dispositions': (document.get('payload') or {}).get('dispositions', []),
                 'validation': (document.get('payload') or {}).get('validation', []),
             }
+        )
+    if isinstance(job, Run) and reviewer_plan is not None:
+        findings.extend(
+            _finding(
+                'message_correlation_failure',
+                'reviewer-set iteration requires exactly one aggregate result',
+                evidence_path('review_batch_result', ordinal=review_iteration),
+            )
+            for review_iteration in reviewing_digests
+            if aggregate_iterations.count(review_iteration) != 1
         )
     if isinstance(job, IssueJob):
         if issue_snapshot_digests:

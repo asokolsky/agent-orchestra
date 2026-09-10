@@ -59,6 +59,16 @@ def test_reviewer_qualified_messages_are_canonical_evidence() -> None:
     assert evidence_ordinal('review_result', result) == 4
 
 
+def test_review_batch_result_is_canonical_evidence() -> None:
+    """Render and recognize the canonical aggregate decision path."""
+
+    path = evidence_path('review_batch_result', ordinal=3)
+
+    assert path == 'review-batches/000003.json'
+    assert canonical_evidence_type(path) == 'review_batch_result'
+    assert evidence_ordinal('review_batch_result', path) == 3
+
+
 @pytest.fixture(autouse=True)
 def clear_manifest_cache() -> None:
     """Keep loader substitutions isolated while production callers reuse manifests."""

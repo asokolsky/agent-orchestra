@@ -65,6 +65,7 @@ from agent_orchestra.schemas import (
     ExecutionRecord,
     ExecutionRecordSchema,
     RemediationRequestMessageSchema,
+    ReviewerBatchResultSchema,
     ReviewerSetExecutionRecordSchema,
     ReviewRequestMessageSchema,
     ReviewResultMessageSchema,
@@ -398,7 +399,7 @@ def _archive_unaccepted_response(
 def _record_finalized_path(path: Path, evidence_type: EvidenceType) -> None:
     """Record one finalized worker artifact in its owning job index."""
 
-    structural = {'messages', 'artifacts', 'logs', 'invocations'}
+    structural = {'messages', 'artifacts', 'logs', 'invocations', 'review-batches'}
     job_directory = (
         path.parent.parent if path.parent.name in structural else path.parent
     )
@@ -410,7 +411,7 @@ def _finalize_temporary_path(
 ) -> None:
     """Publish one worker file through the recoverable evidence protocol."""
 
-    structural = {'messages', 'artifacts', 'logs', 'invocations'}
+    structural = {'messages', 'artifacts', 'logs', 'invocations', 'review-batches'}
     job_directory = (
         path.parent.parent if path.parent.name in structural else path.parent
     )
@@ -3406,7 +3407,7 @@ def _execute_reviewer_dispatch(
             'rejected_review_artifact',
         )
         return ReviewerDispatchResult(
-            ReviewerDecision(dispatch.reviewer_id, 'blocked'), None
+            ReviewerDecision(dispatch.reviewer_id, 'incomplete'), None
         )
     except BaseException as error:
         _record_invocation(
@@ -3474,7 +3475,7 @@ def _execute_reviewer_dispatch(
             'rejected_review_artifact',
         )
         return ReviewerDispatchResult(
-            ReviewerDecision(dispatch.reviewer_id, 'blocked'), None
+            ReviewerDecision(dispatch.reviewer_id, 'incomplete'), None
         )
 
     if artifact_path.is_file():
@@ -3526,7 +3527,9 @@ def _execute_reviewer_dispatch(
     )
     message_id = response.get('message_id')
     return ReviewerDispatchResult(
-        ReviewerDecision(dispatch.reviewer_id, cast('Any', verdict)),
+        ReviewerDecision(
+            dispatch.reviewer_id, cast('Any', verdict if valid else 'incomplete')
+        ),
         message_id if isinstance(message_id, str) else None,
     )
 
@@ -3639,6 +3642,42 @@ def _run_queued_reviewer_set(
         )
         _require_unique_batch_message_ids(results)
         decision = aggregate_review_batch(tuple(result.decision for result in results))
+        batch_result = ReviewerBatchResultSchema.model_validate(
+            {
+                'schema_version': 1,
+                'run_id': str(run.id),
+                'iteration': reviewing.iteration,
+                'reviewer_set_id': reviewer_plan.reviewer_set_id,
+                'aggregation_policy': 'all_required',
+                'diff_digest': current_digest,
+                'verdict': decision.verdict,
+                'reviewers': [
+                    {
+                        'reviewer_id': dispatch.reviewer_id,
+                        'outcome': result.decision.outcome,
+                        'result_path': (
+                            dispatch.paths.result
+                            if result.message_id is not None
+                            else None
+                        ),
+                    }
+                    for dispatch, result in zip(dispatches, results, strict=True)
+                ],
+                'changes_requested_by': list(decision.changes_requested_by),
+                'blocked_by': list(decision.blocked_by),
+                'incomplete_reviewers': list(decision.incomplete_reviewers),
+            }
+        )
+        _write_json_atomic(
+            _run_evidence_path(
+                run_directory,
+                *Path(
+                    evidence_path('review_batch_result', ordinal=reviewing.iteration)
+                ).parts,
+            ),
+            batch_result.model_dump(mode='json'),
+            'review_batch_result',
+        )
     except BaseException:
         failed = transition(reviewing, RunState.FAILED)
         store.update(failed, expected_state=RunState.REVIEWING)

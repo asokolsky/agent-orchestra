@@ -15,12 +15,57 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FIELDS,
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
+    ReviewerBatchResultSchema,
     ReviewerExecutionPlanSchema,
     ReviewerSetExecutionRecordSchema,
     SchemaValidationError,
     validate_developer_result,
     validate_review_result,
 )
+
+
+def _reviewer_batch_result() -> dict[str, Any]:
+    """Return one valid canonical aggregate reviewer decision."""
+
+    return {
+        'schema_version': 1,
+        'run_id': 'run-1',
+        'iteration': 1,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'diff_digest': 'sha256:' + 'a' * 64,
+        'verdict': 'approved',
+        'reviewers': [
+            {
+                'reviewer_id': reviewer_id,
+                'outcome': 'approved',
+                'result_path': f'messages/000002-{reviewer_id}-review-result.json',
+            }
+            for reviewer_id in ('security', 'portability')
+        ],
+        'changes_requested_by': [],
+        'blocked_by': [],
+        'incomplete_reviewers': [],
+    }
+
+
+@pytest.mark.parametrize(
+    ('outcome', 'result_path'),
+    [('approved', None), ('incomplete', 'messages/000002-security-review-result.json')],
+)
+def test_reviewer_batch_member_requires_result_for_completed_outcome(
+    outcome: str, result_path: str | None
+) -> None:
+    """Reject aggregate members whose outcome contradicts result presence."""
+
+    document = _reviewer_batch_result()
+    document['reviewers'][0]['outcome'] = outcome
+    document['reviewers'][0]['result_path'] = result_path
+    if outcome == 'incomplete':
+        document['verdict'] = 'blocked'
+        document['incomplete_reviewers'] = ['security']
+    with pytest.raises(ValueError, match='result path is inconsistent'):
+        ReviewerBatchResultSchema.model_validate(document)
 
 
 def reviewer_execution_plan() -> dict[str, Any]:
