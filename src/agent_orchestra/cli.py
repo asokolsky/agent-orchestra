@@ -29,7 +29,7 @@ from agent_orchestra.attempt_documents import (
     CLI_ATTEMPT_TAIL_FIELDS,
     project_attempt,
 )
-from agent_orchestra.audit import build_audit_document
+from agent_orchestra.audit import build_audit_document, is_known_temporary
 from agent_orchestra.evidence import (
     EvidencePathError,
     WorkerError,
@@ -51,6 +51,7 @@ from agent_orchestra.issue_review import (
 from agent_orchestra.issue_sources import IssueSourceError, fetch_issue, write_snapshot
 from agent_orchestra.manifests import (
     ManifestError,
+    canonical_evidence_type,
     evidence_path,
     validate_packaged_manifests,
 )
@@ -863,10 +864,22 @@ def _review_batch_documents(
     try:
         entries = sorted(batch_directory.iterdir())
         for path in entries:
+            relative = path.relative_to(job_directory).as_posix()
             if path.is_symlink() or not path.is_file():
                 message = 'review batch evidence path is unsafe'
                 raise InvocationEvidenceError(message)
-            relative = path.relative_to(job_directory).as_posix()
+            temporary_parts = path.name.removeprefix('.').rsplit('.', 2)
+            temporary_target = (
+                (Path(relative).parent / temporary_parts[0]).as_posix()
+                if len(temporary_parts) == 3 and temporary_parts[2] == 'tmp'
+                else None
+            )
+            if (
+                is_known_temporary(relative)
+                and temporary_target is not None
+                and canonical_evidence_type(temporary_target) == 'review_batch_result'
+            ):
+                continue
             expected = evidence_path('review_batch_result', ordinal=len(documents) + 1)
             if relative != expected:
                 raise InvocationEvidenceError(

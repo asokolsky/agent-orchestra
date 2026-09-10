@@ -58,7 +58,7 @@ def test_reviewer_writer_paths_are_recognized(reviewer_id: str, attempt: int) ->
         sequence=7, iteration=3, reviewer_id=reviewer_id, attempt=attempt
     )
 
-    assert audit_module._is_known_temporary(paths.temporary_result)
+    assert audit_module.is_known_temporary(paths.temporary_result)
     assert manifest_module.canonical_evidence_type(paths.request) == 'review_request'
     assert manifest_module.canonical_evidence_type(paths.result) == 'review_result'
 

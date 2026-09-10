@@ -892,7 +892,7 @@ def _inventory_unindexed(
                 continue
             if relative in indexed_paths or relative in in_progress_paths:
                 continue
-            temporary = _is_known_temporary(relative)
+            temporary = is_known_temporary(relative)
             status = (
                 'in_progress'
                 if temporary and index_usable
@@ -912,7 +912,11 @@ def _inventory_unindexed(
                     'status': status,
                 }
             )
-            if evidence_type is None and manifest_owns_evidence_namespace(relative):
+            if (
+                not temporary
+                and evidence_type is None
+                and manifest_owns_evidence_namespace(relative)
+            ):
                 findings.append(
                     _finding(
                         'unknown_canonical_evidence',
@@ -971,7 +975,7 @@ def _canonical_evidence_type(relative: str) -> str | None:
     return canonical_evidence_type(relative)
 
 
-def _is_known_temporary(relative: str) -> bool:
+def is_known_temporary(relative: str) -> bool:
     """Return whether a path matches a temporary file emitted by current writers."""
 
     name = Path(relative).name
