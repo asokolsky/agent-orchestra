@@ -209,10 +209,14 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
     aggregate_text = (run_directory / 'review-batches/000001.json').read_text(
         encoding='utf-8'
     )
-    assert aggregate_text.startswith('{\n  "schema_version": 2,')
+    assert aggregate_text.startswith('{\n  "schema_version": 3,')
     aggregate = json.loads(aggregate_text)
+    message_id = aggregate.pop('message_id')
+    artifact_path = aggregate.pop('artifact_path')
+    assert isinstance(message_id, str)
+    assert artifact_path == 'artifacts/review-batch-0001.md'
     assert aggregate == {
-        'schema_version': 2,
+        'schema_version': 3,
         'run_id': str(run.id),
         'iteration': 1,
         'reviewer_set_id': 'default',
@@ -232,6 +236,13 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         'incomplete_reviewers': [],
         'findings': [],
     }
+    aggregate['message_id'] = message_id
+    aggregate['artifact_path'] = artifact_path
+    assert (
+        (run_directory / 'artifacts/review-batch-0001.md')
+        .read_text(encoding='utf-8')
+        .startswith(f'# Review batch: run {run.id}\n')
+    )
     audit = build_audit_document(
         result,
         store.list_transitions(str(run.id)),
@@ -257,8 +268,43 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         & finding_codes
     )
 
+    aggregate['artifact_path'] = 'artifacts/unrelated.md'
+    aggregate_path = run_directory / 'review-batches/000001.json'
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+    mismatched_artifact = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('message')
+        == 'review batch artifact path is not canonical evidence'
+        for item in cast('list[dict[str, object]]', mismatched_artifact['findings'])
+    )
+    aggregate['artifact_path'] = artifact_path
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+
     security_result_path = run_directory / 'messages/000002-security-review-result.json'
     security_result = json.loads(security_result_path.read_text(encoding='utf-8'))
+    aggregate['message_id'] = security_result['message_id']
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+    duplicate_identity = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('message') == 'canonical evidence contains a duplicate message ID'
+        for item in cast('list[dict[str, object]]', duplicate_identity['findings'])
+    )
+    aggregate['message_id'] = message_id
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
     mutations: tuple[Callable[[dict[str, Any]], None], ...] = (
         lambda item: item.update(run_id='another-run'),
         lambda item: item.update(iteration=2),

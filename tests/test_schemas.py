@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -16,6 +17,7 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
     ReviewerBatchResultSchema,
+    ReviewerBatchResultSchemaV3,
     ReviewerBatchResultV2Schema,
     ReviewerExecutionPlanSchema,
     ReviewerSetExecutionRecordSchema,
@@ -77,6 +79,24 @@ def test_reviewer_batch_finding_ids_are_reviewer_namespaced() -> None:
     document['findings'][0]['finding_id'] = 'finding-1'
     with pytest.raises(ValueError, match='uncorrelated finding'):
         ReviewerBatchResultV2Schema.model_validate(document)
+
+
+def test_reviewer_batch_v3_is_addressable_for_remediation() -> None:
+    """Require aggregate machine and human evidence correlation fields."""
+
+    document = _reviewer_batch_result()
+    document.update(
+        schema_version=3,
+        message_id=str(uuid4()),
+        artifact_path='artifacts/review-batch-0001.md',
+        findings=[],
+    )
+
+    ReviewerBatchResultSchemaV3.model_validate(document)
+
+    document['message_id'] = 'not-a-uuid'
+    with pytest.raises(ValueError, match='UUID'):
+        ReviewerBatchResultSchemaV3.model_validate(document)
 
 
 @pytest.mark.parametrize(

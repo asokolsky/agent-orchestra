@@ -192,7 +192,7 @@ class ReviewerBatchFindingSchema(ReviewFindingSchema):
 class ReviewerBatchResultBaseSchema(StrictSchema):
     """Fields shared by versioned aggregate reviewer-batch decisions."""
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     run_id: str
     iteration: int = Field(gt=0)
     reviewer_set_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
@@ -249,14 +249,14 @@ class ReviewerBatchResultSchema(ReviewerBatchResultBaseSchema):
     schema_version: Literal[1]
 
 
-class ReviewerBatchResultV2Schema(ReviewerBatchResultBaseSchema):
-    """Schema-2 aggregate decision with reviewer-qualified findings."""
+class ReviewerBatchResultWithFindingsSchema(ReviewerBatchResultBaseSchema):
+    """Shared validation for aggregate decisions with reviewer findings."""
 
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     findings: list[ReviewerBatchFindingSchema]
 
     @model_validator(mode='after')
-    def validate_findings(self) -> ReviewerBatchResultV2Schema:
+    def validate_findings(self) -> ReviewerBatchResultWithFindingsSchema:
         """Require unique findings owned by reviewers that requested changes."""
 
         finding_ids = [finding.finding_id for finding in self.findings]
@@ -274,8 +274,32 @@ class ReviewerBatchResultV2Schema(ReviewerBatchResultBaseSchema):
         return self
 
 
+class ReviewerBatchResultV2Schema(ReviewerBatchResultWithFindingsSchema):
+    """Schema-2 aggregate decision with reviewer-qualified findings."""
+
+    schema_version: Literal[2]
+
+
+class ReviewerBatchResultSchemaV3(ReviewerBatchResultWithFindingsSchema):
+    """Schema-3 aggregate decision addressable by developer remediation."""
+
+    schema_version: Literal[3]
+    message_id: str
+    artifact_path: str
+
+    @field_validator('message_id')
+    @classmethod
+    def validate_message_id(cls, value: str) -> str:
+        """Require the aggregate correlation identity to be a UUID."""
+
+        UUID(value)
+        return value
+
+
 ReviewerBatchResult = Annotated[
-    ReviewerBatchResultSchema | ReviewerBatchResultV2Schema,
+    ReviewerBatchResultSchema
+    | ReviewerBatchResultV2Schema
+    | ReviewerBatchResultSchemaV3,
     Field(discriminator='schema_version'),
 ]
 REVIEWER_BATCH_RESULT_ADAPTER: TypeAdapter[ReviewerBatchResult] = TypeAdapter(

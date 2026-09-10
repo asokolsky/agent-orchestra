@@ -43,6 +43,7 @@ from agent_orchestra.evidence import (
     run_evidence_path,
     worktree_digest,
     write_json_atomic,
+    write_text_atomic,
 )
 from agent_orchestra.execution_context import (
     EMPTY_OBJECTIVE,
@@ -96,6 +97,7 @@ from agent_orchestra.messages import (
 )
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.queued_review import _run_queued_review
+from agent_orchestra.reports import render_reviewer_batch
 from agent_orchestra.review_batch import (
     ReviewerDecision,
     ReviewerDispatchResult,
@@ -119,7 +121,7 @@ from agent_orchestra.schemas import (
     DeveloperHandoffMessageSchema,
     ExecutionRecord,
     ExecutionRecordSchema,
-    ReviewerBatchResultV2Schema,
+    ReviewerBatchResultSchemaV3,
     ReviewerSetExecutionRecordSchema,
 )
 from agent_orchestra.workflow import transition
@@ -2089,9 +2091,13 @@ def _finish_reviewer_batch(
                     'source_finding_id': source_finding_id,
                 }
             )
-    batch_result = ReviewerBatchResultV2Schema.model_validate(
+    artifact_path = run_evidence_path(
+        run_directory, 'artifacts', f'review-batch-{reviewing.iteration:04d}.md'
+    )
+    batch_result = ReviewerBatchResultSchemaV3.model_validate(
         {
-            'schema_version': 2,
+            'schema_version': 3,
+            'message_id': str(uuid4()),
             'run_id': str(run.id),
             'iteration': reviewing.iteration,
             'reviewer_set_id': reviewer_plan.reviewer_set_id,
@@ -2110,7 +2116,13 @@ def _finish_reviewer_batch(
             'blocked_by': list(decision.blocked_by),
             'incomplete_reviewers': [],
             'findings': aggregate_findings,
+            'artifact_path': artifact_path.relative_to(run_directory).as_posix(),
         }
+    )
+    write_text_atomic(
+        artifact_path,
+        render_reviewer_batch(batch_result),
+        evidence_type='review_artifact',
     )
     write_json_atomic(
         run_evidence_path(

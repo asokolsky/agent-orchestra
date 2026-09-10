@@ -101,7 +101,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 18
+CLI_SCHEMA_VERSION = 19
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -914,10 +914,16 @@ def _review_batch_documents(
             verify=True,
         )
         findings = cast('list[dict[str, object]]', audit['findings'])
+        aggregate_artifact_paths = {
+            str(document['artifact_path'])
+            for document in documents
+            if document.get('schema_version') == 3
+        }
         correlation_findings = [
             finding
             for finding in findings
             if str(finding.get('path', '')).startswith('review-batches/')
+            or finding.get('path') in aggregate_artifact_paths
         ]
         if correlation_findings:
             first = correlation_findings[0]
