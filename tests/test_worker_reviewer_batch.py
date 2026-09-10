@@ -203,9 +203,11 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             run_directory
             / f'invocations/000001-reviewer-{reviewer_id}.attempt-0001.json'
         ).is_file()
-    aggregate = json.loads(
-        (run_directory / 'review-batches/000001.json').read_text(encoding='utf-8')
+    aggregate_text = (run_directory / 'review-batches/000001.json').read_text(
+        encoding='utf-8'
     )
+    assert aggregate_text.startswith('{\n  "schema_version": 2,')
+    aggregate = json.loads(aggregate_text)
     assert aggregate == {
         'schema_version': 2,
         'run_id': str(run.id),

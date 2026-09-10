@@ -192,6 +192,7 @@ class ReviewerBatchFindingSchema(ReviewFindingSchema):
 class ReviewerBatchResultBaseSchema(StrictSchema):
     """Fields shared by versioned aggregate reviewer-batch decisions."""
 
+    schema_version: Literal[1, 2]
     run_id: str
     iteration: int = Field(gt=0)
     reviewer_set_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)

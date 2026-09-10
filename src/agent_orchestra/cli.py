@@ -892,9 +892,7 @@ def _review_batch_documents(
                 raise InvocationEvidenceError(
                     f'review batch evidence does not match job: {relative}'
                 )
-            document = parsed.model_dump(
-                mode='json', exclude={'run_id'}, exclude_none=True
-            )
+            document = parsed.model_dump(mode='json', exclude={'run_id'})
             document['job_id'] = parsed.run_id
             document['path'] = relative
             documents.append(document)
