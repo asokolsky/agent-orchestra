@@ -43,6 +43,7 @@ EvidenceType = Literal[
     'rejected_review_result',
     'remediation_request',
     'review_artifact',
+    'review_batch_result',
     'review_request',
     'review_result',
 ]
@@ -64,6 +65,7 @@ EVIDENCE_TYPES: frozenset[str] = frozenset(
         'rejected_review_result',
         'remediation_request',
         'review_artifact',
+        'review_batch_result',
         'review_request',
         'review_result',
     }

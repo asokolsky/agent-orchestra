@@ -941,8 +941,11 @@ boundary. New reviewer-set runs may select and persist the plan with
 Every required member executes concurrently with reviewer-qualified evidence;
 the worker waits for the complete batch and applies the deterministic
 all-required decision before changing workflow state. This initial execution
-boundary does not launch developer remediation after a rejected batch and does
-not yet persist a separate aggregate-result document. A timed-out, failed,
+boundary does not launch developer remediation after a rejected batch. It
+persists `review-batches/{iteration:06d}.json` before changing workflow state;
+the strict document binds the reviewer set and policy, immutable diff digest,
+ordered member outcomes and canonical result paths, aggregate verdict, and its
+ordered rationale groups. A timed-out, failed,
 blocked, invalid, or mutation-invalidated batch transitions to terminal
 `failed`; no reviewer-set job is left in a state whose unsupported `resume`
 operation would be required for progress.

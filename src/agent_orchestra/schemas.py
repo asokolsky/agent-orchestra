@@ -164,6 +164,78 @@ class ReviewResultSchema(StrictSchema):
         return self
 
 
+class ReviewerBatchMemberResultSchema(StrictSchema):
+    """Bind one required reviewer outcome to its canonical result when present."""
+
+    reviewer_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
+    outcome: Literal['approved', 'changes_requested', 'blocked', 'incomplete']
+    result_path: str | None
+
+    @model_validator(mode='after')
+    def validate_result_presence(self) -> ReviewerBatchMemberResultSchema:
+        """Bind completed outcomes to evidence and incomplete outcomes to its absence."""
+
+        completed = self.outcome != 'incomplete'
+        if completed != (self.result_path is not None):
+            message = 'review batch member result path is inconsistent with outcome'
+            raise ValueError(message)
+        return self
+
+
+class ReviewerBatchResultSchema(StrictSchema):
+    """Canonical aggregate decision for one immutable reviewer batch."""
+
+    schema_version: Literal[1]
+    run_id: str
+    iteration: int = Field(gt=0)
+    reviewer_set_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
+    aggregation_policy: Literal['all_required']
+    diff_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    verdict: Literal['approved', 'changes_requested', 'blocked']
+    reviewers: list[ReviewerBatchMemberResultSchema] = Field(min_length=2)
+    changes_requested_by: list[str]
+    blocked_by: list[str]
+    incomplete_reviewers: list[str]
+
+    @model_validator(mode='after')
+    def validate_rationale(self) -> ReviewerBatchResultSchema:
+        """Require ordered unique members and rationale derived from their outcomes."""
+
+        reviewer_ids = [reviewer.reviewer_id for reviewer in self.reviewers]
+        if len(reviewer_ids) != len(set(reviewer_ids)):
+            message = 'review batch result contains duplicate reviewer IDs'
+            raise ValueError(message)
+        expected = {
+            'changes_requested_by': [
+                item.reviewer_id
+                for item in self.reviewers
+                if item.outcome == 'changes_requested'
+            ],
+            'blocked_by': [
+                item.reviewer_id for item in self.reviewers if item.outcome == 'blocked'
+            ],
+            'incomplete_reviewers': [
+                item.reviewer_id
+                for item in self.reviewers
+                if item.outcome == 'incomplete'
+            ],
+        }
+        for field, value in expected.items():
+            if getattr(self, field) != value:
+                raise ValueError(f'review batch result has inconsistent {field}')
+        expected_verdict = (
+            'blocked'
+            if expected['blocked_by'] or expected['incomplete_reviewers']
+            else 'changes_requested'
+            if expected['changes_requested_by']
+            else 'approved'
+        )
+        if self.verdict != expected_verdict:
+            message = 'review batch result has inconsistent verdict'
+            raise ValueError(message)
+        return self
+
+
 class IssueReviewFindingSchema(StrictSchema):
     """One actionable finding about issue prose or metadata."""
 

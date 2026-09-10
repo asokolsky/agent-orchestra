@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from threading import Barrier
 from typing import TYPE_CHECKING, Any, Never, cast
 from uuid import uuid4
@@ -26,6 +27,7 @@ from agent_orchestra.store import RunStore
 from agent_orchestra.worker import WorkerError, run_queued_reviewer_set
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 DIGEST = f'sha256:{"a" * 64}'
@@ -123,6 +125,34 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         )
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', approve)
+    original_write_json_atomic = worker_module._write_json_atomic
+    inspected_in_flight = False
+
+    def inspect_before_aggregate(
+        path: Path, document: dict[str, Any], evidence_type: str
+    ) -> None:
+        """Confirm an active reviewer batch does not require its future aggregate."""
+
+        nonlocal inspected_in_flight
+        if evidence_type == 'review_batch_result':
+            in_flight = store.get(run.id)
+            assert in_flight.state is RunState.REVIEWING
+            audit = build_audit_document(
+                in_flight,
+                store.list_transitions(str(run.id)),
+                (),
+                tmp_path / 'runs',
+                verify=True,
+            )
+            assert not any(
+                item.get('code') == 'message_correlation_failure'
+                and item.get('path') == 'review-batches/000001.json'
+                for item in cast('list[dict[str, object]]', audit['findings'])
+            )
+            inspected_in_flight = True
+        original_write_json_atomic(path, document, cast('Any', evidence_type))
+
+    monkeypatch.setattr(worker_module, '_write_json_atomic', inspect_before_aggregate)
     plan = ReviewerExecutionPlan(
         'default',
         (
@@ -148,6 +178,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
     )
 
     assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    assert inspected_in_flight
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     assert (
         json.loads((run_directory / 'execution.json').read_text(encoding='utf-8'))[
@@ -167,6 +198,29 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             run_directory
             / f'invocations/000001-reviewer-{reviewer_id}.attempt-0001.json'
         ).is_file()
+    aggregate = json.loads(
+        (run_directory / 'review-batches/000001.json').read_text(encoding='utf-8')
+    )
+    assert aggregate == {
+        'schema_version': 1,
+        'run_id': str(run.id),
+        'iteration': 1,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'diff_digest': DIGEST,
+        'verdict': 'approved',
+        'reviewers': [
+            {
+                'reviewer_id': reviewer_id,
+                'outcome': 'approved',
+                'result_path': f'messages/000002-{reviewer_id}-review-result.json',
+            }
+            for reviewer_id in ('security', 'portability')
+        ],
+        'changes_requested_by': [],
+        'blocked_by': [],
+        'incomplete_reviewers': [],
+    }
     audit = build_audit_document(
         result,
         store.list_transitions(str(run.id)),
@@ -174,7 +228,11 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         tmp_path / 'runs',
         verify=True,
     )
-    assert audit['result'] == 'verified'
+    assert audit['result'] == 'verified', audit['findings']
+    assert any(
+        item['evidence_type'] == 'review_batch_result' and item['verdict'] == 'approved'
+        for item in cast('list[dict[str, object]]', audit['history'])
+    )
     finding_codes = {
         str(finding.get('code'))
         for finding in cast('list[dict[str, object]]', audit['findings'])
@@ -186,6 +244,162 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             'evidence_type_mismatch',
         }
         & finding_codes
+    )
+
+    security_result_path = run_directory / 'messages/000002-security-review-result.json'
+    security_result = json.loads(security_result_path.read_text(encoding='utf-8'))
+    mutations: tuple[Callable[[dict[str, Any]], None], ...] = (
+        lambda item: item.update(run_id='another-run'),
+        lambda item: item.update(iteration=2),
+        lambda item: item['scope'].update(diff_digest='sha256:' + 'b' * 64),
+        lambda item: item['payload'].update(
+            verdict='changes_requested',
+            findings=[
+                {
+                    'finding_id': 'mismatch',
+                    'severity': 'high',
+                    'title': 'Mismatch',
+                    'path': 'src/example.py',
+                    'line': 1,
+                    'explanation': 'Mismatched aggregate outcome.',
+                    'acceptance_criterion': 'Match the aggregate outcome.',
+                }
+            ],
+        ),
+    )
+    for mutate in mutations:
+        candidate = json.loads(json.dumps(security_result))
+        mutate(candidate)
+        security_result_path.write_text(json.dumps(candidate), encoding='utf-8')
+        mismatched = build_audit_document(
+            result,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert 'message_correlation_failure' in {
+            str(item.get('code'))
+            for item in cast('list[dict[str, object]]', mismatched['findings'])
+        }
+    security_result_path.write_text(json.dumps(security_result), encoding='utf-8')
+
+    aggregate['reviewers'][0]['result_path'] = (
+        'messages/000002-portability-review-result.json'
+    )
+    (run_directory / 'review-batches/000001.json').write_text(
+        json.dumps(aggregate), encoding='utf-8'
+    )
+    cross_member = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert 'message_correlation_failure' in {
+        str(item.get('code'))
+        for item in cast('list[dict[str, object]]', cross_member['findings'])
+    }
+    aggregate_path = run_directory / 'review-batches/000001.json'
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+    aggregate['reviewers'][0]['result_path'] = (
+        'messages/000002-security-review-result.json'
+    )
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+
+    aggregate['verdict'] = 'blocked'
+    aggregate['reviewers'][0].update(outcome='incomplete', result_path=None)
+    aggregate['incomplete_reviewers'] = ['security']
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+    concealed_result = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'review-batches/000001.json'
+        for item in cast('list[dict[str, object]]', concealed_result['findings'])
+    )
+    aggregate['verdict'] = 'approved'
+    aggregate['reviewers'][0].update(
+        outcome='approved',
+        result_path='messages/000002-security-review-result.json',
+    )
+    aggregate['incomplete_reviewers'] = []
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+
+    aggregate['iteration'] = 2
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+    mismatched_iteration = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'iteration_mismatch'
+        and item.get('path') == 'review-batches/000001.json'
+        for item in cast('list[dict[str, object]]', mismatched_iteration['findings'])
+    )
+    aggregate['iteration'] = 1
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+
+    aggregate_path.unlink()
+    absent = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'review-batches/000001.json'
+        for item in cast('list[dict[str, object]]', absent['findings'])
+    )
+    aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
+
+    execution_path = run_directory / 'execution.json'
+    execution = json.loads(execution_path.read_text(encoding='utf-8'))
+    execution['reviewer_plan']['reviewers'].reverse()
+    execution_path.write_text(json.dumps(execution), encoding='utf-8')
+    altered_plan = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'review-batches/000001.json'
+        for item in cast('list[dict[str, object]]', altered_plan['findings'])
+    )
+    execution['reviewer_plan']['reviewers'].reverse()
+    execution_path.write_text(json.dumps(execution), encoding='utf-8')
+
+    contradictory_transitions = tuple(
+        replace(item, to_state=RunState.CHANGES_REQUESTED)
+        if item.from_state is RunState.REVIEWING
+        else item
+        for item in store.list_transitions(str(run.id))
+    )
+    contradictory = build_audit_document(
+        result,
+        contradictory_transitions,
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'review-batches/000001.json'
+        for item in cast('list[dict[str, object]]', contradictory['findings'])
     )
 
 
@@ -336,13 +550,19 @@ def test_incomplete_reviewer_set_fails_terminally(
                 run_directory
                 / f'logs/{reviewer_id}-rejected-review-artifact-attempt-0001.md'
             ).is_file()
-        audit = build_audit_document(
-            store.get(run.id),
-            store.list_transitions(str(run.id)),
-            (),
-            tmp_path / 'runs',
-            verify=True,
-        )
+    audit = build_audit_document(
+        store.get(run.id),
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert not any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'review-batches/000001.json'
+        for item in cast('list[dict[str, object]]', audit['findings'])
+    )
+    if mode in {'timeout', 'nonzero'}:
         assert audit['result'] != 'incomplete'
 
 

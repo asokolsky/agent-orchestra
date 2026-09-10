@@ -421,9 +421,9 @@ records the stable code `reviewer_batch_incomplete`. Worktree mutation is
 rejected separately as `worktree changed during read-only review`. Reviewer-set
 width is the configured member count, with one
 concurrent agent process per member and no separate concurrency cap; operators
-should size sets for available local resources. Developer
-remediation, persisted aggregate evidence, and reviewer-set
-resume remain tracked by
+should size sets for available local resources. The canonical aggregate decision
+is stored under `review-batches/` and included in audit history. Developer
+remediation and reviewer-set resume remain tracked by
 [#26](https://github.com/asokolsky/agent-orchestra/issues/26). `config show`
 therefore reports reviewer sets with a `status` of `"review_only"`.
 
@@ -861,10 +861,9 @@ Historical jobs whose
 [`enqueue-local --supersedes`](#enqueue-local) only after the old job is
 terminal. Valid version 3 reviewer-set execution records return
 `resume_reviewer_set_unsupported` until reviewer-batch recovery is implemented.
-Until canonical aggregate evidence is implemented, `audit --verify` validates
-each reviewer-qualified request, result, artifact, and invocation but cannot
-independently recompute or correlate the batch verdict that selected durable job
-state.
+`audit --verify` validates each reviewer-qualified request, result, artifact,
+and invocation together with the canonical aggregate decision and its member
+result references.
 
 ## `skills`
 

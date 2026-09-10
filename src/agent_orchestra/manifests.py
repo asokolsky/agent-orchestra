@@ -53,8 +53,11 @@ EVIDENCE_TYPES = (
     'review_result',
     'remediation_request',
     'developer_handoff',
+    'review_batch_result',
 )
-MESSAGE_EVIDENCE_TYPES = EVIDENCE_TYPES[3:]
+MESSAGE_EVIDENCE_TYPES = frozenset(
+    {'review_request', 'review_result', 'remediation_request', 'developer_handoff'}
+)
 
 
 class ManifestError(RuntimeError):
