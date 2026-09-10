@@ -17,7 +17,13 @@ from uuid import uuid4
 
 import pytest
 
-from agent_orchestra import cli, invocations, queued_review, worker
+from agent_orchestra import (
+    cli,
+    developer_remediation,
+    invocations,
+    queued_review,
+    worker,
+)
 from agent_orchestra import evidence as evidence_module
 from agent_orchestra.adapter.registry import (
     RuntimeDefinition,
@@ -3054,7 +3060,9 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
             raise OSError(message)
         return original_record(attempt, *args, **kwargs)
 
-    monkeypatch.setattr(worker, 'record_invocation', fail_developer_record)
+    monkeypatch.setattr(
+        developer_remediation, 'record_invocation', fail_developer_record
+    )
     with pytest.raises(OSError, match='simulated developer record failure'):
         resume_review(
             context=WorkerContext(
@@ -3066,7 +3074,7 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
         )
     assert context.store.get(context.run.id).state is RunState.DEVELOPING
 
-    monkeypatch.setattr(worker, 'record_invocation', original_record)
+    monkeypatch.setattr(developer_remediation, 'record_invocation', original_record)
     assert main(resume_arguments(context)) == 0
 
     assert developer_counter.read_text().splitlines() == ['1']
