@@ -412,8 +412,13 @@ batch with `run --reviewer-set NAME`; its required reviewers execute
 concurrently against the same immutable diff and keep disjoint request, result,
 artifact, stream, runtime-metadata, and invocation evidence. The batch advances
 to approval only when every reviewer approves and otherwise stops at the review
-boundary. A timed-out, failed, blocked, invalid, or mutation-invalidated batch
-fails terminally because reviewer-set resume is not yet supported. Developer
+boundary. A timed-out, failed, blocked, or invalid reviewer batch fails
+terminally because reviewer-set resume is not yet supported; its `failure.json`
+records the stable code `reviewer_batch_incomplete`. Worktree mutation is
+rejected separately as `worktree changed during read-only review`. Reviewer-set
+width is the configured member count, with one
+concurrent agent process per member and no separate concurrency cap; operators
+should size sets for available local resources. Developer
 remediation, persisted aggregate evidence, and reviewer-set
 resume remain tracked by
 [#26](https://github.com/asokolsky/agent-orchestra/issues/26). `config show`
@@ -853,6 +858,10 @@ Historical jobs whose
 [`enqueue-local --supersedes`](#enqueue-local) only after the old job is
 terminal. Valid version 3 reviewer-set execution records return
 `resume_reviewer_set_unsupported` until reviewer-batch recovery is implemented.
+Until canonical aggregate evidence is implemented, `audit --verify` validates
+each reviewer-qualified request, result, artifact, and invocation but cannot
+independently recompute or correlate the batch verdict that selected durable job
+state.
 
 ## `skills`
 

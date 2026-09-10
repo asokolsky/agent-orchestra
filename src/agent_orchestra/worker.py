@@ -120,6 +120,7 @@ MIXED_REVIEWER_MESSAGE_PATHS = 'canonical messages mix reviewer batch and legacy
 INCOMPLETE_REVIEWER_MESSAGE_BATCH = 'reviewer message sequence is not complete'
 SMALL_REVIEWER_MESSAGE_BATCH = 'reviewer message batch requires at least two reviewers'
 REVIEWER_BATCH_INCOMPLETE = 'reviewer batch did not complete'
+REVIEWER_BATCH_INCOMPLETE_CODE = 'reviewer_batch_incomplete'
 RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
 RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
 RESUME_REVIEWER_SET_UNSUPPORTED_CODE = 'resume_reviewer_set_unsupported'
@@ -3530,7 +3531,7 @@ def _execute_reviewer_dispatch(
     )
 
 
-def run_queued_reviewer_set(
+def _run_queued_reviewer_set(
     *,
     store: RunStore,
     run: Run,
@@ -3645,7 +3646,9 @@ def run_queued_reviewer_set(
     if decision.verdict == 'blocked':
         failed = transition(reviewing, RunState.FAILED)
         store.update(failed, expected_state=RunState.REVIEWING)
-        raise WorkerError(REVIEWER_BATCH_INCOMPLETE)
+        raise WorkerError(
+            REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
+        )
     decided = transition(
         reviewing,
         RunState.APPROVED
@@ -3658,6 +3661,62 @@ def run_queued_reviewer_set(
     awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
     store.update(awaiting, expected_state=RunState.APPROVED)
     return awaiting
+
+
+def run_queued_reviewer_set(
+    *,
+    store: RunStore,
+    run: Run,
+    objective: str,
+    reviewer_plan: ReviewerExecutionPlan,
+    developer_command: Sequence[str],
+    runs_directory: Path,
+    developer_timeout_seconds: int,
+    max_iterations: int,
+    digest_worktree: Callable[[Path, str], str | None],
+    developer_identity: InvocationIdentity,
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
+) -> Run:
+    """Run a reviewer batch and persist every worker failure as durable evidence."""
+
+    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    try:
+        return _run_queued_reviewer_set(
+            store=store,
+            run=run,
+            objective=objective,
+            reviewer_plan=reviewer_plan,
+            developer_command=developer_command,
+            runs_directory=runs_directory,
+            developer_timeout_seconds=developer_timeout_seconds,
+            max_iterations=max_iterations,
+            digest_worktree=digest_worktree,
+            developer_identity=developer_identity,
+            registry=registry,
+        )
+    except WorkerError as error:
+        if not run_directory.is_relative_to(run.worktree_path.resolve()):
+            try:
+                durable_run = store.get(str(run.id))
+                _write_json_atomic(
+                    _run_evidence_path(run_directory, 'failure.json'),
+                    {
+                        'schema_version': 1,
+                        'run_id': str(run.id),
+                        'state': str(durable_run.state),
+                        'error': {
+                            'code': error.code or 'worker_error',
+                            'message': str(error),
+                        },
+                        'created_at': datetime.now(UTC)
+                        .isoformat()
+                        .replace('+00:00', 'Z'),
+                    },
+                    'failure',
+                )
+            except OSError:
+                pass
+        raise
 
 
 def run_queued_review(

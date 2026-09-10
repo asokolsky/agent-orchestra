@@ -295,7 +295,7 @@ def test_incomplete_reviewer_set_fails_terminally(
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
 
-    with pytest.raises(WorkerError, match='reviewer batch did not complete'):
+    with pytest.raises(WorkerError) as caught:
         run_queued_reviewer_set(
             store=store,
             run=run,
@@ -317,9 +317,15 @@ def test_incomplete_reviewer_set_fails_terminally(
             ),
         )
 
+    assert caught.value.code == 'reviewer_batch_incomplete'
     assert store.get(run.id).state is RunState.FAILED
+    run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
+    failure = json.loads((run_directory / 'failure.json').read_text(encoding='utf-8'))
+    assert failure['error'] == {
+        'code': 'reviewer_batch_incomplete',
+        'message': 'reviewer batch did not complete',
+    }
     if mode in {'timeout', 'nonzero'}:
-        run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
         assert not tuple(run_directory.glob('.*.review-result.json'))
         for reviewer_id in ('security', 'portability'):
             assert (
@@ -389,7 +395,7 @@ def test_mixed_incomplete_reviewer_set_fails_terminally(
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
 
-    with pytest.raises(WorkerError, match='reviewer batch did not complete'):
+    with pytest.raises(WorkerError) as caught:
         run_queued_reviewer_set(
             store=store,
             run=run,
@@ -411,6 +417,7 @@ def test_mixed_incomplete_reviewer_set_fails_terminally(
             ),
         )
 
+    assert caught.value.code == 'reviewer_batch_incomplete'
     assert store.get(run.id).state is RunState.FAILED
 
 
