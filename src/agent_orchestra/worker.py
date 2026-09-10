@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -46,11 +47,14 @@ from agent_orchestra.invocations import (
 )
 from agent_orchestra.manifests import canonical_message_evidence, evidence_path
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
+from agent_orchestra.review_batch import ReviewerDecision, aggregate_review_batch
+from agent_orchestra.review_fanout import ReviewerDispatch, build_review_fanout
 from agent_orchestra.reviewer_paths import (
     ReviewerIdentityError,
     reviewer_invocation_id,
     reviewer_invocation_stem,
     reviewer_task_id,
+    validate_reviewer_id,
 )
 from agent_orchestra.reviewer_plan import reviewer_execution_plan_record
 from agent_orchestra.schemas import (
@@ -112,6 +116,10 @@ REMEDIATION_ACTIONS = 'remediation request must not authorize lifecycle actions'
 INVALID_REVIEW_REQUEST = 'review request is invalid'
 REVIEW_PATH_ESCAPE = 'review request references evidence outside the run'
 DUPLICATE_MESSAGE_ID = 'message ID was already persisted for this run'
+MIXED_REVIEWER_MESSAGE_PATHS = 'canonical messages mix reviewer batch and legacy paths'
+INCOMPLETE_REVIEWER_MESSAGE_BATCH = 'reviewer message sequence is not complete'
+SMALL_REVIEWER_MESSAGE_BATCH = 'reviewer message batch requires at least two reviewers'
+REVIEWER_BATCH_INCOMPLETE = 'reviewer batch did not complete'
 RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
 RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
 RESUME_REVIEWER_SET_UNSUPPORTED_CODE = 'resume_reviewer_set_unsupported'
@@ -198,6 +206,24 @@ class ReviewerSetReviewPlan:
     developer_timeout_seconds: int
     max_iterations: int
     developer_identity: InvocationIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerDispatchResult:
+    """One completed reviewer dispatch and its validated protocol response."""
+
+    decision: ReviewerDecision
+    message_id: str | None
+
+
+def _require_unique_batch_message_ids(
+    results: tuple[ReviewerDispatchResult, ...],
+) -> None:
+    """Reject a reviewer batch that reused a canonical response identity."""
+
+    message_ids = [result.message_id for result in results if result.message_id]
+    if len(message_ids) != len(set(message_ids)):
+        raise WorkerError(DUPLICATE_MESSAGE_ID)
 
 
 def _execution_record(
@@ -821,6 +847,24 @@ def read_message_chain(
                 raise WorkerError(f'unknown canonical message path: {relative}')
             path_message_type, sequence = identity
             candidates.append((sequence, path_message_type, path))
+    reviewer_ids = {
+        reviewer_id
+        for sequence, message_type, path in candidates
+        if (
+            reviewer_id := _reviewer_id_from_message_path(
+                path, sequence=sequence, message_type=message_type
+            )
+        )
+        is not None
+    }
+    if reviewer_ids:
+        return _read_reviewer_message_batch(
+            candidates,
+            reviewer_ids=reviewer_ids,
+            run_directory=run_directory,
+            run_id=run_id,
+            schemas=schemas,
+        )
     for expected_sequence, (sequence, expected_type, path) in enumerate(
         sorted(candidates), start=1
     ):
@@ -954,6 +998,115 @@ def read_message_chain(
         message = 'resume message chain is empty'
         raise WorkerError(message)
     return documents
+
+
+def _reviewer_id_from_message_path(
+    path: Path, *, sequence: int, message_type: str
+) -> str | None:
+    """Return a reviewer qualifier from one canonical message path."""
+
+    prefix = f'{sequence:06d}-'
+    suffix = f'-{message_type.replace("_", "-")}.json'
+    name = path.name
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        raise WorkerError(f'invalid canonical message path: {name}')
+    reviewer_id = name[len(prefix) : -len(suffix)]
+    if not reviewer_id:
+        return None
+    try:
+        return validate_reviewer_id(reviewer_id)
+    except ReviewerIdentityError as error:
+        raise WorkerError(f'invalid canonical message path: {name}') from error
+
+
+def _read_reviewer_message_batch(
+    candidates: list[tuple[int, str, Path]],
+    *,
+    reviewer_ids: set[str],
+    run_directory: Path,
+    run_id: str,
+    schemas: dict[str, type[BaseModel]],
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Validate one initial reviewer batch as parallel correlated chains."""
+
+    grouped: dict[str, list[tuple[int, str, Path]]] = {
+        reviewer_id: [] for reviewer_id in reviewer_ids
+    }
+    for sequence, message_type, path in candidates:
+        reviewer_id = _reviewer_id_from_message_path(
+            path, sequence=sequence, message_type=message_type
+        )
+        if reviewer_id is None:
+            raise WorkerError(MIXED_REVIEWER_MESSAGE_PATHS)
+        grouped[reviewer_id].append((sequence, message_type, path))
+    if len(grouped) < 2:
+        raise WorkerError(SMALL_REVIEWER_MESSAGE_BATCH)
+
+    documents: list[tuple[Path, dict[str, Any]]] = []
+    identities: set[str] = set()
+    expected_scope: dict[str, Any] | None = None
+    expected_iteration: int | None = None
+    for reviewer_id in sorted(grouped):
+        chain = sorted(grouped[reviewer_id])
+        if [(sequence, message_type) for sequence, message_type, _ in chain] != [
+            (1, 'review_request'),
+            (2, 'review_result'),
+        ]:
+            raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
+        reviewer_documents: list[tuple[Path, dict[str, Any]]] = []
+        for sequence, message_type, path in chain:
+            _contained_job_reference(
+                run_directory, path, 'resume message path escapes the run directory'
+            )
+            document = _read_object(path)
+            schema = schemas[message_type]
+            try:
+                schema.model_validate(document)
+            except ValidationError as error:
+                raise WorkerError(f'invalid canonical message: {path.name}') from error
+            if (
+                document['message_type'] != message_type
+                or document['run_id'] != run_id
+                or document['sequence'] != sequence
+            ):
+                raise WorkerError(
+                    f'message does not match recoverable run: {path.name}'
+                )
+            message_id = document['message_id']
+            if message_id in identities:
+                raise WorkerError(DUPLICATE_MESSAGE_ID)
+            identities.add(message_id)
+            reviewer_documents.append((path, document))
+
+        request_path, request = reviewer_documents[0]
+        result_path, result = reviewer_documents[1]
+        if (
+            request['in_reply_to'] is not None
+            or request['payload']['prior_review_path'] is not None
+            or result['in_reply_to'] != request['message_id']
+            or result['scope'] != request['scope']
+            or result['iteration'] != request['iteration']
+            or result['payload']['artifact_path'] != request['payload']['artifact_path']
+        ):
+            raise WorkerError(f'invalid message correlation: {result_path.name}')
+        artifact_path = Path(result['payload']['artifact_path'])
+        if not artifact_path.is_file():
+            raise WorkerError(f'invalid message correlation: {result_path.name}')
+        _contained_job_reference(
+            run_directory,
+            artifact_path,
+            f'invalid message correlation: {result_path.name}',
+        )
+        if expected_scope is None:
+            expected_scope = request['scope']
+            expected_iteration = request['iteration']
+        elif (
+            request['scope'] != expected_scope
+            or request['iteration'] != expected_iteration
+        ):
+            raise WorkerError(f'invalid message correlation: {request_path.name}')
+        documents.extend(reviewer_documents)
+    return sorted(documents, key=lambda item: item[0].name)
 
 
 def _identity_from_record(
@@ -3064,6 +3217,447 @@ def resume_review(
             except OSError:
                 pass
         raise
+
+
+def _reviewer_dispatch_path(run_directory: Path, relative: str) -> Path:
+    """Resolve one reviewer-owned relative path beneath the run directory."""
+
+    return _run_evidence_path(run_directory, *Path(relative).parts)
+
+
+def _execute_reviewer_dispatch(
+    *,
+    context: WorkerContext,
+    run: Run,
+    reviewing: Run,
+    objective: str,
+    current_digest: str,
+    dispatch: ReviewerDispatch,
+    sequence: int,
+    attempt: int,
+) -> ReviewerDispatchResult:
+    """Execute and validate one reviewer without changing workflow state."""
+
+    run_directory = _run_evidence_directory(context.runs_directory, str(run.id))
+    logs = _run_evidence_path(run_directory, 'logs')
+    invocations = _run_evidence_path(run_directory, 'invocations')
+    request_path = _reviewer_dispatch_path(run_directory, dispatch.paths.request)
+    response_path = _reviewer_dispatch_path(
+        run_directory, dispatch.paths.temporary_result
+    )
+    result_path = _reviewer_dispatch_path(run_directory, dispatch.paths.result)
+    artifact_path = _reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
+    stdout_path = _reviewer_dispatch_path(run_directory, dispatch.paths.stdout)
+    stderr_path = _reviewer_dispatch_path(run_directory, dispatch.paths.stderr)
+    metadata_path = _reviewer_dispatch_path(
+        run_directory, dispatch.paths.runtime_metadata
+    )
+    request: dict[str, Any] = {
+        'schema_version': 1,
+        'message_id': str(uuid4()),
+        'in_reply_to': None,
+        'run_id': str(run.id),
+        'sequence': sequence,
+        'iteration': reviewing.iteration,
+        'message_type': 'review_request',
+        'sender': 'orchestrator',
+        'recipient': 'reviewer',
+        'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+        'scope': {
+            'worktree_path': str(run.worktree_path),
+            'base_sha': run.base_sha,
+            'head_sha': run.head_sha,
+            'diff_digest': current_digest,
+        },
+        'payload': {
+            'objective': objective,
+            'allowed_actions': [],
+            'timeout_seconds': dispatch.timeout_seconds,
+            'artifact_path': str(artifact_path),
+            'prior_review_path': None,
+        },
+    }
+    _validate_review_request(request, run_directory=run_directory)
+    _write_json_atomic(request_path, request, 'review_request')
+    started_at = timestamp()
+    invocation_id = _record_invocation(
+        run=run,
+        role='reviewer',
+        reviewer_id=dispatch.reviewer_id,
+        identity=dispatch.identity,
+        iteration=reviewing.iteration,
+        sequence=request['sequence'],
+        started_at=started_at,
+        logs=logs,
+        invocations=invocations,
+        stdout='',
+        stderr='',
+        exit_code=None,
+        finished=False,
+        attempt=attempt,
+        invocation_id=dispatch.invocation_id,
+    )
+    adapter = CommandAgentAdapter(dispatch.command)
+    try:
+        completed = adapter.execute(
+            ReviewerRequest(
+                objective=objective,
+                worktree_path=run.worktree_path,
+                iteration=reviewing.iteration,
+                allowed_actions=(),
+                timeout_seconds=dispatch.timeout_seconds,
+                base_sha=run.base_sha,
+                head_sha=run.head_sha,
+                diff_digest=current_digest,
+                artifact_path=artifact_path,
+                request_path=request_path,
+                response_path=response_path,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                runtime_metadata_path=_runtime_metadata_path(
+                    dispatch.identity, metadata_path, context.registry
+                ),
+                on_started=partial(
+                    _record_invocation,
+                    run=run,
+                    role='reviewer',
+                    reviewer_id=dispatch.reviewer_id,
+                    identity=dispatch.identity,
+                    iteration=reviewing.iteration,
+                    sequence=request['sequence'],
+                    started_at=started_at,
+                    logs=logs,
+                    invocations=invocations,
+                    stdout=None,
+                    stderr=None,
+                    exit_code=None,
+                    invocation_id=invocation_id,
+                    finished=False,
+                    attempt=attempt,
+                    status='running',
+                ),
+            )
+        )
+    except subprocess.TimeoutExpired as error:
+        models, model_status = _exception_runtime_metadata(error)
+        _record_invocation(
+            run=run,
+            role='reviewer',
+            reviewer_id=dispatch.reviewer_id,
+            identity=dispatch.identity,
+            iteration=reviewing.iteration,
+            sequence=request['sequence'],
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout=error.stdout,
+            stderr=error.stderr,
+            exit_code=None,
+            timed_out=True,
+            invocation_id=invocation_id,
+            attempt=attempt,
+            effective_models=models,
+            effective_model_status=model_status,
+        )
+        _archive_unaccepted_response(
+            response_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
+            'rejected_review_result',
+        )
+        _archive_unaccepted_response(
+            artifact_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
+            'rejected_review_artifact',
+        )
+        return ReviewerDispatchResult(
+            ReviewerDecision(dispatch.reviewer_id, 'incomplete'), None
+        )
+    except OSError as error:
+        _record_invocation(
+            run=run,
+            role='reviewer',
+            reviewer_id=dispatch.reviewer_id,
+            identity=dispatch.identity,
+            iteration=reviewing.iteration,
+            sequence=request['sequence'],
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout='',
+            stderr=str(error),
+            exit_code=None,
+            invocation_id=invocation_id,
+            attempt=attempt,
+            conclusion='failed',
+        )
+        _archive_unaccepted_response(
+            response_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
+            'rejected_review_result',
+        )
+        _archive_unaccepted_response(
+            artifact_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
+            'rejected_review_artifact',
+        )
+        return ReviewerDispatchResult(
+            ReviewerDecision(dispatch.reviewer_id, 'blocked'), None
+        )
+    except BaseException as error:
+        _record_invocation(
+            run=run,
+            role='reviewer',
+            reviewer_id=dispatch.reviewer_id,
+            identity=dispatch.identity,
+            iteration=reviewing.iteration,
+            sequence=request['sequence'],
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout='',
+            stderr=str(error),
+            exit_code=None,
+            invocation_id=invocation_id,
+            attempt=attempt,
+            conclusion='failed',
+        )
+        _archive_unaccepted_response(
+            response_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
+            'rejected_review_result',
+        )
+        _archive_unaccepted_response(
+            artifact_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
+            'rejected_review_artifact',
+        )
+        raise
+    finished_at = timestamp()
+    if not completed.succeeded:
+        _record_invocation(
+            run=run,
+            role='reviewer',
+            reviewer_id=dispatch.reviewer_id,
+            identity=dispatch.identity,
+            iteration=reviewing.iteration,
+            sequence=request['sequence'],
+            started_at=started_at,
+            logs=logs,
+            invocations=invocations,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.exit_code,
+            invocation_id=invocation_id,
+            attempt=attempt,
+            conclusion='failed',
+            finished_at_value=finished_at,
+            effective_models=completed.effective_models,
+            effective_model_status=completed.effective_model_status,
+        )
+        _archive_unaccepted_response(
+            response_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
+            'rejected_review_result',
+        )
+        _archive_unaccepted_response(
+            artifact_path,
+            logs
+            / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
+            'rejected_review_artifact',
+        )
+        return ReviewerDispatchResult(
+            ReviewerDecision(dispatch.reviewer_id, 'blocked'), None
+        )
+
+    if artifact_path.is_file():
+        _record_finalized_path(artifact_path, 'review_artifact')
+    received_at = timestamp() if response_path.is_file() else None
+    validation_started_at = timestamp()
+    try:
+        response = _read_object(response_path)
+        _require_unique_message_id(response, run_directory)
+        verdict = _validate_review_response(
+            response, request=request, artifact_path=artifact_path
+        )
+    except WorkerError:
+        verdict = 'blocked'
+        response = {}
+    valid = verdict != 'blocked' or bool(response)
+    if response_path.exists():
+        destination = (
+            result_path
+            if valid
+            else logs / f'{dispatch.reviewer_id}-rejected-review-result.json'
+        )
+        _finalize_temporary_path(
+            response_path,
+            destination,
+            'review_result' if valid else 'rejected_review_result',
+        )
+    _record_invocation(
+        run=run,
+        role='reviewer',
+        reviewer_id=dispatch.reviewer_id,
+        identity=dispatch.identity,
+        iteration=reviewing.iteration,
+        sequence=request['sequence'],
+        started_at=started_at,
+        logs=logs,
+        invocations=invocations,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        exit_code=completed.exit_code,
+        invocation_id=invocation_id,
+        attempt=attempt,
+        conclusion='succeeded' if valid else 'failed',
+        response_received_at=received_at,
+        validation_started_at=validation_started_at if received_at else None,
+        finished_at_value=finished_at,
+        effective_models=completed.effective_models,
+        effective_model_status=completed.effective_model_status,
+    )
+    message_id = response.get('message_id')
+    return ReviewerDispatchResult(
+        ReviewerDecision(dispatch.reviewer_id, cast('Any', verdict)),
+        message_id if isinstance(message_id, str) else None,
+    )
+
+
+def run_queued_reviewer_set(
+    *,
+    store: RunStore,
+    run: Run,
+    objective: str,
+    reviewer_plan: ReviewerExecutionPlan,
+    developer_command: Sequence[str],
+    runs_directory: Path,
+    developer_timeout_seconds: int,
+    max_iterations: int,
+    digest_worktree: Callable[[Path, str], str | None],
+    developer_identity: InvocationIdentity,
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
+) -> Run:
+    """Run one concurrent required-reviewer batch for a queued immutable diff."""
+
+    if run.state is not RunState.QUEUED:
+        raise WorkerError(f'run must be queued, found {run.state}')
+    if not objective.strip():
+        raise WorkerError(EMPTY_OBJECTIVE)
+    if developer_timeout_seconds <= 0:
+        raise WorkerError(INVALID_DEVELOPER_TIMEOUT)
+    if max_iterations <= 0:
+        raise WorkerError(INVALID_ITERATION_LIMIT)
+    context = WorkerContext(store, runs_directory, digest_worktree, registry)
+    resolved_reviewers = tuple(
+        replace(
+            reviewer,
+            identity=_resolve_resume_identity(
+                reviewer.identity, RuntimeRole.REVIEWER, registry
+            ),
+        )
+        for reviewer in reviewer_plan.reviewers
+    )
+    reviewer_plan = replace(reviewer_plan, reviewers=resolved_reviewers)
+    developer_identity = _resolve_resume_identity(
+        developer_identity, RuntimeRole.DEVELOPER, registry
+    )
+    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    if run_directory.is_relative_to(run.worktree_path.resolve()):
+        raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
+    current_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
+    if current_digest is None:
+        raise WorkerError(NO_CHANGES)
+    prepared = replace(
+        transition(run, RunState.PREPARING),
+        diff_digest=current_digest,
+        updated_at=utc_now(),
+    )
+    store.update(prepared, expected_state=RunState.QUEUED)
+    plan = ReviewerSetReviewPlan(
+        objective,
+        reviewer_plan,
+        developer_command,
+        developer_timeout_seconds,
+        max_iterations,
+        developer_identity,
+    )
+    try:
+        execution = _execution_record(
+            plan,
+            run_id=str(run.id),
+            created_at=datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+        )
+        _write_json_atomic(
+            _run_evidence_path(run_directory, 'execution.json'),
+            execution.model_dump(mode='json'),
+            'execution',
+        )
+        reviewing = transition(prepared, RunState.REVIEWING)
+        store.update(reviewing, expected_state=RunState.PREPARING)
+    except BaseException:
+        failed = transition(prepared, RunState.FAILED)
+        store.update(failed, expected_state=RunState.PREPARING)
+        raise
+    try:
+        for directory in ('artifacts', 'logs', 'invocations'):
+            _run_evidence_path(run_directory, directory).mkdir(
+                parents=True, exist_ok=True
+            )
+        dispatches = build_review_fanout(
+            reviewer_plan,
+            run_id=str(run.id),
+            sequence=1,
+            iteration=reviewing.iteration,
+            attempt=1,
+        )
+        with ThreadPoolExecutor(max_workers=len(dispatches)) as executor:
+            results = tuple(
+                executor.map(
+                    lambda dispatch: _execute_reviewer_dispatch(
+                        context=context,
+                        run=run,
+                        reviewing=reviewing,
+                        objective=objective,
+                        current_digest=current_digest,
+                        dispatch=dispatch,
+                        sequence=1,
+                        attempt=1,
+                    ),
+                    dispatches,
+                )
+            )
+        _require_unchanged(
+            _digest(digest_worktree, run.worktree_path, run.base_sha), current_digest
+        )
+        _require_unique_batch_message_ids(results)
+        decision = aggregate_review_batch(tuple(result.decision for result in results))
+    except BaseException:
+        failed = transition(reviewing, RunState.FAILED)
+        store.update(failed, expected_state=RunState.REVIEWING)
+        raise
+    if decision.verdict == 'blocked':
+        failed = transition(reviewing, RunState.FAILED)
+        store.update(failed, expected_state=RunState.REVIEWING)
+        raise WorkerError(REVIEWER_BATCH_INCOMPLETE)
+    decided = transition(
+        reviewing,
+        RunState.APPROVED
+        if decision.verdict == 'approved'
+        else RunState.CHANGES_REQUESTED,
+    )
+    store.update(decided, expected_state=RunState.REVIEWING)
+    if decision.verdict == 'changes_requested':
+        return decided
+    awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
+    store.update(awaiting, expected_state=RunState.APPROVED)
+    return awaiting
 
 
 def run_queued_review(

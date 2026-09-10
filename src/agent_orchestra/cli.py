@@ -59,6 +59,11 @@ from agent_orchestra.retention import (
     parse_duration,
     plan_document,
 )
+from agent_orchestra.reviewer_plan import (
+    ReviewerPlanError,
+    build_reviewer_execution_plan,
+    select_reviewer_set,
+)
 from agent_orchestra.schemas import SchemaValidationError
 from agent_orchestra.settings import Settings, SettingsError, load_settings
 from agent_orchestra.skill_install import SkillInstallError, install_skills
@@ -69,7 +74,12 @@ from agent_orchestra.store import (
     RunStore,
     UnreadableJob,
 )
-from agent_orchestra.worker import WorkerError, resume_review, run_queued_review
+from agent_orchestra.worker import (
+    WorkerError,
+    resume_review,
+    run_queued_review,
+    run_queued_reviewer_set,
+)
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:
@@ -77,7 +87,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 15
+CLI_SCHEMA_VERSION = 16
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -366,6 +376,12 @@ def build_parser(
         default=runtimes.default(RuntimeRole.REVIEWER).identifier,
     )
     run.add_argument('--reviewer-model')
+    run.add_argument(
+        '--reviewer-set',
+        choices=tuple(item.identifier for item in effective.reviewer_sets),
+        help='run every required reviewer in this configured reviewer set',
+    )
+    run.set_defaults(settings=effective)
     run.add_argument(
         '--runs-directory',
         type=Path,
@@ -1210,6 +1226,22 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
     if not args.database.is_file():
         print(f'state database not found: {args.database}', file=sys.stderr)
         return 2
+    if args.reviewer_set and args.reviewer_command:
+        print(
+            'error: --reviewer-set cannot be combined with a custom reviewer command',
+            file=sys.stderr,
+        )
+        return 2
+    if args.reviewer_set and (
+        args.reviewer_model
+        or args.reviewer_agent
+        != args.runtime_registry.default(RuntimeRole.REVIEWER).identifier
+    ):
+        print(
+            'error: --reviewer-set cannot be combined with single-reviewer options',
+            file=sys.stderr,
+        )
+        return 2
     if args.reviewer_command and (
         args.reviewer_model
         or args.reviewer_agent
@@ -1227,12 +1259,25 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
     try:
         run = store.get(args.job_id)
         _require_external_database(args.database, run.worktree_path)
-        if args.reviewer_command:
+        if args.reviewer_set:
+            reviewer_plan = build_reviewer_execution_plan(
+                select_reviewer_set(args.settings, args.reviewer_set),
+                registry=args.runtime_registry,
+                executable=Path(sys.executable),
+                timeout_seconds=args.timeout,
+            )
+            reviewer_command = []
+            reviewer_identity = InvocationIdentity(
+                vendor='unknown', model=None, runtime='reviewer-set'
+            )
+        elif args.reviewer_command:
+            reviewer_plan = None
             reviewer_command = args.reviewer_command
             reviewer_identity = InvocationIdentity(
                 vendor='unknown', model=None, runtime='custom-command'
             )
         else:
+            reviewer_plan = None
             reviewer_runtime = args.runtime_registry.require(
                 args.reviewer_agent, RuntimeRole.REVIEWER
             )
@@ -1267,22 +1312,43 @@ def _run(args: argparse.Namespace, store: RunStore) -> int:
             model=args.developer_model,
             runtime=args.developer_agent,
         )
-        result = run_queued_review(
-            store=store,
-            run=run,
-            objective=args.objective,
-            reviewer_command=reviewer_command,
-            developer_command=developer_command,
-            runs_directory=args.runs_directory,
-            timeout_seconds=args.timeout,
-            developer_timeout_seconds=args.developer_timeout,
-            max_iterations=args.max_iterations,
-            digest_worktree=_working_tree_digest,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-            registry=args.runtime_registry,
-        )
-    except (OSError, RunNotFoundError, RuntimeRegistryError, WorkerError) as error:
+        if reviewer_plan is not None:
+            result = run_queued_reviewer_set(
+                store=store,
+                run=run,
+                objective=args.objective,
+                reviewer_plan=reviewer_plan,
+                developer_command=developer_command,
+                runs_directory=args.runs_directory,
+                developer_timeout_seconds=args.developer_timeout,
+                max_iterations=args.max_iterations,
+                digest_worktree=_working_tree_digest,
+                developer_identity=developer_identity,
+                registry=args.runtime_registry,
+            )
+        else:
+            result = run_queued_review(
+                store=store,
+                run=run,
+                objective=args.objective,
+                reviewer_command=reviewer_command,
+                developer_command=developer_command,
+                runs_directory=args.runs_directory,
+                timeout_seconds=args.timeout,
+                developer_timeout_seconds=args.developer_timeout,
+                max_iterations=args.max_iterations,
+                digest_worktree=_working_tree_digest,
+                reviewer_identity=reviewer_identity,
+                developer_identity=developer_identity,
+                registry=args.runtime_registry,
+            )
+    except (
+        OSError,
+        ReviewerPlanError,
+        RunNotFoundError,
+        RuntimeRegistryError,
+        WorkerError,
+    ) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
     print(
@@ -1475,7 +1541,7 @@ def _config_show(
                             for reviewer_set in settings.reviewer_sets
                         ],
                         'source': 'file' if settings.reviewer_sets else 'built_in',
-                        'status': 'not_yet_applied',
+                        'status': 'review_only',
                     },
                 },
                 'error': None,

@@ -68,10 +68,10 @@ def aggregate_review_batch(
         for decision in decisions
         if decision.outcome == 'incomplete'
     )
-    if changes_requested:
-        verdict: AggregateVerdict = 'changes_requested'
-    elif blocked or incomplete:
-        verdict = 'blocked'
+    if blocked or incomplete:
+        verdict: AggregateVerdict = 'blocked'
+    elif changes_requested:
+        verdict = 'changes_requested'
     else:
         verdict = 'approved'
     return ReviewBatchDecision(verdict, changes_requested, blocked, incomplete)
