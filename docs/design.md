@@ -433,8 +433,18 @@ Schema version history:
   attempt documents. The version advances because the current CLI contract
   versions additive public fields; issue #61 may revise that policy globally.
 
-The independent audit document schema is version 14. It advances from 13 for
-the same conditional reviewer identity in its task and attempt history.
+The independent audit document schema is version 15. It advances from 14
+because attempt objects no longer carry `run_id`, `invocation_id`, or the
+invocation record's own `schema_version`. Those three were published only
+because the builder expanded the whole record; `run_id` and `invocation_id` are
+the implementation-level names schema 8 replaced with `job_id` and `attempt_id`,
+and the nested `schema_version` collided with the document's own version under
+one key. Version 14 advanced from 13 for the conditional reviewer identity in
+task and attempt history.
+
+Both attempt documents name the record fields they publish and the fields they
+withhold, so a field added to the invocation record joins neither document until
+someone decides it should. The CLI attempt vocabulary is unchanged.
 
 Invocation record schema 5 defines `reviewer_id` for source-code reviewer tasks.
 The reviewer identity and path builder uses durable task IDs of

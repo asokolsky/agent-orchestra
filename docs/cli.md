@@ -599,7 +599,7 @@ agent-orchestra [--database DATABASE] audit JOB_ID [--verify]
 
 The command is read-only. It does not initialize or update the database,
 evidence, worktree, issue provider, or remote repo. It reports source-code and
-issue-review jobs from the same schema-14 audit document and never contacts
+issue-review jobs from the same schema-15 audit document and never contacts
 GitHub or GitLab.
 
 For source-code jobs, audit reports `worktree_missing` or
@@ -614,7 +614,7 @@ appear as `in_progress` until their invocation completes.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Independent audit output contract; currently `14`. |
+| `schema_version` | Integer | Independent audit output contract; currently `15`. |
 | `job` | Object | Scenario-specific identity, immutable scope, state, and timestamps. |
 | `transitions` | Array | Ordered SQLite state history with the scope digest and optional reason at each transition. |
 | `operations` | Array | Commit authorization, commit, publish authorization, and publication views derived from transitions. |

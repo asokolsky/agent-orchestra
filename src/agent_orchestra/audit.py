@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import ValidationError
 
+from agent_orchestra.attempt_documents import (
+    AUDIT_ATTEMPT_FIELDS,
+    project_attempt,
+)
 from agent_orchestra.evidence import (
     EVIDENCE_TYPES,
     HASH_CHUNK_SIZE,
@@ -54,7 +58,7 @@ if TYPE_CHECKING:
 VerificationResult = Literal[
     'verified', 'failed', 'unverifiable', 'incomplete', 'expired'
 ]
-AUDIT_SCHEMA_VERSION = 14
+AUDIT_SCHEMA_VERSION = 15
 RETENTION_MARKER = '.retention.json'
 
 
@@ -630,16 +634,11 @@ def _tasks(
                 )
             )
             continue
-        attempt = asdict(record)
-        if record.reviewer_id is None:
-            attempt.pop('reviewer_id')
-        attempt['effective_models'] = list(record.effective_models)
+        attempt = project_attempt(record, AUDIT_ATTEMPT_FIELDS)
         attempt['streams'] = {
             'stdout': {'path': stdout_relative.as_posix()},
             'stderr': {'path': stderr_relative.as_posix()},
         }
-        attempt.pop('stdout_path')
-        attempt.pop('stderr_path')
         grouped.setdefault(record.task_id, []).append(attempt)
         if not record.task_id.startswith(f'{job_id}:'):
             findings.append(
