@@ -413,6 +413,28 @@ def test_real_reviewer_batch_is_visible_from_all_batch_views(
     assert task_document['review_batch'] == job_document['review_batches'][0]
 
 
+def test_job_view_rejects_modified_real_reviewer_batch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject worker-produced batch evidence modified after finalization."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    job_directory = resolve_evidence_path(root, str(job.id))
+    batch_path = job_directory / 'review-batches' / '000001.json'
+    batch = json.loads(batch_path.read_text(encoding='utf-8'))
+    batch['diff_digest'] = f'sha256:{"b" * 64}'
+    batch_path.write_text(json.dumps(batch), encoding='utf-8')
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+    assert (
+        'evidence_modified: evidence file was modified' in document['error']['message']
+    )
+
+
 def test_batch_views_ignore_orphaned_atomic_write_temporary(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
