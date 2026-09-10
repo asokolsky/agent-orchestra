@@ -258,6 +258,41 @@ wrong:
 Refactors that introduce a collaborator change no public document, evidence
 path, or stable error code, and do not move `CLI_SCHEMA_VERSION`.
 
+### Typing a persisted enum value
+
+A value written to durable evidence and read back is typed as its enum, and the
+enum is the only place its legal values are written down. `AttemptStatus`,
+`AttemptConclusion`, `RuntimeRole`, and `EffectiveModelStatus` derive from
+`PersistedEnum`, which supplies `values()` for validation and `decode()` for
+widening. `InvocationRecord` carries those enums directly; there is no parallel
+`Literal` alias and no hand-written value set anywhere.
+
+The reason a persisted value cannot simply be widened is that `EnumT(value)`
+raises `ValueError` for anything this build does not recognize, turning an
+unknown persisted value into an unhandled crash rather than a reported one, the
+failure #43 and #49 removed elsewhere. `decode()` widens through a
+caller-supplied failure function, so each subsystem keeps its own stable domain
+error: `InvocationEvidenceError` for invocation records, `PersistedEnumError`
+from the `store` decode boundary for job state.
+
+Enum typing therefore depends on the read path passing through such a boundary.
+Invocation evidence has exactly one, where a record is constructed from its
+document, and every enum field is decoded there. `Run.state` and `Run.scenario`
+are enum-typed for the same reason. `JobTransition` keeps `RunState | str`
+deliberately, so `audit` can report an undecodable transition as a finding
+rather than failing the whole document.
+
+A generated `Literal` is not an option, and the attempt is recorded so it is not
+retried: `Literal[*(member.value for member in Enum)]` is correct at runtime but
+a type checker rejects it with "Variable is not valid as a type", because
+`Literal` requires its members spelled out statically. Choosing between a
+hand-written `Literal` that can drift and the enum itself, the enum wins.
+
+Adding a member is one edit. Because no second spelling exists, there is nothing
+to keep in step; the tests verify that `values()` matches the members and that
+each field fails closed when persisted evidence carries a value this build does
+not know.
+
 ## Job ID format
 
 The [job ID](concepts.md#jobs-tasks-and-attempts) has the form

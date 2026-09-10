@@ -32,6 +32,7 @@ from agent_orchestra.evidence import (
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
+    EffectiveModelStatus,
     InvocationEvidenceError,
     InvocationEvidenceStore,
     InvocationRecord,
@@ -273,11 +274,11 @@ def _start_invocation(
         run_id=job.id,
         task_id=task_id,
         invocation_id=f'{task_id}:attempt-{attempt:04d}',
-        role='issue_reviewer',
+        role=RuntimeRole.ISSUE_REVIEWER,
         agent_vendor=vendor,
         requested_model=model if agent != 'custom' else None,
         effective_models=(),
-        effective_model_status='unavailable',
+        effective_model_status=EffectiveModelStatus.UNAVAILABLE,
         runtime=agent,
         iteration=iteration,
         started_at=timestamp(),
@@ -288,7 +289,7 @@ def _start_invocation(
         stdout_path=str(stdout_path),
         stderr_path=str(stderr_path),
         attempt=attempt,
-        status='pending',
+        status=AttemptStatus.PENDING,
         conclusion=None,
     )
     record_path = _evidence_path(job_directory, 'invocations', f'{stem}.json')
@@ -355,9 +356,9 @@ def _finish_invocation(
         ),
         effective_models=(execution.effective_models if execution is not None else ()),
         effective_model_status=(
-            'reported'
+            EffectiveModelStatus.REPORTED
             if execution is not None and execution.effective_models
-            else 'unavailable'
+            else EffectiveModelStatus.UNAVAILABLE
         ),
     )
     InvocationEvidenceStore(job_directory).write(record_path, completed)

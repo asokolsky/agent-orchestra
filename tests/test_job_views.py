@@ -7,11 +7,13 @@ import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
+    EffectiveModelStatus,
     InvocationRecord,
     _write_record_unindexed,
     transition_attempt,
@@ -45,33 +47,35 @@ def add_attempt(
     job_directory: Path,
     *,
     sequence: int = 1,
-    role: str = 'reviewer',
+    role: RuntimeRole = RuntimeRole.REVIEWER,
     attempt: int = 1,
     status: AttemptStatus = AttemptStatus.COMPLETED,
 ) -> str:
     """Write one valid attempt record and its separate streams."""
 
-    task_id = f'{job.id}:{sequence:06d}-{role}'
+    task_id = f'{job.id}:{sequence:06d}-{role.value}'
     attempt_id = f'{task_id}:attempt-{attempt:04d}'
     logs = job_directory / 'logs'
     logs.mkdir(exist_ok=True)
-    stdout = logs / f'{sequence:06d}-{role}-{attempt:04d}.stdout.log'
-    stderr = logs / f'{sequence:06d}-{role}-{attempt:04d}.stderr.log'
+    stdout = logs / f'{sequence:06d}-{role.value}-{attempt:04d}.stdout.log'
+    stderr = logs / f'{sequence:06d}-{role.value}-{attempt:04d}.stderr.log'
     stdout.write_text('child stdout\n')
     stderr.write_text('child stderr\n')
     record_path = (
-        job_directory / 'invocations' / f'{sequence:06d}-{role}-{attempt:04d}.json'
+        job_directory
+        / 'invocations'
+        / f'{sequence:06d}-{role.value}-{attempt:04d}.json'
     )
     pending = InvocationRecord(
         schema_version=4,
         run_id=str(job.id),
         task_id=task_id,
         invocation_id=attempt_id,
-        role=role,  # type: ignore[arg-type]
+        role=role,
         agent_vendor='openai',
         requested_model='gpt-test',
         effective_models=('gpt-effective',),
-        effective_model_status='reported',
+        effective_model_status=EffectiveModelStatus.REPORTED,
         runtime='codex',
         iteration=sequence,
         started_at='2026-09-07T10:00:00Z',
@@ -82,7 +86,7 @@ def add_attempt(
         stdout_path=str(stdout),
         stderr_path=str(stderr),
         attempt=attempt,
-        status='pending',
+        status=AttemptStatus.PENDING,
         conclusion=None,
     )
     _write_record_unindexed(record_path, pending)
@@ -125,7 +129,11 @@ def test_four_views_use_public_vocabulary_and_current_array(
     database, job, job_directory = create_job(tmp_path)
     completed_id = add_attempt(job, job_directory, sequence=1)
     pending_id = add_attempt(
-        job, job_directory, sequence=2, role='developer', status=AttemptStatus.PENDING
+        job,
+        job_directory,
+        sequence=2,
+        role=RuntimeRole.DEVELOPER,
+        status=AttemptStatus.PENDING,
     )
     root = evidence_root_for_job(job_directory)
 

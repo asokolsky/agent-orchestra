@@ -10,12 +10,13 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Never, cast
+from typing import TYPE_CHECKING, Any, Never, cast
 from uuid import uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
@@ -24,6 +25,7 @@ from agent_orchestra.evidence import (
     resolve_evidence_path,
 )
 from agent_orchestra.models import RunState
+from agent_orchestra.persisted_enum import PersistedEnum
 from agent_orchestra.reviewer_paths import validate_reviewer_id
 
 INVOCATION_DIRECTORY_ESCAPE = 'invocation directory escapes the run directory'
@@ -43,7 +45,7 @@ def _fail(message: str, cause: BaseException | None = None) -> Never:
     raise InvocationEvidenceError(message)
 
 
-class AttemptStatus(StrEnum):
+class AttemptStatus(PersistedEnum):
     """Durable progress states for one agent process attempt."""
 
     PENDING = 'pending'
@@ -51,7 +53,7 @@ class AttemptStatus(StrEnum):
     COMPLETED = 'completed'
 
 
-class AttemptConclusion(StrEnum):
+class AttemptConclusion(PersistedEnum):
     """Terminal outcomes for one agent process attempt."""
 
     SUCCEEDED = 'succeeded'
@@ -80,10 +82,11 @@ class RecoveryAction(StrEnum):
     NONE = 'none'
 
 
-type AttemptStatusValue = Literal['pending', 'running', 'completed']
-type AttemptConclusionValue = Literal[
-    'succeeded', 'failed', 'timed_out', 'cancelled', 'interrupted'
-]
+class EffectiveModelStatus(PersistedEnum):
+    """Whether a runtime reported machine-readable effective model identities."""
+
+    REPORTED = 'reported'
+    UNAVAILABLE = 'unavailable'
 
 
 ATTEMPT_TRANSITIONS: dict[AttemptStatus, frozenset[AttemptStatus]] = {
@@ -110,11 +113,11 @@ class InvocationRecord:
     run_id: str
     task_id: str
     invocation_id: str
-    role: Literal['developer', 'reviewer', 'issue_reviewer']
+    role: RuntimeRole
     agent_vendor: str
     requested_model: str | None
     effective_models: tuple[str, ...]
-    effective_model_status: Literal['reported', 'unavailable']
+    effective_model_status: EffectiveModelStatus
     runtime: str
     iteration: int
     started_at: str
@@ -125,8 +128,8 @@ class InvocationRecord:
     stdout_path: str
     stderr_path: str
     attempt: int
-    status: AttemptStatusValue
-    conclusion: AttemptConclusionValue | None
+    status: AttemptStatus
+    conclusion: AttemptConclusion | None
     response_received_at: str | None = None
     validation_started_at: str | None = None
     reviewer_id: str | None = None
@@ -176,8 +179,8 @@ def transition_attempt(
             _fail(f'{field} is immutable once set')
     updated = replace(
         record,
-        status=status.value,
-        conclusion=conclusion.value if conclusion is not None else None,
+        status=status,
+        conclusion=conclusion,
         finished_at=finished_at,
         response_received_at=response_received_at,
         validation_started_at=validation_started_at,
@@ -208,7 +211,6 @@ def _valid_record_types(record: InvocationRecord) -> bool:
         and isinstance(record.run_id, str)
         and isinstance(record.task_id, str)
         and isinstance(record.invocation_id, str)
-        and isinstance(record.role, str)
         and isinstance(record.agent_vendor, str)
         and (record.requested_model is None or isinstance(record.requested_model, str))
         and isinstance(record.effective_models, (list, tuple))
@@ -254,27 +256,22 @@ def validate_attempt_record(record: InvocationRecord) -> None:
         _fail('schema 4 invocation requires task_id')
     if not _valid_record_types(record):
         _fail('invalid invocation record field type')
+    if not isinstance(record.role, RuntimeRole):
+        _fail('invalid attempt role')
+    if not isinstance(record.effective_model_status, EffectiveModelStatus):
+        _fail('invalid effective_model_status')
+    if not isinstance(record.status, AttemptStatus):
+        _fail('invalid attempt status')
+    if record.conclusion is not None and not isinstance(
+        record.conclusion, AttemptConclusion
+    ):
+        _fail('invalid attempt conclusion')
     if len(record.effective_models) != len(set(record.effective_models)):
         _fail('effective_models must be unique')
-    if record.effective_model_status not in {'reported', 'unavailable'}:
-        _fail('invalid effective_model_status')
     if (record.effective_model_status == 'reported') != bool(record.effective_models):
         _fail('effective_model_status contradicts effective_models')
-    if record.role not in {'developer', 'reviewer', 'issue_reviewer'}:
-        _fail('invalid attempt role')
     if record.iteration < 1 or record.attempt < 1:
         _fail('iteration and attempt must be positive')
-    if record.status not in {'pending', 'running', 'completed'}:
-        _fail('invalid attempt status')
-    if record.conclusion not in {
-        None,
-        'succeeded',
-        'failed',
-        'timed_out',
-        'cancelled',
-        'interrupted',
-    }:
-        _fail('invalid attempt conclusion')
     terminal = record.status == 'completed'
     if terminal != (record.conclusion is not None):
         _fail('invalid attempt status and conclusion')
@@ -366,11 +363,14 @@ def derive_task_status(records: tuple[InvocationRecord, ...]) -> TaskStatus:
     if len(attempts) != len(set(attempts)):
         _fail('task attempts must be unique')
     latest = max(records, key=lambda record: record.attempt)
-    if latest.status == 'pending':
+    # Identity, not equality: a bare string compares equal to a StrEnum member,
+    # so `==` would let an unvalidated record derive a status that
+    # validate_attempt_record rejects.
+    if latest.status is AttemptStatus.PENDING:
         return TaskStatus.PENDING
-    if latest.status == 'running':
+    if latest.status is AttemptStatus.RUNNING:
         return TaskStatus.RUNNING
-    if latest.status == 'completed':
+    if latest.status is AttemptStatus.COMPLETED:
         return TaskStatus.COMPLETED
     _fail('task status requires valid lifecycle evidence')
 
@@ -632,6 +632,25 @@ class InvocationEvidenceStore:
                 _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
             if schema_version == 4:
                 document['reviewer_id'] = None
+
+            def fail_record(message: str, name: str = path.name) -> Never:
+                """Report one unreadable persisted field for this record."""
+
+                _fail(f'invalid invocation record {name}: {message}')
+
+            document['role'] = RuntimeRole.decode(
+                document.get('role'), fail=fail_record
+            )
+            document['status'] = AttemptStatus.decode(
+                document.get('status'), fail=fail_record
+            )
+            document['effective_model_status'] = EffectiveModelStatus.decode(
+                document.get('effective_model_status'), fail=fail_record
+            )
+            if document.get('conclusion') is not None:
+                document['conclusion'] = AttemptConclusion.decode(
+                    document['conclusion'], fail=fail_record
+                )
             try:
                 record = InvocationRecord(**document)
             except TypeError as error:
@@ -646,8 +665,7 @@ class InvocationEvidenceStore:
                 _fail(f'duplicate task attempt in {path.name}')
             seen_attempts.add(attempt_key)
             if (
-                record.role not in {'developer', 'reviewer', 'issue_reviewer'}
-                or record.iteration < 1
+                record.iteration < 1
                 or record.attempt < 1
                 or not record.task_id
                 or (record.status == 'completed') != (record.conclusion is not None)
