@@ -47,6 +47,7 @@ from agent_orchestra.runtime_metadata import (
 from agent_orchestra.skill_install import install_skills
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
+    WorkerContext,
     resume_review,
 )
 
@@ -445,11 +446,13 @@ def test_fake_runtime_source_review_dispatches_and_resumes(
     )
 
     result = resume_review(
-        store=store,
+        context=WorkerContext(
+            store=store,
+            runs_directory=runs_directory,
+            digest_worktree=cli._working_tree_digest,
+            registry=resumed_registry,
+        ),
         run=store.get(run.id),
-        runs_directory=runs_directory,
-        digest_worktree=cli._working_tree_digest,
-        registry=resumed_registry,
     )
 
     assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
@@ -487,11 +490,13 @@ def test_fake_runtime_resume_rejects_removed_developer_role(
 
     with pytest.raises(WorkerError, match='runtime_role_unsupported') as raised:
         resume_review(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=runs_directory,
+                digest_worktree=cli._working_tree_digest,
+                registry=reviewer_only,
+            ),
             run=store.get(run.id),
-            runs_directory=runs_directory,
-            digest_worktree=cli._working_tree_digest,
-            registry=reviewer_only,
         )
 
     assert raised.value.code == 'runtime_role_unsupported'

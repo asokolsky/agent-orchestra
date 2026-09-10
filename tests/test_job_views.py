@@ -31,7 +31,7 @@ from agent_orchestra.models import Run
 from agent_orchestra.reviewer_paths import reviewer_invocation_stem, reviewer_task_id
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import run_queued_reviewer_set
+from agent_orchestra.worker import WorkerContext, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -256,19 +256,21 @@ def create_reviewed_batch_job(
         ),
     )
     result = run_queued_reviewer_set(
-        store=store,
+        context=WorkerContext(
+            store=store,
+            runs_directory=runs_directory,
+            digest_worktree=lambda _path, _base: DIGEST,
+            registry=DEFAULT_RUNTIME_REGISTRY,
+        ),
         run=run,
         objective='Review the change.',
         reviewer_plan=plan,
         developer_command=(),
-        runs_directory=runs_directory,
         developer_timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=lambda _path, _base: DIGEST,
         developer_identity=InvocationIdentity(
             vendor='openai', model=None, runtime='codex'
         ),
-        registry=DEFAULT_RUNTIME_REGISTRY,
     )
     return database, result, runs_directory
 

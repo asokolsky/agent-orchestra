@@ -144,7 +144,7 @@ class WorkerContext:
     store: JobStore
     runs_directory: Path
     digest_worktree: Callable[[Path, str], str | None]
-    registry: RuntimeRegistry
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +363,6 @@ def _run_queued_review(
     """Consume one queued local run through a bounded review-remediation loop."""
 
     store = context.store
-    runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
     registry = context.registry
     objective = plan.objective
@@ -402,7 +401,7 @@ def _run_queued_review(
             developer_identity, RuntimeRole.DEVELOPER, registry
         )
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
 
@@ -1234,7 +1233,6 @@ def _resume_developer_request(
     """Retry one durable remediation request and continue the same run."""
 
     store = context.store
-    runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
     registry = context.registry
     developer_command = plan.developer_command
@@ -1249,7 +1247,7 @@ def _resume_developer_request(
     )
     developer_identity = plan.developer_identity
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     logs = run_evidence_path(run_directory, 'logs')
     sequence = int(request['sequence'])
     response_path = run_evidence_path(run_directory, '.developer-handoff.json')
@@ -1710,10 +1708,9 @@ def _resume_reviewer_validation(
 ) -> Run:
     """Revalidate a durable reviewer response and continue without relaunching."""
     store = context.store
-    runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     sequence = int(request['sequence'])
     temporary = run_evidence_path(run_directory, '.review-result.json')
     canonical = manifest_evidence_path(run_directory, 'review_result', sequence + 1)
@@ -1847,10 +1844,9 @@ def _resume_developer_validation(
 ) -> Run:
     """Revalidate a durable developer response and continue without relaunching."""
     store = context.store
-    runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     sequence = int(request['sequence'])
     temporary = run_evidence_path(run_directory, '.developer-handoff.json')
     canonical = manifest_evidence_path(run_directory, 'developer_handoff', sequence + 1)
@@ -1967,7 +1963,6 @@ def _resume_active_attempt(
     developer_identity: InvocationIdentity,
 ) -> Run:
     """Recover an active workflow state from its latest durable task evidence."""
-    runs_directory = context.runs_directory
 
     expected_type = (
         'review_request' if run.state is RunState.REVIEWING else 'remediation_request'
@@ -1984,7 +1979,7 @@ def _resume_active_attempt(
     request = matching[-1]
     role = 'reviewer' if run.state is RunState.REVIEWING else 'developer'
     sequence = int(request['sequence'])
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     latest = latest_task_attempt(run_directory, sequence, role)
     temporary = run_evidence_path(
         run_directory,
@@ -2475,7 +2470,6 @@ def _resume_review(  # noqa: PLR0911
 ) -> Run:
     """Resume one recoverable run from its canonical execution evidence."""
     store = context.store
-    runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
     registry = context.registry
 
@@ -2490,7 +2484,7 @@ def _resume_review(  # noqa: PLR0911
         raise WorkerError(
             f'job is not resumable from {run.state}', code=RUN_NOT_RESUMABLE_CODE
         )
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
     execution = _read_execution_record(run_directory, str(run.id))
@@ -2711,29 +2705,21 @@ def _resume_review(  # noqa: PLR0911
 
 def resume_review(
     *,
-    store: JobStore,
+    context: WorkerContext,
     run: Run,
-    runs_directory: Path,
-    digest_worktree: Callable[[Path, str], str | None],
-    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Run:
     """Resume one run and persist any recoverable-command failure."""
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     try:
         return _resume_review(
-            context=WorkerContext(
-                store=store,
-                runs_directory=runs_directory,
-                digest_worktree=digest_worktree,
-                registry=registry,
-            ),
+            context=context,
             run=run,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:
-                durable_run = store.get(str(run.id))
+                durable_run = context.store.get(str(run.id))
                 write_json_atomic(
                     run_evidence_path(run_directory, 'failure.json'),
                     {
@@ -3178,17 +3164,14 @@ def _finish_reviewer_batch(
 
 def _run_queued_reviewer_set(
     *,
-    store: JobStore,
+    context: WorkerContext,
     run: Run,
     objective: str,
     reviewer_plan: ReviewerExecutionPlan,
     developer_command: Sequence[str],
-    runs_directory: Path,
     developer_timeout_seconds: int,
     max_iterations: int,
-    digest_worktree: Callable[[Path, str], str | None],
     developer_identity: InvocationIdentity,
-    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Run:
     """Run one concurrent required-reviewer batch for a queued immutable diff."""
 
@@ -3200,24 +3183,25 @@ def _run_queued_reviewer_set(
         raise WorkerError(INVALID_DEVELOPER_TIMEOUT)
     if max_iterations <= 0:
         raise WorkerError(INVALID_ITERATION_LIMIT)
-    context = WorkerContext(store, runs_directory, digest_worktree, registry)
     resolved_reviewers = tuple(
         replace(
             reviewer,
             identity=_resolve_resume_identity(
-                reviewer.identity, RuntimeRole.REVIEWER, registry
+                reviewer.identity, RuntimeRole.REVIEWER, context.registry
             ),
         )
         for reviewer in reviewer_plan.reviewers
     )
     reviewer_plan = replace(reviewer_plan, reviewers=resolved_reviewers)
     developer_identity = _resolve_resume_identity(
-        developer_identity, RuntimeRole.DEVELOPER, registry
+        developer_identity, RuntimeRole.DEVELOPER, context.registry
     )
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
-    current_digest = worktree_digest(digest_worktree, run.worktree_path, run.base_sha)
+    current_digest = worktree_digest(
+        context.digest_worktree, run.worktree_path, run.base_sha
+    )
     if current_digest is None:
         raise WorkerError(NO_CHANGES)
     prepared = replace(
@@ -3225,7 +3209,7 @@ def _run_queued_reviewer_set(
         diff_digest=current_digest,
         updated_at=utc_now(),
     )
-    store.update(prepared, expected_state=RunState.QUEUED)
+    context.store.update(prepared, expected_state=RunState.QUEUED)
     plan = ReviewerSetReviewPlan(
         objective,
         reviewer_plan,
@@ -3246,10 +3230,10 @@ def _run_queued_reviewer_set(
             'execution',
         )
         reviewing = transition(prepared, RunState.REVIEWING)
-        store.update(reviewing, expected_state=RunState.PREPARING)
+        context.store.update(reviewing, expected_state=RunState.PREPARING)
     except BaseException:
         failed = transition(prepared, RunState.FAILED)
-        store.update(failed, expected_state=RunState.PREPARING)
+        context.store.update(failed, expected_state=RunState.PREPARING)
         raise
     try:
         for directory in ('artifacts', 'logs', 'invocations'):
@@ -3292,49 +3276,43 @@ def _run_queued_reviewer_set(
         if error.code == REVIEWER_BATCH_INCOMPLETE_CODE:
             raise
         failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.REVIEWING)
+        context.store.update(failed, expected_state=RunState.REVIEWING)
         raise
     except BaseException:
         failed = transition(reviewing, RunState.FAILED)
-        store.update(failed, expected_state=RunState.REVIEWING)
+        context.store.update(failed, expected_state=RunState.REVIEWING)
         raise
 
 
 def run_queued_reviewer_set(
     *,
-    store: JobStore,
+    context: WorkerContext,
     run: Run,
     objective: str,
     reviewer_plan: ReviewerExecutionPlan,
     developer_command: Sequence[str],
-    runs_directory: Path,
     developer_timeout_seconds: int,
     max_iterations: int,
-    digest_worktree: Callable[[Path, str], str | None],
     developer_identity: InvocationIdentity,
-    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Run:
     """Run a reviewer batch and persist every worker failure as durable evidence."""
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     try:
         return _run_queued_reviewer_set(
-            store=store,
+            context=context,
             run=run,
             objective=objective,
             reviewer_plan=reviewer_plan,
             developer_command=developer_command,
-            runs_directory=runs_directory,
             developer_timeout_seconds=developer_timeout_seconds,
             max_iterations=max_iterations,
-            digest_worktree=digest_worktree,
             developer_identity=developer_identity,
-            registry=registry,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:
-                durable_run = store.get(str(run.id))
+                durable_run = context.store.get(str(run.id))
                 write_json_atomic(
                     run_evidence_path(run_directory, 'failure.json'),
                     {
@@ -3358,23 +3336,20 @@ def run_queued_reviewer_set(
 
 def run_queued_review(
     *,
-    store: JobStore,
+    context: WorkerContext,
     run: Run,
     objective: str,
     reviewer_command: Sequence[str],
     developer_command: Sequence[str],
-    runs_directory: Path,
     timeout_seconds: int,
     developer_timeout_seconds: int | None = None,
     max_iterations: int = 3,
-    digest_worktree: Callable[[Path, str], str | None],
     reviewer_identity: InvocationIdentity | None = None,
     developer_identity: InvocationIdentity | None = None,
-    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> Run:
     """Run the bounded loop and persist every worker failure as durable evidence."""
 
-    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     reviewer_identity = reviewer_identity or InvocationIdentity(
         vendor='unknown', model=None, runtime='custom-command'
     )
@@ -3383,12 +3358,7 @@ def run_queued_review(
     )
     try:
         return _run_queued_review(
-            context=WorkerContext(
-                store=store,
-                runs_directory=runs_directory,
-                digest_worktree=digest_worktree,
-                registry=registry,
-            ),
+            context=context,
             plan=ReviewPlan(
                 objective=objective,
                 reviewer_command=reviewer_command,
@@ -3404,7 +3374,7 @@ def run_queued_review(
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:
-                durable_run = store.get(str(run.id))
+                durable_run = context.store.get(str(run.id))
                 write_json_atomic(
                     run_evidence_path(run_directory, 'failure.json'),
                     {

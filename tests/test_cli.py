@@ -52,6 +52,7 @@ from agent_orchestra.settings import load_settings
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
+    WorkerContext,
     resume_review,
     run_queued_review,
 )
@@ -234,16 +235,18 @@ def test_fresh_worker_rejects_invalid_runtime_before_command(
 
     with pytest.raises(WorkerError) as raised:
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+                registry=registry,
+            ),
             run=context.run,
             objective='Review the change.',
             reviewer_command=(sys.executable, '-c', f'open({str(marker)!r}, "w")'),
             developer_command=(),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
-            digest_worktree=_working_tree_digest,
             reviewer_identity=identity,
-            registry=registry,
         )
 
     assert raised.value.code == expected_code
@@ -1813,14 +1816,16 @@ def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
     write_provenance_reviewer(reviewer)
 
     result = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review the change.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
-        digest_worktree=_working_tree_digest,
         reviewer_identity=InvocationIdentity(
             vendor='anthropic', model='requested-model', runtime='claude-code'
         ),
@@ -1894,14 +1899,16 @@ def test_worker_persists_interrupted_state(
     monkeypatch.setattr(CommandAgentAdapter, 'execute', interrupt_selected)
     with pytest.raises(KeyboardInterrupt):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=('unused-developer',),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
-            digest_worktree=_working_tree_digest,
         )
 
     assert context.store.get(context.run.id).state is RunState.INTERRUPTED
@@ -1954,14 +1961,16 @@ def test_worker_finalizes_interruption_after_activation(
     monkeypatch.setattr(CommandAgentAdapter, 'execute', interrupt_selected)
     with pytest.raises(KeyboardInterrupt):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=('unused-developer',),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
-            digest_worktree=_working_tree_digest,
         )
 
     invocation_files = sorted(
@@ -2114,15 +2123,17 @@ def test_worker_remediates_and_reviews_new_digest(
     write_developer(developer)
 
     result = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=2,
-        digest_worktree=_working_tree_digest,
     )
 
     assert result.state.value == 'awaiting_commit_authorization'
@@ -2172,15 +2183,17 @@ def test_resume_validation_required_continues_same_run(
     write_recoverable_developer(developer)
 
     blocked = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
 
     assert blocked.id == context.run.id
@@ -2235,16 +2248,18 @@ def test_resume_retries_an_interrupted_validation_required_recovery(
     write_loop_reviewer(reviewer)
     write_recoverable_developer(developer)
     blocked = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         developer_timeout_seconds=1,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
 
     assert blocked.state is RunState.VALIDATION_REQUIRED
@@ -2290,15 +2305,17 @@ def test_resume_archives_rejected_developer_handoff_by_attempt(
     write_loop_reviewer(reviewer)
     write_recoverable_developer(developer)
     blocked = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
     write_developer(developer)
@@ -2331,15 +2348,17 @@ def test_resume_rejects_handoff_with_a_non_remediation_parent(
     write_loop_reviewer(reviewer)
     write_recoverable_developer(developer)
     run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
 
     messages = evidence_directory(context) / 'messages'
@@ -2366,15 +2385,17 @@ def test_resume_rejects_handoff_linked_to_a_different_review_result(
     write_loop_reviewer(reviewer)
     write_recoverable_developer(developer)
     run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
 
     messages = evidence_directory(context) / 'messages'
@@ -2446,15 +2467,17 @@ def test_resume_rejects_tampered_review_exchange_payload_links(
 
     with pytest.raises(WorkerError, match='reviewer timed out'):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=1,
             max_iterations=3,
-            digest_worktree=_working_tree_digest,
         )
 
     messages = evidence_directory(context) / 'messages'
@@ -2502,15 +2525,17 @@ def test_worker_stops_bounded_non_progress(
 
     with pytest.raises(WorkerError, match=expected):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
             max_iterations=max_iterations,
-            digest_worktree=_working_tree_digest,
         )
 
     assert context.store.get(context.run.id).state is RunState.FAILED
@@ -2532,15 +2557,17 @@ def test_worker_surfaces_developer_disagreement_for_human_decision(
     write_developer(developer, change_worktree=False, disposition='rejected')
 
     result = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=2,
-        digest_worktree=_working_tree_digest,
     )
 
     assert result.state.value == 'changes_requested'
@@ -2780,14 +2807,16 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
     monkeypatch.setattr(InvocationEvidenceStore, 'write', fail_validation_record)
     with pytest.raises(OSError, match='simulated validation milestone failure'):
         run_queued_review(
-            store=enqueued_run.store,
+            context=WorkerContext(
+                store=enqueued_run.store,
+                runs_directory=enqueued_run.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=enqueued_run.run,
             objective='Review.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(),
-            runs_directory=enqueued_run.runs_directory,
             timeout_seconds=30,
-            digest_worktree=_working_tree_digest,
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
 
@@ -2834,14 +2863,16 @@ def test_resume_applies_completed_reviewer_conclusion_without_relaunching(
     monkeypatch.setattr(enqueued_run.store, 'update', fail_decision)
     with pytest.raises(OSError, match='simulated workflow transition failure'):
         run_queued_review(
-            store=enqueued_run.store,
+            context=WorkerContext(
+                store=enqueued_run.store,
+                runs_directory=enqueued_run.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=enqueued_run.run,
             objective='Review.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(),
-            runs_directory=enqueued_run.runs_directory,
             timeout_seconds=30,
-            digest_worktree=_working_tree_digest,
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
 
@@ -2882,14 +2913,16 @@ def test_resume_advances_persisted_approval_without_relaunching(
     monkeypatch.setattr(enqueued_run.store, 'update', fail_authorization_wait)
     with pytest.raises(OSError, match='simulated authorization transition failure'):
         run_queued_review(
-            store=enqueued_run.store,
+            context=WorkerContext(
+                store=enqueued_run.store,
+                runs_directory=enqueued_run.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=enqueued_run.run,
             objective='Review.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(),
-            runs_directory=enqueued_run.runs_directory,
             timeout_seconds=30,
-            digest_worktree=_working_tree_digest,
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.APPROVED
 
@@ -2932,16 +2965,18 @@ def test_resume_starts_persisted_remediation_request(
     monkeypatch.setattr(context.store, 'update', fail_developing)
     with pytest.raises(OSError, match='simulated development transition failure'):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=_working_tree_digest,
         )
     assert context.store.get(context.run.id).state is RunState.CHANGES_REQUESTED
     assert (
@@ -2987,16 +3022,18 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
     monkeypatch.setattr(context.store, 'update', fail_review_decision)
     with pytest.raises(OSError, match='simulated review decision failure'):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=_working_tree_digest,
         )
     assert context.store.get(context.run.id).state is RunState.REVIEWING
 
@@ -3016,10 +3053,12 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
     monkeypatch.setattr(worker, 'record_invocation', fail_developer_record)
     with pytest.raises(OSError, match='simulated developer record failure'):
         resume_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.store.get(context.run.id),
-            runs_directory=context.runs_directory,
-            digest_worktree=_working_tree_digest,
         )
     assert context.store.get(context.run.id).state is RunState.DEVELOPING
 
@@ -3109,16 +3148,18 @@ def test_resume_interrupted_developer_reuses_remediation_request(
 
     with pytest.raises(WorkerError, match='developer timed out'):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
             developer_timeout_seconds=1,
             max_iterations=3,
-            digest_worktree=_working_tree_digest,
         )
 
     assert context.store.get(context.run.id).state is RunState.INTERRUPTED
@@ -3194,15 +3235,17 @@ def test_resume_revalidates_developer_response_without_relaunching(
         OSError, match='simulated developer validation milestone failure'
     ):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=_working_tree_digest,
         )
     assert context.store.get(context.run.id).state is RunState.DEVELOPING
 
@@ -3234,15 +3277,17 @@ def test_resume_writes_recovery_request_before_activating_developer(
     write_loop_reviewer(reviewer)
     write_recoverable_developer(developer)
     blocked = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
     original_write = evidence_module.write_json_atomic
@@ -3279,15 +3324,17 @@ def test_resume_recovers_request_when_activation_state_did_not_persist(
     write_loop_reviewer(reviewer)
     write_recoverable_developer(developer)
     blocked = run_queued_review(
-        store=context.store,
+        context=WorkerContext(
+            store=context.store,
+            runs_directory=context.runs_directory,
+            digest_worktree=_working_tree_digest,
+        ),
         run=context.run,
         objective='Review and remediate.',
         reviewer_command=(sys.executable, str(reviewer)),
         developer_command=(sys.executable, str(developer)),
-        runs_directory=context.runs_directory,
         timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=_working_tree_digest,
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
     original_update = context.store.update
@@ -3306,10 +3353,12 @@ def test_resume_recovers_request_when_activation_state_did_not_persist(
     monkeypatch.setattr(context.store, 'update', fail_activation)
     with pytest.raises(OSError, match='simulated activation failure'):
         resume_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=blocked,
-            runs_directory=context.runs_directory,
-            digest_worktree=_working_tree_digest,
         )
     messages = evidence_directory(context) / 'messages'
     assert (messages / '000005-remediation-request.json').is_file()
@@ -3357,15 +3406,17 @@ def test_concurrent_active_resumes_launch_one_process(
     monkeypatch.setattr(worker, 'record_invocation', crash_before_attempt)
     with pytest.raises(OSError, match='simulated crash before attempt persistence'):
         run_queued_review(
-            store=context.store,
+            context=WorkerContext(
+                store=context.store,
+                runs_directory=context.runs_directory,
+                digest_worktree=_working_tree_digest,
+            ),
             run=context.run,
             objective='Review and remediate.',
             reviewer_command=(sys.executable, str(reviewer)),
             developer_command=(sys.executable, str(developer)),
-            runs_directory=context.runs_directory,
             timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=_working_tree_digest,
         )
     monkeypatch.setattr(worker, 'record_invocation', original_record)
     active = context.store.get(context.run.id)
@@ -3416,10 +3467,12 @@ def test_concurrent_active_resumes_launch_one_process(
 
         try:
             resume_review(
-                store=JobStore(context.database),
+                context=WorkerContext(
+                    store=JobStore(context.database),
+                    runs_directory=context.runs_directory,
+                    digest_worktree=_working_tree_digest,
+                ),
                 run=active,
-                runs_directory=context.runs_directory,
-                digest_worktree=_working_tree_digest,
             )
         except WorkerError as error:
             outcomes.append(error.code or type(error).__name__)

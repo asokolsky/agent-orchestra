@@ -29,7 +29,7 @@ from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import resume_review, run_queued_reviewer_set
+from agent_orchestra.worker import WorkerContext, resume_review, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -167,19 +167,21 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
     )
 
     result = run_queued_reviewer_set(
-        store=store,
+        context=WorkerContext(
+            store=store,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+            registry=DEFAULT_RUNTIME_REGISTRY,
+        ),
         run=run,
         objective='Review the change.',
         reviewer_plan=plan,
         developer_command=(),
-        runs_directory=tmp_path / 'runs',
         developer_timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=lambda _path, _base: DIGEST,
         developer_identity=InvocationIdentity(
             vendor='openai', model=None, runtime='codex'
         ),
-        registry=DEFAULT_RUNTIME_REGISTRY,
     )
 
     assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
@@ -447,7 +449,11 @@ def test_reviewer_set_persists_namespaced_aggregate_findings(
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', request_changes)
     result = run_queued_reviewer_set(
-        store=store,
+        context=WorkerContext(
+            store=store,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+        ),
         run=run,
         objective='Review the change.',
         reviewer_plan=ReviewerExecutionPlan(
@@ -458,10 +464,8 @@ def test_reviewer_set_persists_namespaced_aggregate_findings(
             ),
         ),
         developer_command=(),
-        runs_directory=tmp_path / 'runs',
         developer_timeout_seconds=30,
         max_iterations=3,
-        digest_worktree=lambda _path, _base: DIGEST,
         developer_identity=InvocationIdentity(
             vendor='openai', model=None, runtime='codex'
         ),
@@ -543,7 +547,11 @@ def test_reviewer_set_mutation_fails_terminally(
 
     with pytest.raises(WorkerError, match='worktree changed'):
         run_queued_reviewer_set(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: next(digests),
+            ),
             run=run,
             objective='Review the change.',
             reviewer_plan=ReviewerExecutionPlan(
@@ -554,10 +562,8 @@ def test_reviewer_set_mutation_fails_terminally(
                 ),
             ),
             developer_command=(),
-            runs_directory=tmp_path / 'runs',
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=lambda _path, _base: next(digests),
             developer_identity=InvocationIdentity(
                 vendor='openai', model=None, runtime='codex'
             ),
@@ -616,7 +622,11 @@ def test_incomplete_reviewer_set_is_resumable(
 
     with pytest.raises(WorkerError) as caught:
         run_queued_reviewer_set(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=run,
             objective='Review the change.',
             reviewer_plan=ReviewerExecutionPlan(
@@ -627,10 +637,8 @@ def test_incomplete_reviewer_set_is_resumable(
                 ),
             ),
             developer_command=(),
-            runs_directory=tmp_path / 'runs',
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=lambda _path, _base: DIGEST,
             developer_identity=InvocationIdentity(
                 vendor='openai', model=None, runtime='codex'
             ),
@@ -718,15 +726,17 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     )
     with pytest.raises(WorkerError, match='reviewer batch did not complete'):
         run_queued_reviewer_set(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=run,
             objective='Review the change.',
             reviewer_plan=plan,
             developer_command=(),
-            runs_directory=tmp_path / 'runs',
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=lambda _path, _base: DIGEST,
             developer_identity=InvocationIdentity(
                 vendor='openai', model=None, runtime='codex'
             ),
@@ -784,10 +794,12 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     store.update(active, expected_state=RunState.INTERRUPTED)
     with pytest.raises(WorkerError, match='reviewer batch did not complete'):
         resume_review(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=active,
-            runs_directory=tmp_path / 'runs',
-            digest_worktree=lambda _path, _base: DIGEST,
         )
     interrupted = store.get(run.id)
     assert interrupted.state is RunState.INTERRUPTED
@@ -808,10 +820,12 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
         match='canonical reviewer result lacks a completed successful attempt',
     ) as caught:
         resume_review(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=interrupted,
-            runs_directory=tmp_path / 'runs',
-            digest_worktree=lambda _path, _base: DIGEST,
         )
     assert caught.value.code == 'resume_activation_uncertain'
     assert store.get(run.id).state is RunState.INTERRUPTED
@@ -828,10 +842,12 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     result_path.write_text(json.dumps(result_document), encoding='utf-8')
     with pytest.raises(WorkerError, match='durable run scope'):
         resume_review(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=interrupted,
-            runs_directory=tmp_path / 'runs',
-            digest_worktree=lambda _path, _base: DIGEST,
         )
     assert store.get(run.id).state is RunState.INTERRUPTED
     request['run_id'] = result_document['run_id'] = str(run.id)
@@ -848,10 +864,12 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     monkeypatch.setattr(worker_module, '_next_reviewer_attempt', track_next_attempt)
 
     resumed = resume_review(
-        store=store,
+        context=WorkerContext(
+            store=store,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+        ),
         run=interrupted,
-        runs_directory=tmp_path / 'runs',
-        digest_worktree=lambda _path, _base: DIGEST,
     )
 
     assert resumed.state is RunState.AWAITING_COMMIT_AUTHORIZATION
@@ -951,7 +969,11 @@ def test_mixed_incomplete_reviewer_set_is_resumable(
 
     with pytest.raises(WorkerError) as caught:
         run_queued_reviewer_set(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=run,
             objective='Review the change.',
             reviewer_plan=ReviewerExecutionPlan(
@@ -962,10 +984,8 @@ def test_mixed_incomplete_reviewer_set_is_resumable(
                 ),
             ),
             developer_command=(),
-            runs_directory=tmp_path / 'runs',
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=lambda _path, _base: DIGEST,
             developer_identity=InvocationIdentity(
                 vendor='openai', model=None, runtime='codex'
             ),
@@ -1000,7 +1020,11 @@ def test_unexpected_batch_exception_fails_terminally(
 
     with pytest.raises(OSError, match='injected evidence failure'):
         run_queued_reviewer_set(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=run,
             objective='Review the change.',
             reviewer_plan=ReviewerExecutionPlan(
@@ -1011,10 +1035,8 @@ def test_unexpected_batch_exception_fails_terminally(
                 ),
             ),
             developer_command=(),
-            runs_directory=tmp_path / 'runs',
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=lambda _path, _base: DIGEST,
             developer_identity=InvocationIdentity(
                 vendor='openai', model=None, runtime='codex'
             ),
@@ -1048,7 +1070,11 @@ def test_unexpected_adapter_exception_finalizes_partial_evidence(
 
     with pytest.raises(RuntimeError, match='unexpected adapter failure'):
         run_queued_reviewer_set(
-            store=store,
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
             run=run,
             objective='Review the change.',
             reviewer_plan=ReviewerExecutionPlan(
@@ -1059,10 +1085,8 @@ def test_unexpected_adapter_exception_finalizes_partial_evidence(
                 ),
             ),
             developer_command=(),
-            runs_directory=tmp_path / 'runs',
             developer_timeout_seconds=30,
             max_iterations=3,
-            digest_worktree=lambda _path, _base: DIGEST,
             developer_identity=InvocationIdentity(
                 vendor='openai', model=None, runtime='codex'
             ),
