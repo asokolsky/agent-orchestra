@@ -17,7 +17,7 @@ from agent_orchestra.invocations import (
     transition_attempt,
 )
 from agent_orchestra.models import Run
-from agent_orchestra.store import RunStore
+from agent_orchestra.store import JobStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,7 +29,7 @@ def create_job(tmp_path: Path) -> tuple[Path, Run, Path]:
     """Persist one job and return its database and evidence directory."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
@@ -186,7 +186,7 @@ def test_views_treat_absent_issue_tables_as_empty(
     """Read an existing state database without creating issue tables."""
 
     database = tmp_path / 'state.db'
-    RunStore(database).initialize()
+    JobStore(database).initialize()
     with sqlite3.connect(database) as connection:
         connection.execute('DROP TABLE issue_actions')
         connection.execute('DROP TABLE issue_jobs')

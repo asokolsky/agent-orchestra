@@ -217,7 +217,7 @@ but whether the type reaches into a subsystem that another object owns.
 **Collaborators own identity, and take one of two shapes.**
 
 *Service collaborators* hold configuration fixed at construction and expose the
-operations that use it. `RunStore` owns a database path, `RuntimeRegistry` owns
+operations that use it. `JobStore` owns a database path, `RuntimeRegistry` owns
 the set of runtimes, `JobEvidence` owns one job's evidence root and identifier,
 and `InvocationEvidenceStore` owns one job directory. Callers ask them to do
 things rather than reading their fields.
@@ -408,6 +408,23 @@ The SQLite tables and canonical evidence retain their implementation-level
 column and field names. Those names are not exposed by the schema-16 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
+
+That retention is deliberate. `Run`, `Run.id`, and the `runs` table each
+describe one source-code run and keep those names. Internal names are corrected
+only when they claim a narrower scope than the thing they name: `create_job_id`
+produces identifiers for both `Run.create_local` and `IssueJob.create`, and
+`JobStore` owns the `runs`, `transitions`, `issue_jobs`, and `issue_actions`
+tables. Both were previously named after runs alone, which made an issue job
+look like a run or like a mistake.
+
+Two names are knowingly kept despite covering both kinds. `RunState` types and
+compares `IssueJob.state` as well as `Run.state`; it is retained because
+`agent_orchestra.__all__` exports it alongside `Run` and `ScenarioType`, so
+renaming it is a public change rather than an internal one.
+`InvocationRecord.run_id` carries an issue job's identifier for an issue review;
+it is retained as stored evidence under the paragraph above, and audit schema 15
+withholds it from published attempt objects. Renaming storage to match the
+public vocabulary is likewise a separate decision, and is not this one.
 
 Schema version history:
 

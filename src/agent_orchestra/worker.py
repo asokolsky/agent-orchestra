@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
-    from agent_orchestra.store import RunStore
+    from agent_orchestra.store import JobStore
 
 
 class WorkerError(RuntimeError):
@@ -144,7 +144,7 @@ class WorkerContext:
     in nine places, which is what #38 had to do for the runtime registry.
     """
 
-    store: RunStore
+    store: JobStore
     runs_directory: Path
     digest_worktree: Callable[[Path, str], str | None]
     registry: RuntimeRegistry
@@ -2444,7 +2444,7 @@ def _complete_recovered_validation(
 
 
 def _raise_recovered_conclusion(
-    *, store: RunStore, run: Run, role: str, record: InvocationRecord
+    *, store: JobStore, run: Run, role: str, record: InvocationRecord
 ) -> Never:
     """Apply a terminal unsuccessful attempt conclusion to the workflow."""
 
@@ -3177,7 +3177,7 @@ def _resume_review(
 
 def resume_review(
     *,
-    store: RunStore,
+    store: JobStore,
     run: Run,
     runs_directory: Path,
     digest_worktree: Callable[[Path, str], str | None],
@@ -3536,7 +3536,7 @@ def _execute_reviewer_dispatch(
 
 def _run_queued_reviewer_set(
     *,
-    store: RunStore,
+    store: JobStore,
     run: Run,
     objective: str,
     reviewer_plan: ReviewerExecutionPlan,
@@ -3704,7 +3704,7 @@ def _run_queued_reviewer_set(
 
 def run_queued_reviewer_set(
     *,
-    store: RunStore,
+    store: JobStore,
     run: Run,
     objective: str,
     reviewer_plan: ReviewerExecutionPlan,
@@ -3760,7 +3760,7 @@ def run_queued_reviewer_set(
 
 def run_queued_review(
     *,
-    store: RunStore,
+    store: JobStore,
     run: Run,
     objective: str,
     reviewer_command: Sequence[str],

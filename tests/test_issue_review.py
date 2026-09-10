@@ -30,7 +30,7 @@ from agent_orchestra.issue_sources import (
     write_snapshot,
 )
 from agent_orchestra.models import IssueJob, RunState
-from agent_orchestra.store import ConcurrentUpdateError, RunStore
+from agent_orchestra.store import ConcurrentUpdateError, JobStore
 
 
 class FakeIssueReviewerAdapter(IssueReviewerAdapter):
@@ -109,11 +109,11 @@ def snapshot(
     )
 
 
-def setup_job(tmp_path: Path) -> tuple[RunStore, IssueJob, Path]:
+def setup_job(tmp_path: Path) -> tuple[JobStore, IssueJob, Path]:
     """Persist one captured issue and return its workflow context."""
 
     source = snapshot()
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     job = IssueJob.create(
         provider=source.locator.provider,

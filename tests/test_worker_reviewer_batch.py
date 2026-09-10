@@ -23,7 +23,7 @@ from agent_orchestra.audit import build_audit_document
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
-from agent_orchestra.store import RunStore
+from agent_orchestra.store import JobStore
 from agent_orchestra.worker import WorkerError, run_queued_reviewer_set
 
 if TYPE_CHECKING:
@@ -99,7 +99,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
     store.add(run)
@@ -410,7 +410,7 @@ def test_reviewer_set_mutation_fails_terminally(
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
     store.add(run)
@@ -469,7 +469,7 @@ def test_incomplete_reviewer_set_fails_terminally(
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
     store.add(run)
@@ -574,7 +574,7 @@ def test_mixed_incomplete_reviewer_set_fails_terminally(
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
     store.add(run)
@@ -649,7 +649,7 @@ def test_unexpected_batch_exception_fails_terminally(
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
     store.add(run)
@@ -695,7 +695,7 @@ def test_unexpected_adapter_exception_finalizes_partial_evidence(
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
     store.add(run)

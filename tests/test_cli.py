@@ -37,7 +37,7 @@ from agent_orchestra.manifests import ENGINE_TOO_OLD, ManifestError
 from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
 from agent_orchestra.settings import load_settings
-from agent_orchestra.store import RunStore
+from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
     NO_REMEDIATION_CHANGE,
@@ -53,7 +53,7 @@ class CliRunContext:
 
     repo: Path
     database: Path
-    store: RunStore
+    store: JobStore
     run: Run
     runs_directory: Path
 
@@ -94,7 +94,7 @@ def enqueued_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> CliRunCo
     database = tmp_path / 'state.db'
     assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
-    store = RunStore(database)
+    store = JobStore(database)
     return CliRunContext(
         repo=repo,
         database=database,
@@ -149,7 +149,7 @@ def create_worker_run(tmp_path: Path, *, job_id: str | None = None) -> CliRunCon
     initialize_git_repo(repo)
     (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     digest = _working_tree_digest(repo, 'HEAD')
     assert digest is not None
@@ -525,7 +525,7 @@ def test_enqueue_local_captures_current_diff(
     result = main(['--database', str(database), 'enqueue-local', str(repo)])
 
     assert result == 0
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
     assert re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}', run.id)
     assert run.diff_digest is not None
     assert re.fullmatch(r'sha256:[0-9a-f]{64}', run.diff_digest)
@@ -551,7 +551,7 @@ def test_enqueue_local_from_subdirectory_captures_complete_worktree(
     result = main(['--database', str(database), 'enqueue-local', str(subdirectory)])
 
     assert result == 0
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
     assert run.repo_path == repo
     assert run.worktree_path == repo
     assert run.diff_digest is not None
@@ -574,7 +574,7 @@ def test_enqueue_local_distinguishes_linked_worktree_from_primary_repo(
     result = main(['--database', str(database), 'enqueue-local', str(worktree)])
 
     assert result == 0
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
     assert run.repo_path == repo
     assert run.worktree_path == worktree
     assert str(run.id) in capsys.readouterr().out
@@ -604,7 +604,7 @@ def test_enqueue_local_uses_bare_repo_backing_linked_worktree(
     result = main(['--database', str(database), 'enqueue-local', str(worktree)])
 
     assert result == 0
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
     assert run.repo_path == bare_repo
     assert run.worktree_path == worktree
     assert str(run.id) in capsys.readouterr().out
@@ -652,7 +652,7 @@ def test_enqueue_local_supports_separate_git_directory(
     result = main(['--database', str(database), 'enqueue-local', str(repo)])
 
     assert result == 0
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
     assert run.repo_path == repo
     assert run.worktree_path == repo
     assert run.repo_path != git_directory
@@ -720,7 +720,7 @@ def test_enqueue_local_records_terminal_run_lineage(
     database = tmp_path / 'state.db'
     assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
-    predecessor = RunStore(database).list_runs()[0]
+    predecessor = JobStore(database).list_runs()[0]
     with sqlite3.connect(database) as connection:
         connection.execute(
             "UPDATE runs SET state = 'failed' WHERE id = ?", (predecessor.id,)
@@ -739,7 +739,7 @@ def test_enqueue_local_records_terminal_run_lineage(
     )
 
     assert result == 0
-    replacement = RunStore(database).list_runs()[0]
+    replacement = JobStore(database).list_runs()[0]
     assert replacement.id != predecessor.id
     assert replacement.supersedes_run_id == predecessor.id
     assert str(replacement.id) in capsys.readouterr().out
@@ -794,7 +794,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     result = main(['--database', str(database), 'enqueue-locals', str(projects)])
 
     assert result == 0
-    runs = RunStore(database).list_runs()
+    runs = JobStore(database).list_runs()
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
@@ -828,7 +828,7 @@ def test_enqueue_locals_distinguishes_linked_worktree_repo(
     result = main(['--database', str(database), 'enqueue-locals', str(projects)])
 
     assert result == 0
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
     assert run.repo_path == repo
     assert run.worktree_path == worktree
     assert json.loads(capsys.readouterr().out)['jobs'] == [
@@ -854,7 +854,7 @@ def test_enqueue_locals_accepts_tilde_directory(
     result = main(['--database', str(database), 'enqueue-locals', '~/Projects'])
 
     assert result == 0
-    assert RunStore(database).list_runs()[0].worktree_path == repo
+    assert JobStore(database).list_runs()[0].worktree_path == repo
     assert json.loads(capsys.readouterr().out)['summary']['enqueued'] == 1
 
 
@@ -900,7 +900,7 @@ def test_enqueue_locals_continues_after_repo_failure(
     result = main(['--database', str(database), 'enqueue-locals', str(projects)])
 
     assert result == 0
-    assert RunStore(database).list_runs()[0].worktree_path == changed
+    assert JobStore(database).list_runs()[0].worktree_path == changed
     captured = capsys.readouterr()
     assert captured.err == ''
     document = json.loads(captured.out)
@@ -1003,7 +1003,7 @@ def test_jobs_lists_persisted_job(
     """Display a persisted job without changing state."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -1057,7 +1057,7 @@ def test_jobs_filters_repeated_states_across_scenarios(
     """Union repeated durable-state selections for both job scenarios."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -1107,7 +1107,7 @@ def test_jobs_attention_selects_exact_human_action_states(
     """Expose the shared human-action set and union it with explicit states."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -1191,7 +1191,7 @@ def test_jobs_reports_broken_worktree_and_excludes_it_from_attention(
     """Keep unrunnable jobs visible without presenting them as actionable."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     missing = tmp_path / 'missing'
     run = Run.create_local(missing, missing, 'base', 'head', 'digest')
@@ -1229,7 +1229,7 @@ def test_cancel_records_reason_without_deleting_evidence(
     """Cancel an unrunnable job and preserve its durable evidence."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     missing = tmp_path / 'missing'
     run = Run.create_local(missing, missing, 'base', 'head', 'digest')
@@ -1267,7 +1267,7 @@ def test_cancel_refuses_job_with_available_worktree(
     repository.mkdir()
     initialize_git_repo(repository)
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(repository, repository, 'base', 'head', 'digest')
     store.add(run)
@@ -1296,7 +1296,7 @@ def test_cancel_reports_unrecognized_persisted_state(
     """Return the established JSON error when a job state cannot be decoded."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     missing = tmp_path / 'missing'
     run = Run.create_local(missing, missing, 'base', 'head', 'digest')
@@ -1321,7 +1321,7 @@ def test_cancel_reports_issue_job_as_not_cancellable(
     """Distinguish an existing issue-review job from an unknown identifier."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     issue = IssueJob.create(
         provider='github',
@@ -1393,7 +1393,7 @@ def test_job_selects_one_job_by_id(
     """Return a single job with no current tasks before execution."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     first = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'first')
     second = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'second')
@@ -1426,7 +1426,7 @@ def test_job_reads_persisted_review_state_without_initializing(
     """Expose the renamed state without requiring a separate init command."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -1465,7 +1465,7 @@ def test_jobs_lists_empty_jobs_as_json(
     """Return a stable empty collection for an initialized database."""
 
     database = tmp_path / 'state.db'
-    RunStore(database).initialize()
+    JobStore(database).initialize()
 
     result = main(['--database', str(database), 'jobs'])
 
@@ -1483,7 +1483,7 @@ def test_task_commands_share_resolved_default_runs_directory(
     """Resolve one default evidence root for every evidence-aware view."""
 
     database = tmp_path / 'state.db'
-    RunStore(database).initialize()
+    JobStore(database).initialize()
     actual_parent = tmp_path / 'actual'
     actual_parent.mkdir()
     linked_parent = tmp_path / 'linked'
@@ -1491,7 +1491,7 @@ def test_task_commands_share_resolved_default_runs_directory(
     monkeypatch.setattr(cli, 'DEFAULT_RUNS_DIRECTORY', linked_parent / 'runs')
 
     job = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
-    RunStore(database).add(job)
+    JobStore(database).add(job)
     resolve_evidence_path(actual_parent / 'runs', str(job.id)).mkdir(parents=True)
 
     for command, identifier in (
@@ -1575,7 +1575,7 @@ def test_command_without_database_reaches_the_session_default(
     # path rather than letting the real store create the file keeps this test
     # from writing and then deleting the very file the session guard inspects,
     # which would let an unrelated test's leak pass unnoticed.
-    monkeypatch.setattr(cli, 'RunStore', RecordingStore)
+    monkeypatch.setattr(cli, 'JobStore', RecordingStore)
 
     assert main(['init']) == 0
     assert capsys.readouterr().out.strip() == f'initialized {isolated_default_database}'
@@ -1613,7 +1613,7 @@ def test_job_reports_unknown_job(
     """Return a distinct error when the requested run does not exist."""
 
     database = tmp_path / 'state.db'
-    RunStore(database).initialize()
+    JobStore(database).initialize()
 
     result = main(['--database', str(database), 'job', str(uuid4())])
 
@@ -1639,7 +1639,7 @@ def test_read_only_views_report_unrecognized_job_values(
     """Return stable JSON errors without hiding other readable jobs."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     unreadable = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     readable = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
@@ -1684,7 +1684,7 @@ def test_read_only_views_report_unrecognized_issue_job_state(
     """Apply the same persisted-state error contract to issue-review jobs."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     issue = IssueJob.create(
         provider='github',
@@ -3404,7 +3404,7 @@ def test_concurrent_active_resumes_launch_one_process(
 
         try:
             resume_review(
-                store=RunStore(context.database),
+                store=JobStore(context.database),
                 run=active,
                 runs_directory=context.runs_directory,
                 digest_worktree=_working_tree_digest,
@@ -3501,7 +3501,7 @@ def test_run_rejects_state_database_inside_worktree(
     database = repo / '.agent-orchestra/state.db'
     assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
     capsys.readouterr()
-    run = RunStore(database).list_runs()[0]
+    run = JobStore(database).list_runs()[0]
 
     result = main(
         [
@@ -3517,7 +3517,7 @@ def test_run_rejects_state_database_inside_worktree(
     )
 
     assert result == 2
-    assert RunStore(database).get(run.id).state.value == 'queued'
+    assert JobStore(database).get(run.id).state.value == 'queued'
     assert 'state database must be outside' in capsys.readouterr().err
 
 

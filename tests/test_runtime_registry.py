@@ -39,7 +39,7 @@ from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import parse_manifest
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.skill_install import install_skills
-from agent_orchestra.store import RunStore
+from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
     WorkerError,
     _runtime_metadata_path,
@@ -115,7 +115,7 @@ def initialize_source_review(
     tmp_path: Path,
     registry: RuntimeRegistry,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[RunStore, Run, Path, list[AgentRequest]]:
+) -> tuple[JobStore, Run, Path, list[AgentRequest]]:
     """Start a fake-runtime review and interrupt its first remediation attempt."""
 
     repo = tmp_path / 'repo'
@@ -143,7 +143,7 @@ def initialize_source_review(
     )
     (repo / 'tracked.txt').write_text('changed\n')
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     digest = cli._working_tree_digest(repo, 'HEAD')
     assert digest is not None

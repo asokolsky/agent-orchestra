@@ -26,7 +26,7 @@ from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_sna
 from agent_orchestra.manifests import evidence_path, parse_manifest
 from agent_orchestra.models import IssueJob, ProviderAction, Run, RunState
 from agent_orchestra.reviewer_paths import reviewer_evidence_paths
-from agent_orchestra.store import RunStore
+from agent_orchestra.store import JobStore
 from agent_orchestra.workflow import transition
 from tests.test_job_views import add_attempt
 
@@ -73,7 +73,7 @@ def _source_job(tmp_path: Path, *, complete: bool = True) -> tuple[Path, Path, R
     git = shutil.which('git')
     assert git is not None
     subprocess.run([git, 'init', '-q', str(worktree)], check=True)
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     job = Run.create_local(
         worktree,
@@ -146,7 +146,7 @@ def test_audit_reports_missing_worktree_without_mutating_state(
     assert main(_arguments(database, root, str(job.id), verify=False)) == 0
     document = json.loads(capsys.readouterr().out)
     assert 'worktree_missing' in {item['code'] for item in document['findings']}
-    assert RunStore(database).get(job.id).state is job.state
+    assert JobStore(database).get(job.id).state is job.state
     assert database.read_bytes() == before
 
 
@@ -210,7 +210,7 @@ def _issue_job(tmp_path: Path) -> tuple[Path, Path, IssueJob]:
 
     database = tmp_path / 'state.db'
     root = tmp_path / 'runs'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     digest = 'sha256:' + 'd' * 64
     snapshot = IssueSnapshot(
@@ -813,7 +813,7 @@ def test_verify_missing_index_is_unverifiable(
 
     database = tmp_path / 'state.db'
     root = tmp_path / 'runs'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     job = IssueJob.create(
         provider='github',
@@ -971,7 +971,7 @@ def test_audit_reports_missing_job_as_versioned_error(
     """Return a stable public error for an unknown job identifier."""
 
     database = tmp_path / 'state.db'
-    RunStore(database).initialize()
+    JobStore(database).initialize()
 
     assert main(_arguments(database, tmp_path / 'runs', 'missing', verify=True)) == 2
 

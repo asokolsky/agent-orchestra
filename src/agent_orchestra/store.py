@@ -1,4 +1,4 @@
-"""SQLite persistence for orchestration runs."""
+"""SQLite persistence for orchestration runs and issue-review jobs."""
 
 from __future__ import annotations
 
@@ -101,8 +101,8 @@ class ConcurrentUpdateError(RuntimeError):
     """Raised when persisted state changed before an update completed."""
 
 
-class RunStore:
-    """Persist and retrieve runs from a local SQLite database."""
+class JobStore:
+    """Persist and retrieve source-code runs and issue jobs from SQLite."""
 
     def __init__(self, database_path: Path) -> None:
         """Create a store for the supplied database path."""
