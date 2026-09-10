@@ -34,6 +34,7 @@ from agent_orchestra.manifests import (
     evidence_path,
     manifest_owns_evidence_namespace,
 )
+from agent_orchestra.messages import read_message_chain
 from agent_orchestra.models import (
     IssueJob,
     JobTransition,
@@ -54,7 +55,6 @@ from agent_orchestra.schemas import (
     ReviewRequestMessageSchema,
     ReviewResultMessageSchema,
 )
-from agent_orchestra.worker import read_message_chain
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:

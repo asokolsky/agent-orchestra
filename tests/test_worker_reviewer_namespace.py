@@ -17,9 +17,9 @@ from agent_orchestra.invocations import (
     InvocationEvidenceStore,
     InvocationIdentity,
     ProcessOutcome,
+    record_invocation,
 )
 from agent_orchestra.models import Run
-from agent_orchestra.worker import _record_invocation
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,7 +34,7 @@ def _complete_reviewer_invocation(
 ) -> str:
     """Persist one complete reviewer invocation lifecycle."""
 
-    invocation_id = _record_invocation(
+    invocation_id = record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.REVIEWER,
@@ -52,7 +52,7 @@ def _complete_reviewer_invocation(
         ),
         run_directory=run_directory,
     )
-    _record_invocation(
+    record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.REVIEWER,
@@ -72,7 +72,7 @@ def _complete_reviewer_invocation(
         run_directory=run_directory,
         lifecycle=AttemptLifecycle(status=AttemptStatus.RUNNING),
     )
-    _record_invocation(
+    record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.REVIEWER,
@@ -142,7 +142,7 @@ def test_record_invocation_rejects_reviewer_id_for_developer(tmp_path: Path) -> 
     identity = InvocationIdentity(vendor='openai', model=None, runtime='codex')
 
     with pytest.raises(WorkerError, match='only reviewer invocations'):
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -166,7 +166,7 @@ def test_record_invocation_normalizes_invalid_reviewer_id(tmp_path: Path) -> Non
     identity = InvocationIdentity(vendor='openai', model=None, runtime='codex')
 
     with pytest.raises(WorkerError, match="invalid reviewer ID: 'Security'"):
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,

@@ -75,3 +75,11 @@ def aggregate_review_batch(
     else:
         verdict = 'approved'
     return ReviewBatchDecision(verdict, changes_requested, blocked, incomplete)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerDispatchResult:
+    """One completed reviewer dispatch and its validated protocol response."""
+
+    decision: ReviewerDecision
+    message_id: str | None

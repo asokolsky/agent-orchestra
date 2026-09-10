@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -13,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from agent_orchestra.adapter.registry import (
     DEFAULT_RUNTIME_REGISTRY,
@@ -27,13 +25,19 @@ from agent_orchestra.agents import (
     ReviewerRequest,
 )
 from agent_orchestra.evidence import (
+    RESUME_ACTIVATION_UNCERTAIN_CODE,
+    RESUME_CANCELLED_CODE,
+    RESUME_EXECUTION_FAILED_CODE,
+    RESUME_INTERRUPTED_CODE,
+    RESUME_METADATA_UNSUPPORTED_CODE,
+    RESUME_SCOPE_CHANGED_CODE,
+    REVIEWER_BATCH_INCOMPLETE_CODE,
+    RUN_NOT_RESUMABLE_CODE,
     WorkerError,
     archive_unaccepted_response,
-    contained_job_reference,
     finalize_temporary_path,
     invocation_stem,
     manifest_evidence_path,
-    output_text,
     read_json_object,
     record_finalized_path,
     require_unchanged,
@@ -41,7 +45,6 @@ from agent_orchestra.evidence import (
     run_evidence_path,
     worktree_digest,
     write_json_atomic,
-    write_text_atomic,
 )
 from agent_orchestra.invocations import (
     AttemptConclusion,
@@ -54,19 +57,42 @@ from agent_orchestra.invocations import (
     InvocationRecord,
     ProcessOutcome,
     RecoveryAction,
+    attempt_activation_was_persisted,
+    attempt_record_path,
+    latest_task_attempt,
+    next_attempt,
+    persist_attempt_record,
     prepare_run_evidence_directory,
+    record_invocation,
     recovery_action,
     timestamp,
     transition_attempt,
 )
 from agent_orchestra.manifests import canonical_message_evidence, evidence_path
+from agent_orchestra.messages import (
+    NO_CHANGES,
+    classify_remediation_progress,
+    is_developer_disagreement,
+    read_message_chain,
+    require_unique_batch_message_ids,
+    require_unique_message_id,
+    reviewer_id_from_message_path,
+    validate_developer_handoff,
+    validate_remediation_request,
+    validate_resumed_progress,
+    validate_review_request,
+    validate_review_response,
+)
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
-from agent_orchestra.review_batch import ReviewerDecision, aggregate_review_batch
+from agent_orchestra.review_batch import (
+    ReviewerDecision,
+    ReviewerDispatchResult,
+    aggregate_review_batch,
+)
 from agent_orchestra.review_fanout import ReviewerDispatch, build_review_fanout
 from agent_orchestra.reviewer_paths import (
     ReviewerIdentityError,
     reviewer_task_id,
-    validate_reviewer_id,
 )
 from agent_orchestra.reviewer_plan import (
     ReviewerExecution,
@@ -78,17 +104,12 @@ from agent_orchestra.runtime_metadata import (
     runtime_metadata_path,
 )
 from agent_orchestra.schemas import (
-    CHANGES_REQUESTED_WITHOUT_FINDINGS,
-    DUPLICATE_REVIEW_FINDING_IDS,
     EXECUTION_RECORD_ADAPTER,
     DeveloperHandoffMessageSchema,
     ExecutionRecord,
     ExecutionRecordSchema,
-    RemediationRequestMessageSchema,
     ReviewerBatchResultSchema,
     ReviewerSetExecutionRecordSchema,
-    ReviewRequestMessageSchema,
-    ReviewResultMessageSchema,
 )
 from agent_orchestra.workflow import transition
 
@@ -98,44 +119,14 @@ if TYPE_CHECKING:
     from agent_orchestra.store import JobStore
 
 
-INVALID_ENVELOPE = 'reviewer response has missing or unknown envelope fields'
-INVALID_IDENTITY = 'reviewer response has an invalid identity or timestamp'
-INVALID_PAYLOAD = 'reviewer response has invalid payload fields'
-INVALID_VERDICT = 'reviewer response has invalid verdict'
-INVALID_ARTIFACT_PATH = 'reviewer response has invalid artifact_path'
-MISSING_ARTIFACT = 'reviewer did not create the requested artifact'
-APPROVED_WITH_FINDINGS = 'approved review cannot contain findings'
 EMPTY_OBJECTIVE = 'objective must not be empty'
 EMPTY_COMMAND = 'reviewer command must not be empty'
-NO_CHANGES = 'worktree has no local changes'
-NO_REMEDIATION_CHANGE = 'developer handoff did not produce a new diff digest'
 DEVELOPER_DISAGREEMENT = 'developer disputed every finding without changing the diff'
 ITERATION_LIMIT = 'maximum review iteration count exhausted'
 INVALID_DEVELOPER_TIMEOUT = 'developer timeout must be positive'
 INVALID_ITERATION_LIMIT = 'maximum review iterations must be positive'
 EVIDENCE_INSIDE_WORKTREE = 'run evidence directory must be outside the worktree'
-INVALID_DEVELOPER_HANDOFF = 'developer handoff is invalid'
-INVALID_FINDING_DISPOSITIONS = (
-    'developer handoff must contain exactly one disposition for every finding'
-)
-INVALID_REMEDIATION_REQUEST = 'remediation request is invalid'
-REMEDIATION_PATH_ESCAPE = 'remediation request references evidence outside the run'
-REMEDIATION_ACTIONS = 'remediation request must not authorize lifecycle actions'
-INVALID_REVIEW_REQUEST = 'review request is invalid'
-REVIEW_PATH_ESCAPE = 'review request references evidence outside the run'
-DUPLICATE_MESSAGE_ID = 'message ID was already persisted for this run'
-MIXED_REVIEWER_MESSAGE_PATHS = 'canonical messages mix reviewer batch and legacy paths'
-INCOMPLETE_REVIEWER_MESSAGE_BATCH = 'reviewer message sequence is not complete'
-SMALL_REVIEWER_MESSAGE_BATCH = 'reviewer message batch requires at least two reviewers'
 REVIEWER_BATCH_INCOMPLETE = 'reviewer batch did not complete'
-REVIEWER_BATCH_INCOMPLETE_CODE = 'reviewer_batch_incomplete'
-RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
-RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
-RESUME_SCOPE_CHANGED_CODE = 'resume_scope_changed'
-RESUME_INTERRUPTED_CODE = 'resume_interrupted'
-RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
-RESUME_ACTIVATION_UNCERTAIN_CODE = 'resume_activation_uncertain'
-RESUME_CANCELLED_CODE = 'resume_cancelled'
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,24 +207,6 @@ class ReviewerSetReviewPlan:
     developer_identity: InvocationIdentity
 
 
-@dataclass(frozen=True, slots=True)
-class ReviewerDispatchResult:
-    """One completed reviewer dispatch and its validated protocol response."""
-
-    decision: ReviewerDecision
-    message_id: str | None
-
-
-def _require_unique_batch_message_ids(
-    results: tuple[ReviewerDispatchResult, ...],
-) -> None:
-    """Reject a reviewer batch that reused a canonical response identity."""
-
-    message_ids = [result.message_id for result in results if result.message_id]
-    if len(message_ids) != len(set(message_ids)):
-        raise WorkerError(DUPLICATE_MESSAGE_ID)
-
-
 def _execution_record(
     plan: ReviewPlan | ReviewerSetReviewPlan,
     *,
@@ -282,268 +255,6 @@ def _execution_record(
     )
 
 
-def _persist_attempt_record(path: Path, record: InvocationRecord) -> None:
-    """Normalize unsafe or conflicting attempt writes as worker failures."""
-
-    try:
-        job_directory = path.parent.parent
-        InvocationEvidenceStore(job_directory).write(path, record)
-        if record.status == 'completed':
-            record_finalized_path(Path(record.stdout_path), 'process_stdout')
-            record_finalized_path(Path(record.stderr_path), 'process_stderr')
-    except InvocationEvidenceError as error:
-        code = (
-            RESUME_ACTIVATION_UNCERTAIN_CODE
-            if str(error) == 'attempt record already exists'
-            else None
-        )
-        raise WorkerError(f'invalid invocation evidence: {error}', code=code) from error
-
-
-def _record_invocation(
-    attempt: AttemptIdentity,
-    outcome: ProcessOutcome,
-    *,
-    run_directory: Path,
-    lifecycle: AttemptLifecycle | None = None,
-) -> str:
-    """Persist separate streams and their adapter-neutral invocation record."""
-
-    resolved = (lifecycle or AttemptLifecycle()).resolved(outcome)
-    stem = attempt.evidence_stem
-    logs = run_evidence_path(run_directory, 'logs')
-    stdout_path = logs / f'{stem}.stdout.log'
-    stderr_path = logs / f'{stem}.stderr.log'
-    if outcome.stdout is not None or not stdout_path.exists():
-        write_text_atomic(stdout_path, output_text(outcome.stdout))
-    if outcome.stderr is not None or not stderr_path.exists():
-        write_text_atomic(stderr_path, output_text(outcome.stderr))
-    _persist_attempt_record(
-        run_evidence_path(run_directory, 'invocations') / f'{stem}.json',
-        InvocationRecord(
-            schema_version=attempt.schema_version,
-            run_id=attempt.run_id,
-            task_id=attempt.task_id,
-            invocation_id=attempt.durable_invocation_id,
-            role=attempt.role,
-            agent_vendor=attempt.agent.vendor,
-            requested_model=attempt.agent.model,
-            effective_models=outcome.effective_models,
-            effective_model_status=outcome.effective_model_status,
-            runtime=attempt.agent.runtime,
-            iteration=attempt.iteration,
-            started_at=outcome.started_at,
-            finished_at=(
-                (outcome.finished_at or timestamp()) if outcome.finished else None
-            ),
-            exit_code=outcome.exit_code,
-            timed_out=outcome.timed_out,
-            interrupted=outcome.interrupted,
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
-            attempt=attempt.attempt,
-            status=resolved.status,
-            conclusion=resolved.conclusion,
-            response_received_at=resolved.response_received_at,
-            validation_started_at=resolved.validation_started_at,
-            reviewer_id=attempt.reviewer_id,
-        ),
-    )
-    return attempt.durable_invocation_id
-
-
-def _validate_review_response(
-    document: dict[str, Any], *, request: dict[str, Any], artifact_path: Path
-) -> str:
-    """Validate response correlation and return its verdict."""
-
-    try:
-        parsed = ReviewResultMessageSchema.model_validate(document)
-    except ValidationError as error:
-        details = error.errors()
-        if any('cannot contain findings' in str(detail['msg']) for detail in details):
-            message = APPROVED_WITH_FINDINGS
-        elif any(
-            CHANGES_REQUESTED_WITHOUT_FINDINGS in str(detail['msg'])
-            for detail in details
-        ):
-            message = CHANGES_REQUESTED_WITHOUT_FINDINGS
-        elif any(
-            DUPLICATE_REVIEW_FINDING_IDS in str(detail['msg']) for detail in details
-        ):
-            message = DUPLICATE_REVIEW_FINDING_IDS
-        elif any(
-            detail['loc'] and detail['loc'][0] in {'message_id', 'created_at'}
-            for detail in details
-        ):
-            message = INVALID_IDENTITY
-        elif any(
-            len(detail['loc']) > 1
-            and detail['loc'][0] == 'payload'
-            and detail['loc'][1] == 'verdict'
-            for detail in details
-        ):
-            message = INVALID_VERDICT
-        elif any(detail['loc'] and detail['loc'][0] == 'payload' for detail in details):
-            message = INVALID_PAYLOAD
-        else:
-            message = INVALID_ENVELOPE
-        raise WorkerError(message) from error
-    expected_values = {
-        'schema_version': 1,
-        'in_reply_to': request['message_id'],
-        'run_id': request['run_id'],
-        'sequence': int(request['sequence']) + 1,
-        'iteration': request['iteration'],
-        'message_type': 'review_result',
-        'sender': 'reviewer',
-        'recipient': 'orchestrator',
-        'scope': request['scope'],
-    }
-    for key, expected in expected_values.items():
-        if document[key] != expected:
-            raise WorkerError(f'reviewer response has invalid {key}')
-    payload = parsed.payload
-    verdict = payload.verdict
-    if payload.artifact_path != str(artifact_path):
-        raise WorkerError(INVALID_ARTIFACT_PATH)
-    if not artifact_path.is_file():
-        raise WorkerError(MISSING_ARTIFACT)
-    return str(verdict)
-
-
-def _validate_developer_handoff(
-    document: dict[str, Any], *, request: dict[str, Any], finding_ids: tuple[str, ...]
-) -> DeveloperHandoffMessageSchema:
-    """Validate a correlated handoff and return its canonical message."""
-
-    try:
-        parsed = DeveloperHandoffMessageSchema.model_validate(document)
-    except ValidationError as error:
-        raise WorkerError(INVALID_DEVELOPER_HANDOFF) from error
-    expected = {
-        'in_reply_to': request['message_id'],
-        'run_id': request['run_id'],
-        'sequence': int(request['sequence']) + 1,
-        'iteration': request['iteration'],
-        'scope': request['scope'],
-    }
-    for field, value in expected.items():
-        if document[field] != value:
-            raise WorkerError(f'developer handoff has invalid {field}')
-    dispositions = [item.finding_id for item in parsed.payload.dispositions]
-    if len(dispositions) != len(set(dispositions)) or sorted(dispositions) != sorted(
-        finding_ids
-    ):
-        raise WorkerError(INVALID_FINDING_DISPOSITIONS)
-    return parsed
-
-
-def _validate_remediation_request(
-    document: dict[str, Any], *, run_directory: Path
-) -> None:
-    """Validate remediation authority and contained evidence references."""
-
-    try:
-        parsed = RemediationRequestMessageSchema.model_validate(document)
-    except ValidationError as error:
-        raise WorkerError(INVALID_REMEDIATION_REQUEST) from error
-    if parsed.payload.allowed_actions:
-        raise WorkerError(REMEDIATION_ACTIONS)
-    evidence_paths = (
-        contained_job_reference(
-            run_directory, parsed.payload.review_result_path, REMEDIATION_PATH_ESCAPE
-        ),
-        contained_job_reference(
-            run_directory, parsed.payload.review_artifact_path, REMEDIATION_PATH_ESCAPE
-        ),
-    )
-    if any(not path.is_file() for path in evidence_paths):
-        raise WorkerError(INVALID_REMEDIATION_REQUEST)
-
-
-def _validate_review_request(document: dict[str, Any], *, run_directory: Path) -> None:
-    """Validate review authority and contained artifact references."""
-
-    try:
-        parsed = ReviewRequestMessageSchema.model_validate(document)
-    except ValidationError as error:
-        raise WorkerError(INVALID_REVIEW_REQUEST) from error
-    if parsed.payload.allowed_actions:
-        raise WorkerError(INVALID_REVIEW_REQUEST)
-    contained_job_reference(
-        run_directory, parsed.payload.artifact_path, REVIEW_PATH_ESCAPE
-    )
-    if parsed.payload.prior_review_path is not None:
-        prior_path = contained_job_reference(
-            run_directory, parsed.payload.prior_review_path, REVIEW_PATH_ESCAPE
-        )
-        if not prior_path.is_file():
-            raise WorkerError(INVALID_REVIEW_REQUEST)
-
-
-def _require_unique_message_id(document: dict[str, Any], run_directory: Path) -> None:
-    """Reject a response identifier already present in durable messages."""
-
-    candidate = document.get('message_id')
-    for path in run_directory.rglob('*.json'):
-        relative = path.relative_to(run_directory).as_posix()
-        if canonical_message_evidence(relative) is None:
-            continue
-        try:
-            existing = json.loads(path.read_text(encoding='utf-8'))
-        except OSError, json.JSONDecodeError:
-            continue
-        if isinstance(existing, dict) and existing.get('message_id') == candidate:
-            raise WorkerError(DUPLICATE_MESSAGE_ID)
-
-
-def _classify_remediation_progress(
-    status: str, new_digest: str | None, current_digest: str
-) -> tuple[bool, str]:
-    """Return whether a valid handoff is recoverable and its measured digest."""
-
-    if new_digest is None:
-        raise WorkerError(NO_CHANGES)
-    if status in {'blocked', 'failed'}:
-        return True, new_digest
-    if same_diff_digest(new_digest, current_digest):
-        raise WorkerError(NO_REMEDIATION_CHANGE)
-    return False, new_digest
-
-
-def _validate_resumed_progress(
-    status: str,
-    new_digest: str | None,
-    current_digest: str,
-    *,
-    allow_unchanged_ready: bool,
-    is_disagreement: bool,
-) -> tuple[bool, str]:
-    """Validate a retried handoff and return its recovery classification."""
-
-    if new_digest is None:
-        raise WorkerError(NO_CHANGES)
-    if status in {'blocked', 'failed'}:
-        return True, new_digest
-    if (
-        not allow_unchanged_ready
-        and not is_disagreement
-        and same_diff_digest(new_digest, current_digest)
-    ):
-        raise WorkerError(NO_REMEDIATION_CHANGE)
-    return False, new_digest
-
-
-def _is_developer_disagreement(message: DeveloperHandoffMessageSchema) -> bool:
-    """Return whether every finding was rejected or blocked without an edit."""
-
-    dispositions = message.payload.dispositions
-    return bool(dispositions) and all(
-        item.disposition in {'rejected', 'blocked'} for item in dispositions
-    )
-
-
 def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecord:
     """Read and validate the durable execution context for a resumable run."""
 
@@ -558,312 +269,6 @@ def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecord:
         message = 'resume metadata does not match the run ID'
         raise WorkerError(message)
     return record
-
-
-def read_message_chain(
-    run_directory: Path, run_id: str
-) -> list[tuple[Path, dict[str, Any]]]:
-    """Read and correlate every canonical message for recovery."""
-
-    documents: list[tuple[Path, dict[str, Any]]] = []
-    identities: dict[str, tuple[Path, dict[str, Any]]] = {}
-    schemas: dict[str, type[BaseModel]] = {
-        'review_request': ReviewRequestMessageSchema,
-        'review_result': ReviewResultMessageSchema,
-        'remediation_request': RemediationRequestMessageSchema,
-        'developer_handoff': DeveloperHandoffMessageSchema,
-    }
-    candidates: list[tuple[int, str, Path]] = []
-    message_directory = run_directory / 'messages'
-    unsafe_namespace = 'resume message namespace is unsafe'
-    if message_directory.is_symlink():
-        raise WorkerError(unsafe_namespace)
-    if message_directory.exists() and not message_directory.is_dir():
-        raise WorkerError(unsafe_namespace)
-    if message_directory.is_dir():
-        try:
-            with os.scandir(message_directory) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
-        except OSError as error:
-            message = 'resume message namespace is unreadable'
-            raise WorkerError(message) from error
-        for entry in entries:
-            path = Path(entry.path)
-            relative = path.relative_to(run_directory).as_posix()
-            try:
-                unsafe_entry = entry.is_symlink() or not entry.is_file(
-                    follow_symlinks=False
-                )
-            except OSError as error:
-                message = f'unreadable canonical message path: {relative}'
-                raise WorkerError(message) from error
-            if unsafe_entry:
-                raise WorkerError(f'unsafe canonical message path: {relative}')
-            identity = canonical_message_evidence(relative)
-            if identity is None:
-                raise WorkerError(f'unknown canonical message path: {relative}')
-            path_message_type, sequence = identity
-            candidates.append((sequence, path_message_type, path))
-    reviewer_ids = {
-        reviewer_id
-        for sequence, message_type, path in candidates
-        if (
-            reviewer_id := _reviewer_id_from_message_path(
-                path, sequence=sequence, message_type=message_type
-            )
-        )
-        is not None
-    }
-    if reviewer_ids:
-        return _read_reviewer_message_batch(
-            candidates,
-            reviewer_ids=reviewer_ids,
-            run_directory=run_directory,
-            run_id=run_id,
-            schemas=schemas,
-        )
-    for expected_sequence, (sequence, expected_type, path) in enumerate(
-        sorted(candidates), start=1
-    ):
-        contained_job_reference(
-            run_directory, path, 'resume message path escapes the run directory'
-        )
-        if sequence != expected_sequence:
-            message = 'resume message sequence is not contiguous'
-            raise WorkerError(message)
-        document = read_json_object(path)
-        message_type = document.get('message_type')
-        if not isinstance(message_type, str) or message_type != expected_type:
-            raise WorkerError(f'invalid canonical message: {path.name}')
-        schema = schemas.get(message_type)
-        if schema is None:
-            raise WorkerError(f'unsupported recoverable message type: {message_type}')
-        try:
-            schema.model_validate(document)
-        except ValidationError as error:
-            raise WorkerError(f'invalid canonical message: {path.name}') from error
-        if document['run_id'] != run_id or document['sequence'] != sequence:
-            raise WorkerError(f'message does not match recoverable run: {path.name}')
-        parent_id = document['in_reply_to']
-        parent_entry = identities.get(parent_id) if parent_id is not None else None
-        parent = parent_entry[1] if parent_entry is not None else None
-        previous = documents[-1][1] if documents else None
-        if document['message_type'] == 'review_request':
-            if previous is None:
-                if (
-                    parent_id is not None
-                    or document['payload']['prior_review_path'] is not None
-                ):
-                    raise WorkerError(f'invalid message correlation: {path.name}')
-            elif (
-                parent_id is not None or previous['message_type'] != 'developer_handoff'
-            ):
-                raise WorkerError(f'invalid message correlation: {path.name}')
-            else:
-                remediation_entry = identities.get(previous['in_reply_to'])
-                remediation = (
-                    remediation_entry[1] if remediation_entry is not None else None
-                )
-                review_entry = (
-                    identities.get(remediation['in_reply_to'])
-                    if remediation is not None
-                    else None
-                )
-                if (
-                    remediation is None
-                    or remediation['message_type'] != 'remediation_request'
-                    or review_entry is None
-                    or review_entry[1]['message_type'] != 'review_result'
-                    or document['payload']['prior_review_path'] != str(review_entry[0])
-                ):
-                    raise WorkerError(f'invalid message correlation: {path.name}')
-        elif document['message_type'] == 'review_result':
-            if (
-                parent is None
-                or previous is not parent
-                or parent['message_type'] != 'review_request'
-                or document['sequence'] != parent['sequence'] + 1
-            ):
-                raise WorkerError(f'invalid message correlation: {path.name}')
-            artifact_path = Path(document['payload']['artifact_path'])
-            if (
-                document['payload']['artifact_path']
-                != parent['payload']['artifact_path']
-                or not artifact_path.is_file()
-            ):
-                raise WorkerError(f'invalid message correlation: {path.name}')
-            contained_job_reference(
-                run_directory,
-                artifact_path,
-                f'invalid message correlation: {path.name}',
-            )
-        elif document['message_type'] == 'remediation_request':
-            prior_remediation = (
-                identities.get(previous['in_reply_to'])
-                if previous is not None
-                else None
-            )
-            recovery_request = (
-                previous is not None
-                and previous['message_type'] == 'developer_handoff'
-                and previous['payload']['status'] in {'blocked', 'failed'}
-                and prior_remediation is not None
-                and prior_remediation[1]['message_type'] == 'remediation_request'
-                and prior_remediation[1]['in_reply_to'] == document['in_reply_to']
-            )
-            if (
-                parent is None
-                or parent_entry is None
-                or parent['message_type'] != 'review_result'
-                or parent['payload']['verdict'] != 'changes_requested'
-                or document['payload']['review_result_path'] != str(parent_entry[0])
-                or document['payload']['review_artifact_path']
-                != parent['payload']['artifact_path']
-                or (
-                    not recovery_request
-                    and (
-                        previous is not parent
-                        or document['sequence'] != parent['sequence'] + 1
-                    )
-                )
-                or (
-                    recovery_request
-                    and previous is not None
-                    and document['sequence'] != previous['sequence'] + 1
-                )
-            ):
-                raise WorkerError(f'invalid message correlation: {path.name}')
-        elif (
-            parent is None
-            or previous is not parent
-            or parent['message_type'] != 'remediation_request'
-            or document['sequence'] != parent['sequence'] + 1
-        ):
-            raise WorkerError(f'invalid message correlation: {path.name}')
-        if parent is not None and (
-            parent['run_id'] != document['run_id']
-            or parent['scope'] != document['scope']
-            or parent['iteration'] != document['iteration']
-        ):
-            raise WorkerError(f'invalid message correlation: {path.name}')
-        message_id = document['message_id']
-        if message_id in identities:
-            raise WorkerError(DUPLICATE_MESSAGE_ID)
-        identities[message_id] = (path, document)
-        documents.append((path, document))
-    if not documents:
-        message = 'resume message chain is empty'
-        raise WorkerError(message)
-    return documents
-
-
-def _reviewer_id_from_message_path(
-    path: Path, *, sequence: int, message_type: str
-) -> str | None:
-    """Return a reviewer qualifier from one canonical message path."""
-
-    prefix = f'{sequence:06d}-'
-    suffix = f'-{message_type.replace("_", "-")}.json'
-    name = path.name
-    if not name.startswith(prefix) or not name.endswith(suffix):
-        raise WorkerError(f'invalid canonical message path: {name}')
-    reviewer_id = name[len(prefix) : -len(suffix)]
-    if not reviewer_id:
-        return None
-    try:
-        return validate_reviewer_id(reviewer_id)
-    except ReviewerIdentityError as error:
-        raise WorkerError(f'invalid canonical message path: {name}') from error
-
-
-def _read_reviewer_message_batch(
-    candidates: list[tuple[int, str, Path]],
-    *,
-    reviewer_ids: set[str],
-    run_directory: Path,
-    run_id: str,
-    schemas: dict[str, type[BaseModel]],
-) -> list[tuple[Path, dict[str, Any]]]:
-    """Validate one initial reviewer batch as parallel correlated chains."""
-
-    grouped: dict[str, list[tuple[int, str, Path]]] = {
-        reviewer_id: [] for reviewer_id in reviewer_ids
-    }
-    for sequence, message_type, path in candidates:
-        reviewer_id = _reviewer_id_from_message_path(
-            path, sequence=sequence, message_type=message_type
-        )
-        if reviewer_id is None:
-            raise WorkerError(MIXED_REVIEWER_MESSAGE_PATHS)
-        grouped[reviewer_id].append((sequence, message_type, path))
-    if len(grouped) < 2:
-        raise WorkerError(SMALL_REVIEWER_MESSAGE_BATCH)
-
-    documents: list[tuple[Path, dict[str, Any]]] = []
-    identities: set[str] = set()
-    expected_scope: dict[str, Any] | None = None
-    expected_iteration: int | None = None
-    for reviewer_id in sorted(grouped):
-        chain = sorted(grouped[reviewer_id])
-        if [(sequence, message_type) for sequence, message_type, _ in chain] != [
-            (1, 'review_request'),
-            (2, 'review_result'),
-        ]:
-            raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
-        reviewer_documents: list[tuple[Path, dict[str, Any]]] = []
-        for sequence, message_type, path in chain:
-            contained_job_reference(
-                run_directory, path, 'resume message path escapes the run directory'
-            )
-            document = read_json_object(path)
-            schema = schemas[message_type]
-            try:
-                schema.model_validate(document)
-            except ValidationError as error:
-                raise WorkerError(f'invalid canonical message: {path.name}') from error
-            if (
-                document['message_type'] != message_type
-                or document['run_id'] != run_id
-                or document['sequence'] != sequence
-            ):
-                raise WorkerError(
-                    f'message does not match recoverable run: {path.name}'
-                )
-            message_id = document['message_id']
-            if message_id in identities:
-                raise WorkerError(DUPLICATE_MESSAGE_ID)
-            identities.add(message_id)
-            reviewer_documents.append((path, document))
-
-        request_path, request = reviewer_documents[0]
-        result_path, result = reviewer_documents[1]
-        if (
-            request['in_reply_to'] is not None
-            or request['payload']['prior_review_path'] is not None
-            or result['in_reply_to'] != request['message_id']
-            or result['scope'] != request['scope']
-            or result['iteration'] != request['iteration']
-            or result['payload']['artifact_path'] != request['payload']['artifact_path']
-        ):
-            raise WorkerError(f'invalid message correlation: {result_path.name}')
-        artifact_path = Path(result['payload']['artifact_path'])
-        if not artifact_path.is_file():
-            raise WorkerError(f'invalid message correlation: {result_path.name}')
-        contained_job_reference(
-            run_directory,
-            artifact_path,
-            f'invalid message correlation: {result_path.name}',
-        )
-        if expected_scope is None:
-            expected_scope = request['scope']
-            expected_iteration = request['iteration']
-        elif (
-            request['scope'] != expected_scope
-            or request['iteration'] != expected_iteration
-        ):
-            raise WorkerError(f'invalid message correlation: {request_path.name}')
-        documents.extend(reviewer_documents)
-    return sorted(documents, key=lambda item: item[0].name)
 
 
 def _identity_from_record(
@@ -892,21 +297,6 @@ def _resolve_resume_identity(
         model=identity.model,
         runtime=runtime.identifier,
     )
-
-
-def _latest_task_attempt(
-    run_directory: Path, sequence: int, role: str
-) -> InvocationRecord | None:
-    """Return the latest validated attempt for one durable task."""
-
-    try:
-        records = InvocationEvidenceStore(run_directory).read_all(run_directory.name)
-    except InvocationEvidenceError as error:
-        message = 'invalid invocation evidence'
-        raise WorkerError(message) from error
-    task_id = f'{run_directory.name}:{sequence:06d}-{role}'
-    attempts = [record for record in records if record.task_id == task_id]
-    return max(attempts, key=lambda record: record.attempt) if attempts else None
 
 
 def _latest_reviewer_attempt(
@@ -957,43 +347,6 @@ def _require_successful_reviewer_attempt(
     ):
         message = 'canonical reviewer result lacks a completed successful attempt'
         raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
-
-
-def _attempt_activation_was_persisted(
-    run_directory: Path,
-    sequence: int,
-    role: Literal[RuntimeRole.DEVELOPER, RuntimeRole.REVIEWER],
-    attempt: int,
-) -> bool:
-    """Return whether activation is durable enough to finalize interruption."""
-
-    latest = _latest_task_attempt(run_directory, sequence, role)
-    return (
-        latest is not None
-        and latest.attempt == attempt
-        and latest.status == AttemptStatus.RUNNING.value
-    )
-
-
-def _next_attempt(
-    run_directory: Path, sequence: int, role: str, workflow_state: RunState
-) -> int:
-    """Return the next non-overwriting invocation attempt number."""
-
-    latest = _latest_task_attempt(run_directory, sequence, role)
-    action = recovery_action(
-        latest,
-        workflow_state=workflow_state,
-    )
-    if action is RecoveryAction.LAUNCH:
-        return 1
-    if action is not RecoveryAction.NONE or latest is None:
-        message = 'cannot retry task with uncertain active attempt'
-        raise WorkerError(
-            message,
-            code=RESUME_ACTIVATION_UNCERTAIN_CODE,
-        )
-    return latest.attempt + 1
 
 
 def _run_queued_review(
@@ -1134,7 +487,7 @@ def _run_queued_review(
                     ),
                 },
             }
-            _validate_review_request(request, run_directory=run_directory)
+            validate_review_request(request, run_directory=run_directory)
             write_json_atomic(request_path, request, 'review_request')
         else:
             request = retry_review_request
@@ -1144,14 +497,14 @@ def _run_queued_review(
             request_path = manifest_evidence_path(
                 run_directory, 'review_request', sequence
             )
-            _validate_review_request(request, run_directory=run_directory)
+            validate_review_request(request, run_directory=run_directory)
         response_path = run_evidence_path(run_directory, '.review-result.json')
         reviewer_stem = invocation_stem(sequence, 'reviewer', reviewer_attempt)
         reviewer_metadata_path = run_evidence_path(
             run_directory, f'.{reviewer_stem}.runtime.json'
         )
         started_at = timestamp()
-        invocation_id = _record_invocation(
+        invocation_id = record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -1192,7 +545,7 @@ def _run_queued_review(
                         reviewer_identity, reviewer_metadata_path, registry
                     ),
                     on_started=partial(
-                        _record_invocation,
+                        record_invocation,
                         AttemptIdentity(
                             run_id=str(run.id),
                             role=RuntimeRole.REVIEWER,
@@ -1218,7 +571,7 @@ def _run_queued_review(
                 record_finalized_path(artifact_path, 'review_artifact')
         except subprocess.TimeoutExpired as error:
             effective_models, effective_model_status = exception_runtime_metadata(error)
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.REVIEWER,
@@ -1259,10 +612,10 @@ def _run_queued_review(
             ) from error
         except KeyboardInterrupt as error:
             effective_models, effective_model_status = exception_runtime_metadata(error)
-            if _attempt_activation_was_persisted(
+            if attempt_activation_was_persisted(
                 run_directory, sequence, RuntimeRole.REVIEWER, reviewer_attempt
             ):
-                _record_invocation(
+                record_invocation(
                     AttemptIdentity(
                         run_id=str(run.id),
                         role=RuntimeRole.REVIEWER,
@@ -1300,7 +653,7 @@ def _run_queued_review(
             raise
         except OSError as error:
             effective_models, effective_model_status = exception_runtime_metadata(error)
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.REVIEWER,
@@ -1328,7 +681,7 @@ def _run_queued_review(
             ) from error
         process_finished_at = timestamp()
         if not completed.succeeded:
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.REVIEWER,
@@ -1363,7 +716,7 @@ def _run_queued_review(
         )
         response_received_at = timestamp() if response_path.is_file() else None
         validation_started_at = timestamp()
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -1391,8 +744,8 @@ def _run_queued_review(
         )
         try:
             response = read_json_object(response_path)
-            _require_unique_message_id(response, run_directory)
-            verdict = _validate_review_response(
+            require_unique_message_id(response, run_directory)
+            verdict = validate_review_response(
                 response, request=request, artifact_path=artifact_path
             )
             require_unchanged(
@@ -1401,7 +754,7 @@ def _run_queued_review(
             )
             response_valid = True
         except WorkerError:
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.REVIEWER,
@@ -1443,7 +796,7 @@ def _run_queued_review(
                     'review_result' if response_valid else 'rejected_review_result',
                 )
 
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -1514,7 +867,7 @@ def _run_queued_review(
                 'review_artifact_path': str(artifact_path),
             },
         }
-        _validate_remediation_request(remediation, run_directory=run_directory)
+        validate_remediation_request(remediation, run_directory=run_directory)
         write_json_atomic(remediation_path, remediation, 'remediation_request')
         developing = transition(decided, RunState.DEVELOPING)
         store.update(developing, expected_state=RunState.CHANGES_REQUESTED)
@@ -1523,7 +876,7 @@ def _run_queued_review(
             run_directory, f'.{developer_stem}.runtime.json'
         )
         started_at = timestamp()
-        invocation_id = _record_invocation(
+        invocation_id = record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -1556,7 +909,7 @@ def _run_queued_review(
                         developer_identity, developer_metadata_path, registry
                     ),
                     on_started=partial(
-                        _record_invocation,
+                        record_invocation,
                         AttemptIdentity(
                             run_id=str(run.id),
                             role=RuntimeRole.DEVELOPER,
@@ -1579,7 +932,7 @@ def _run_queued_review(
             )
         except subprocess.TimeoutExpired as error:
             effective_models, effective_model_status = exception_runtime_metadata(error)
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.DEVELOPER,
@@ -1613,10 +966,10 @@ def _run_queued_review(
             ) from error
         except KeyboardInterrupt as error:
             effective_models, effective_model_status = exception_runtime_metadata(error)
-            if _attempt_activation_was_persisted(
+            if attempt_activation_was_persisted(
                 run_directory, sequence, RuntimeRole.DEVELOPER, 1
             ):
-                _record_invocation(
+                record_invocation(
                     AttemptIdentity(
                         run_id=str(run.id),
                         role=RuntimeRole.DEVELOPER,
@@ -1647,7 +1000,7 @@ def _run_queued_review(
             raise
         except OSError as error:
             effective_models, effective_model_status = exception_runtime_metadata(error)
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.DEVELOPER,
@@ -1674,7 +1027,7 @@ def _run_queued_review(
             ) from error
         process_finished_at = timestamp()
         if not completed.succeeded:
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.DEVELOPER,
@@ -1707,7 +1060,7 @@ def _run_queued_review(
         )
         response_received_at = timestamp() if handoff_temporary.is_file() else None
         validation_started_at = timestamp()
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -1737,8 +1090,8 @@ def _run_queued_review(
         )
         try:
             handoff = read_json_object(handoff_temporary)
-            _require_unique_message_id(handoff, run_directory)
-            parsed_handoff = _validate_developer_handoff(
+            require_unique_message_id(handoff, run_directory)
+            parsed_handoff = validate_developer_handoff(
                 handoff, request=remediation, finding_ids=finding_ids
             )
             handoff_digest = worktree_digest(
@@ -1748,16 +1101,16 @@ def _run_queued_review(
                 parsed_handoff.payload.status == 'ready_for_review'
                 and handoff_digest is not None
                 and same_diff_digest(handoff_digest, current_digest)
-                and _is_developer_disagreement(parsed_handoff)
+                and is_developer_disagreement(parsed_handoff)
             )
             if is_disagreement:
                 assert handoff_digest is not None
                 recoverable, new_digest = False, handoff_digest
             else:
-                recoverable, new_digest = _classify_remediation_progress(
+                recoverable, new_digest = classify_remediation_progress(
                     parsed_handoff.payload.status, handoff_digest, current_digest
                 )
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.DEVELOPER,
@@ -1813,7 +1166,7 @@ def _run_queued_review(
                 store.update(validation_required, expected_state=RunState.DEVELOPING)
                 return validation_required
         except WorkerError:
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.DEVELOPER,
@@ -1916,7 +1269,7 @@ def _resume_developer_request(
     started_at = timestamp()
     if resume_expected_state is not None:
         store.update(run, expected_state=resume_expected_state)
-    invocation_id = _record_invocation(
+    invocation_id = record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.DEVELOPER,
@@ -1948,7 +1301,7 @@ def _resume_developer_request(
                     developer_identity, developer_metadata_path, registry
                 ),
                 on_started=partial(
-                    _record_invocation,
+                    record_invocation,
                     AttemptIdentity(
                         run_id=str(run.id),
                         role=RuntimeRole.DEVELOPER,
@@ -1972,7 +1325,7 @@ def _resume_developer_request(
         )
     except subprocess.TimeoutExpired as error:
         effective_models, effective_model_status = exception_runtime_metadata(error)
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -2007,10 +1360,10 @@ def _resume_developer_request(
         ) from error
     except KeyboardInterrupt as error:
         effective_models, effective_model_status = exception_runtime_metadata(error)
-        if _attempt_activation_was_persisted(
+        if attempt_activation_was_persisted(
             run_directory, sequence, RuntimeRole.DEVELOPER, attempt
         ):
-            _record_invocation(
+            record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
                     role=RuntimeRole.DEVELOPER,
@@ -2042,7 +1395,7 @@ def _resume_developer_request(
         raise
     except OSError as error:
         effective_models, effective_model_status = exception_runtime_metadata(error)
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -2070,7 +1423,7 @@ def _resume_developer_request(
         ) from error
     process_finished_at = timestamp()
     if not completed.succeeded:
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -2102,7 +1455,7 @@ def _resume_developer_request(
     handoff_valid = False
     response_received_at = timestamp() if response_path.is_file() else None
     validation_started_at = timestamp()
-    _record_invocation(
+    record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.DEVELOPER,
@@ -2130,18 +1483,18 @@ def _resume_developer_request(
     )
     try:
         handoff = read_json_object(response_path)
-        _require_unique_message_id(handoff, run_directory)
-        parsed = _validate_developer_handoff(
+        require_unique_message_id(handoff, run_directory)
+        parsed = validate_developer_handoff(
             handoff, request=request, finding_ids=finding_ids
         )
-        recoverable, measured_digest = _validate_resumed_progress(
+        recoverable, measured_digest = validate_resumed_progress(
             parsed.payload.status,
             worktree_digest(digest_worktree, run.worktree_path, run.base_sha),
             current_digest,
             allow_unchanged_ready=allow_unchanged_ready,
-            is_disagreement=_is_developer_disagreement(parsed),
+            is_disagreement=is_developer_disagreement(parsed),
         )
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -2179,13 +1532,13 @@ def _resume_developer_request(
         if (
             not allow_unchanged_ready
             and same_diff_digest(measured_digest, current_digest)
-            and _is_developer_disagreement(parsed)
+            and is_developer_disagreement(parsed)
         ):
             disagreement = transition(run, RunState.CHANGES_REQUESTED)
             store.update(disagreement, expected_state=RunState.DEVELOPING)
             return disagreement
     except WorkerError:
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.DEVELOPER,
@@ -2247,18 +1600,6 @@ def _resume_developer_request(
     )
 
 
-def _attempt_record_path(
-    run_directory: Path, sequence: int, role: str, attempt: int
-) -> Path:
-    """Return the durable record path for one task attempt."""
-
-    return run_evidence_path(
-        run_directory,
-        'invocations',
-        f'{invocation_stem(sequence, role, attempt)}.json',
-    )
-
-
 def _recovery_response_path(temporary: Path, canonical: Path) -> tuple[Path, bool]:
     """Select one unambiguous response artifact and whether it is temporary."""
 
@@ -2296,8 +1637,8 @@ def _prepare_recovered_validation(
         response_received_at=response_received_at,
         validation_started_at=validation_started_at,
     )
-    _persist_attempt_record(
-        _attempt_record_path(run_directory, sequence, role, record.attempt), updated
+    persist_attempt_record(
+        attempt_record_path(run_directory, sequence, role, record.attempt), updated
     )
     return updated
 
@@ -2325,8 +1666,8 @@ def _complete_recovered_validation(
         response_received_at=record.response_received_at,
         validation_started_at=record.validation_started_at,
     )
-    _persist_attempt_record(
-        _attempt_record_path(run_directory, sequence, role, record.attempt), completed
+    persist_attempt_record(
+        attempt_record_path(run_directory, sequence, role, record.attempt), completed
     )
     return completed
 
@@ -2393,8 +1734,8 @@ def _resume_reviewer_validation(
     try:
         response = read_json_object(response_path)
         if is_temporary:
-            _require_unique_message_id(response, run_directory)
-        verdict = _validate_review_response(
+            require_unique_message_id(response, run_directory)
+        verdict = validate_review_response(
             response, request=request, artifact_path=artifact_path
         )
         require_unchanged(
@@ -2474,7 +1815,7 @@ def _resume_reviewer_validation(
             'review_artifact_path': str(review_artifact_path),
         },
     }
-    _validate_remediation_request(remediation, run_directory=run_directory)
+    validate_remediation_request(remediation, run_directory=run_directory)
     write_json_atomic(remediation_path, remediation, 'remediation_request')
     developing = transition(decided, RunState.DEVELOPING)
     return _resume_developer_request(
@@ -2534,8 +1875,8 @@ def _resume_developer_validation(
     try:
         handoff = read_json_object(response_path)
         if is_temporary:
-            _require_unique_message_id(handoff, run_directory)
-        parsed = _validate_developer_handoff(
+            require_unique_message_id(handoff, run_directory)
+        parsed = validate_developer_handoff(
             handoff, request=request, finding_ids=finding_ids
         )
         measured_digest = worktree_digest(
@@ -2545,13 +1886,13 @@ def _resume_developer_validation(
             parsed.payload.status == 'ready_for_review'
             and measured_digest is not None
             and same_diff_digest(measured_digest, run.diff_digest)
-            and _is_developer_disagreement(parsed)
+            and is_developer_disagreement(parsed)
         )
         if is_disagreement:
             assert measured_digest is not None
             recoverable, new_digest = False, measured_digest
         else:
-            recoverable, new_digest = _classify_remediation_progress(
+            recoverable, new_digest = classify_remediation_progress(
                 parsed.payload.status, measured_digest, run.diff_digest or ''
             )
     except WorkerError:
@@ -2644,7 +1985,7 @@ def _resume_active_attempt(
     role = 'reviewer' if run.state is RunState.REVIEWING else 'developer'
     sequence = int(request['sequence'])
     run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
-    latest = _latest_task_attempt(run_directory, sequence, role)
+    latest = latest_task_attempt(run_directory, sequence, role)
     temporary = run_evidence_path(
         run_directory,
         '.review-result.json' if role == 'reviewer' else '.developer-handoff.json',
@@ -2792,7 +2133,7 @@ def _resume_intermediate_state(
                 'review_artifact_path': last_message['payload']['artifact_path'],
             },
         }
-        _validate_remediation_request(request, run_directory=run_directory)
+        validate_remediation_request(request, run_directory=run_directory)
         write_json_atomic(
             run_evidence_path(
                 run_directory,
@@ -2816,7 +2157,7 @@ def _resume_intermediate_state(
         request=request,
         current_digest=measured_digest,
         allow_unchanged_ready=False,
-        attempt=_next_attempt(
+        attempt=next_attempt(
             run_directory,
             int(request['sequence']),
             str(request['recipient']),
@@ -2876,7 +2217,7 @@ def _reviewer_batch_sequence(
         if identity is None or identity[0] != 'review_request':
             continue
         sequence = identity[1]
-        reviewer_id = _reviewer_id_from_message_path(
+        reviewer_id = reviewer_id_from_message_path(
             path, sequence=sequence, message_type='review_request'
         )
         if reviewer_id is None:
@@ -2914,7 +2255,7 @@ def _completed_reviewer_result(
     )
     result = read_json_object(result_path)
     artifact_path = reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
-    _validate_review_request(request, run_directory=run_directory)
+    validate_review_request(request, run_directory=run_directory)
     _validate_reviewer_set_request_scope(
         request,
         run=run,
@@ -2924,7 +2265,7 @@ def _completed_reviewer_result(
         dispatch=dispatch,
         artifact_path=artifact_path,
     )
-    verdict = _validate_review_response(
+    verdict = validate_review_response(
         result, request=request, artifact_path=artifact_path
     )
     message_id = result.get('message_id')
@@ -3035,7 +2376,7 @@ def _resume_reviewer_set(
             artifact_path = reviewer_dispatch_path(
                 run_directory, base_dispatch.paths.artifact
             )
-            _validate_review_request(request, run_directory=run_directory)
+            validate_review_request(request, run_directory=run_directory)
             _validate_reviewer_set_request_scope(
                 request,
                 run=run,
@@ -3233,7 +2574,7 @@ def _resume_review(  # noqa: PLR0911
         if origin is RunState.DEVELOPING and not execution.developer.command:
             message = 'resume developer command is missing'
             raise WorkerError(message)
-        attempt = _next_attempt(
+        attempt = next_attempt(
             run_directory,
             int(request['sequence']),
             str(request['recipient']),
@@ -3284,7 +2625,7 @@ def _resume_review(  # noqa: PLR0911
         raise WorkerError(message)
     if chain[-1][1]['message_type'] == 'remediation_request':
         request = chain[-1][1]
-        attempt = _next_attempt(
+        attempt = next_attempt(
             run_directory,
             int(request['sequence']),
             str(request['recipient']),
@@ -3349,7 +2690,7 @@ def _resume_review(  # noqa: PLR0911
             'review_artifact_path': review_result['payload']['artifact_path'],
         },
     }
-    _validate_remediation_request(recovery_request, run_directory=run_directory)
+    validate_remediation_request(recovery_request, run_directory=run_directory)
     write_json_atomic(request_path, recovery_request, 'remediation_request')
     resumed = transition(run, RunState.DEVELOPING)
     return _resume_developer_request(
@@ -3466,14 +2807,14 @@ def _execute_reviewer_dispatch(
             'prior_review_path': None,
         },
     }
-    _validate_review_request(request, run_directory=run_directory)
+    validate_review_request(request, run_directory=run_directory)
     if retry_request is None:
         write_json_atomic(request_path, request, 'review_request')
     elif read_json_object(request_path) != request:
         message = 'retry review request differs from canonical evidence'
         raise WorkerError(message)
     started_at = timestamp()
-    invocation_id = _record_invocation(
+    invocation_id = record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.REVIEWER,
@@ -3510,7 +2851,7 @@ def _execute_reviewer_dispatch(
                     dispatch.identity, metadata_path, context.registry
                 ),
                 on_started=partial(
-                    _record_invocation,
+                    record_invocation,
                     AttemptIdentity(
                         run_id=str(run.id),
                         role=RuntimeRole.REVIEWER,
@@ -3535,7 +2876,7 @@ def _execute_reviewer_dispatch(
         )
     except subprocess.TimeoutExpired as error:
         models, model_status = exception_runtime_metadata(error)
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -3573,7 +2914,7 @@ def _execute_reviewer_dispatch(
             ReviewerDecision(dispatch.reviewer_id, 'incomplete'), None
         )
     except OSError as error:
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -3606,7 +2947,7 @@ def _execute_reviewer_dispatch(
             ReviewerDecision(dispatch.reviewer_id, 'incomplete'), None
         )
     except BaseException as error:
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -3638,7 +2979,7 @@ def _execute_reviewer_dispatch(
         raise
     finished_at = timestamp()
     if not completed.succeeded:
-        _record_invocation(
+        record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
                 role=RuntimeRole.REVIEWER,
@@ -3683,8 +3024,8 @@ def _execute_reviewer_dispatch(
     validation_started_at = timestamp()
     try:
         response = read_json_object(response_path)
-        _require_unique_message_id(response, run_directory)
-        verdict = _validate_review_response(
+        require_unique_message_id(response, run_directory)
+        verdict = validate_review_response(
             response, request=request, artifact_path=artifact_path
         )
     except WorkerError:
@@ -3702,7 +3043,7 @@ def _execute_reviewer_dispatch(
             destination,
             'review_result' if valid else 'rejected_review_result',
         )
-    _record_invocation(
+    record_invocation(
         AttemptIdentity(
             run_id=str(run.id),
             role=RuntimeRole.REVIEWER,
@@ -3756,7 +3097,7 @@ def _finish_reviewer_batch(
         worktree_digest(context.digest_worktree, run.worktree_path, run.base_sha),
         current_digest,
     )
-    _require_unique_batch_message_ids(results)
+    require_unique_batch_message_ids(results)
     decision = aggregate_review_batch(tuple(result.decision for result in results))
     if decision.incomplete_reviewers:
         interrupted = transition(reviewing, RunState.INTERRUPTED)

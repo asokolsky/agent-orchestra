@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from agent_orchestra import cli, worker
+from agent_orchestra import cli, invocations, worker
 from agent_orchestra import evidence as evidence_module
 from agent_orchestra.adapter.registry import (
     RuntimeDefinition,
@@ -43,13 +43,15 @@ from agent_orchestra.invocations import (
     InvocationRecord,
 )
 from agent_orchestra.manifests import ENGINE_TOO_OLD, ManifestError
+from agent_orchestra.messages import (
+    NO_REMEDIATION_CHANGE,
+)
 from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
 from agent_orchestra.settings import load_settings
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
-    NO_REMEDIATION_CHANGE,
     resume_review,
     run_queued_review,
 )
@@ -2999,7 +3001,7 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
     assert context.store.get(context.run.id).state is RunState.REVIEWING
 
     monkeypatch.setattr(context.store, 'update', original_update)
-    original_record = worker._record_invocation
+    original_record = invocations.record_invocation
 
     def fail_developer_record(
         attempt: AttemptIdentity, *args: Any, **kwargs: Any
@@ -3011,7 +3013,7 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
             raise OSError(message)
         return original_record(attempt, *args, **kwargs)
 
-    monkeypatch.setattr(worker, '_record_invocation', fail_developer_record)
+    monkeypatch.setattr(worker, 'record_invocation', fail_developer_record)
     with pytest.raises(OSError, match='simulated developer record failure'):
         resume_review(
             store=context.store,
@@ -3021,7 +3023,7 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
         )
     assert context.store.get(context.run.id).state is RunState.DEVELOPING
 
-    monkeypatch.setattr(worker, '_record_invocation', original_record)
+    monkeypatch.setattr(worker, 'record_invocation', original_record)
     assert main(resume_arguments(context)) == 0
 
     assert developer_counter.read_text().splitlines() == ['1']
@@ -3340,7 +3342,7 @@ def test_concurrent_active_resumes_launch_one_process(
     else:
         write_loop_reviewer(reviewer)
     write_developer(developer)
-    original_record = worker._record_invocation
+    original_record = invocations.record_invocation
 
     def crash_before_attempt(
         attempt: AttemptIdentity, *args: Any, **kwargs: Any
@@ -3352,7 +3354,7 @@ def test_concurrent_active_resumes_launch_one_process(
             raise OSError(message)
         return original_record(attempt, *args, **kwargs)
 
-    monkeypatch.setattr(worker, '_record_invocation', crash_before_attempt)
+    monkeypatch.setattr(worker, 'record_invocation', crash_before_attempt)
     with pytest.raises(OSError, match='simulated crash before attempt persistence'):
         run_queued_review(
             store=context.store,
@@ -3365,7 +3367,7 @@ def test_concurrent_active_resumes_launch_one_process(
             max_iterations=3,
             digest_worktree=_working_tree_digest,
         )
-    monkeypatch.setattr(worker, '_record_invocation', original_record)
+    monkeypatch.setattr(worker, 'record_invocation', original_record)
     active = context.store.get(context.run.id)
     expected_state = RunState.REVIEWING if role == 'reviewer' else RunState.DEVELOPING
     assert active.state is expected_state
