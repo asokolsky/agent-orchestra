@@ -192,7 +192,7 @@ class ReviewerBatchFindingSchema(ReviewFindingSchema):
 class ReviewerBatchResultBaseSchema(StrictSchema):
     """Fields shared by versioned aggregate reviewer-batch decisions."""
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     run_id: str
     iteration: int = Field(gt=0)
     reviewer_set_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
@@ -274,8 +274,45 @@ class ReviewerBatchResultV2Schema(ReviewerBatchResultBaseSchema):
         return self
 
 
+class ReviewerBatchResultV3Schema(ReviewerBatchResultBaseSchema):
+    """Schema-3 aggregate decision addressable by developer remediation."""
+
+    schema_version: Literal[3]
+    findings: list[ReviewerBatchFindingSchema]
+    message_id: str
+    artifact_path: str
+
+    @field_validator('message_id')
+    @classmethod
+    def validate_message_id(cls, value: str) -> str:
+        """Require the aggregate correlation identity to be a UUID."""
+
+        UUID(value)
+        return value
+
+    @model_validator(mode='after')
+    def validate_findings(self) -> ReviewerBatchResultV3Schema:
+        """Require unique findings owned by reviewers that requested changes."""
+
+        finding_ids = [finding.finding_id for finding in self.findings]
+        if len(finding_ids) != len(set(finding_ids)):
+            message = 'review batch result finding IDs must be unique'
+            raise ValueError(message)
+        for finding in self.findings:
+            if (
+                finding.reviewer_id not in self.changes_requested_by
+                or finding.finding_id
+                != f'{finding.reviewer_id}:{finding.source_finding_id}'
+            ):
+                message = 'review batch result contains an uncorrelated finding'
+                raise ValueError(message)
+        return self
+
+
 ReviewerBatchResult = Annotated[
-    ReviewerBatchResultSchema | ReviewerBatchResultV2Schema,
+    ReviewerBatchResultSchema
+    | ReviewerBatchResultV2Schema
+    | ReviewerBatchResultV3Schema,
     Field(discriminator='schema_version'),
 ]
 REVIEWER_BATCH_RESULT_ADAPTER: TypeAdapter[ReviewerBatchResult] = TypeAdapter(

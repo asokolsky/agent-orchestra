@@ -400,6 +400,7 @@ def _validate_canonical_json(
     canonical_documents: dict[str, dict[str, object]] = {}
     reviewer_plan: ReviewerExecutionPlanSchema | None = None
     aggregate_iterations: list[int] = []
+    message_ids: set[str] = set()
     if 'execution.json' in indexed_paths:
         try:
             execution_raw = json.loads(
@@ -468,6 +469,23 @@ def _validate_canonical_json(
             continue
         document = parsed.model_dump(mode='json')
         canonical_documents[relative] = document
+        message_id = document.get('message_id')
+        if isinstance(message_id, str) and (
+            evidence_type in _MESSAGE_SCHEMAS
+            or (
+                evidence_type == 'review_batch_result'
+                and document.get('schema_version') == 3
+            )
+        ):
+            if message_id in message_ids:
+                findings.append(
+                    _finding(
+                        'message_correlation_failure',
+                        'canonical evidence contains a duplicate message ID',
+                        relative,
+                    )
+                )
+            message_ids.add(message_id)
         candidate_job_id = document.get('run_id', document.get('job_id'))
         if candidate_job_id is not None and candidate_job_id != str(job.id):
             findings.append(
@@ -533,6 +551,28 @@ def _validate_canonical_json(
                         relative,
                     )
                 )
+            if document['schema_version'] == 3:
+                expected_artifact_relative = (
+                    f'artifacts/review-batch-{document["iteration"]:04d}.md'
+                )
+                expected_artifact = resolve_evidence_path(
+                    root, str(job.id), *Path(expected_artifact_relative).parts
+                )
+                try:
+                    artifact = Path(document['artifact_path']).resolve(strict=True)
+                except OSError:
+                    artifact = None
+                if (
+                    artifact != expected_artifact.resolve()
+                    or expected_artifact_relative not in indexed_paths
+                ):
+                    findings.append(
+                        _finding(
+                            'message_correlation_failure',
+                            'review batch artifact path is not canonical evidence',
+                            relative,
+                        )
+                    )
             for reviewer in document['reviewers']:
                 result_path = reviewer['result_path']
                 result = (

@@ -422,7 +422,8 @@ rejected separately as `worktree changed during read-only review`. Reviewer-set
 width is the configured member count, with one
 concurrent agent process per member and no separate concurrency cap; operators
 should size sets for available local resources. The canonical aggregate decision
-is stored under `review-batches/` and included in audit history. Developer
+is stored under `review-batches/`, has a human-readable aggregate artifact under
+`artifacts/`, and is included in audit history. Developer
 remediation and reviewer-set resume remain tracked by
 [#26](https://github.com/asokolsky/agent-orchestra/issues/26). `config show`
 therefore reports reviewer sets with a `status` of `"review_only"`.

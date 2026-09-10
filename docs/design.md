@@ -1001,10 +1001,13 @@ boundary. New reviewer-set runs may select and persist the plan with
 and redispatches only incomplete members with incremented attempt ordinals.
 Every required member executes concurrently with reviewer-qualified evidence;
 the worker waits for the complete batch and applies the deterministic
-all-required decision before changing workflow state. This initial execution
-boundary does not launch developer remediation after a rejected batch. It
-persists `review-batches/{iteration:06d}.json` before changing workflow state;
-the strict document binds the reviewer set and policy, immutable diff digest,
+all-required decision before changing workflow state. This execution boundary
+does not yet launch developer remediation after a rejected batch. It persists
+`review-batches/{iteration:06d}.json` before changing workflow state. Schema
+version 3 adds a stable message identity and a canonical aggregate Markdown
+artifact so a later remediation request can reference the whole decision rather
+than privileging one member. The strict document binds the reviewer set and
+policy, immutable diff digest,
 ordered member outcomes and canonical result paths, aggregate verdict, and its
 ordered rationale groups. A timed-out, failed, or invalid member leaves the
 batch `interrupted` without a premature aggregate. A complete blocked batch and
