@@ -15,6 +15,7 @@ import pytest
 
 from agent_orchestra import audit as audit_module
 from agent_orchestra import manifests as manifest_module
+from agent_orchestra.attempt_documents import AUDIT_ATTEMPT_FIELDS
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import (
     JobEvidence,
@@ -320,7 +321,7 @@ def test_default_audit_is_versioned_deterministic_and_omits_result(
 
     assert first == second
     document = json.loads(first)
-    assert document['schema_version'] == 14
+    assert document['schema_version'] == 15
     assert 'result' not in document
     assert document['job']['scenario'] == 'local_changes'
     assert [item['to_state'] for item in document['transitions']] == [
@@ -444,6 +445,24 @@ def test_verify_complete_current_evidence_is_verified(
     document = json.loads(capsys.readouterr().out)
     assert document['result'] == 'verified'
     assert document['findings'] == []
+
+
+def test_audit_attempt_publishes_its_declared_key_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail when a record field reaches the audit document undeclared."""
+
+    database, root, job = _source_job(tmp_path)
+    add_attempt(job, resolve_evidence_path(root, str(job.id)))
+
+    assert main(_arguments(database, root, str(job.id), verify=False)) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    attempts = [attempt for task in document['tasks'] for attempt in task['attempts']]
+    assert attempts
+    for attempt in attempts:
+        declared = [field for field in AUDIT_ATTEMPT_FIELDS if field in attempt]
+        assert list(attempt) == [*declared, 'streams']
 
 
 def test_verify_active_attempt_marks_streams_in_progress(

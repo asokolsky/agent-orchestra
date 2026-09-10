@@ -21,6 +21,12 @@ from agent_orchestra.adapter.registry import (
     RuntimeRegistryError,
     RuntimeRole,
 )
+from agent_orchestra.attempt_documents import (
+    CLI_ATTEMPT_HEAD_FIELDS,
+    CLI_ATTEMPT_RENAMES,
+    CLI_ATTEMPT_TAIL_FIELDS,
+    project_attempt,
+)
 from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import (
     EvidencePathError,
@@ -748,35 +754,21 @@ def _attempt_document(
 ) -> dict[str, object]:
     """Return one invocation record using the public attempt vocabulary."""
 
-    document: dict[str, object] = {
-        'attempt_id': record.invocation_id,
-        'attempt': record.attempt,
-        'status': record.status,
-        'conclusion': record.conclusion,
-        'agent_vendor': record.agent_vendor,
-        'requested_model': record.requested_model,
-        'effective_models': list(record.effective_models),
-        'effective_model_status': record.effective_model_status,
-        'runtime': record.runtime,
-        'started_at': record.started_at,
-        'finished_at': record.finished_at,
-        'response_received_at': record.response_received_at,
-        'validation_started_at': record.validation_started_at,
-        'exit_code': record.exit_code,
-        'timed_out': record.timed_out,
-        'interrupted': record.interrupted,
-        'legacy': False,
-        'streams': {
-            'stdout': _stream_document(
-                record.stdout_path, include_content=include_stream_content
-            ),
-            'stderr': _stream_document(
-                record.stderr_path, include_content=include_stream_content
-            ),
-        },
+    document = project_attempt(
+        record, CLI_ATTEMPT_HEAD_FIELDS, renames=CLI_ATTEMPT_RENAMES
+    )
+    document['legacy'] = False
+    document['streams'] = {
+        'stdout': _stream_document(
+            record.stdout_path, include_content=include_stream_content
+        ),
+        'stderr': _stream_document(
+            record.stderr_path, include_content=include_stream_content
+        ),
     }
-    if record.reviewer_id is not None:
-        document['reviewer_id'] = record.reviewer_id
+    document.update(
+        project_attempt(record, CLI_ATTEMPT_TAIL_FIELDS, renames=CLI_ATTEMPT_RENAMES)
+    )
     return document
 
 

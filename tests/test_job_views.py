@@ -156,6 +156,28 @@ def test_four_views_use_public_vocabulary_and_current_array(
     assert attempt['attempt_id'] == f'{completed_id}:attempt-0001'
     assert 'invocation_id' not in attempt
     assert attempt['streams']['stdout']['content'] == 'child stdout\n'
+    # Exact key set, so a field added to InvocationRecord cannot reach the
+    # documented CLI vocabulary without being declared in attempt_documents.
+    assert list(attempt) == [
+        'attempt_id',
+        'attempt',
+        'status',
+        'conclusion',
+        'agent_vendor',
+        'requested_model',
+        'effective_models',
+        'effective_model_status',
+        'runtime',
+        'started_at',
+        'finished_at',
+        'response_received_at',
+        'validation_started_at',
+        'exit_code',
+        'timed_out',
+        'interrupted',
+        'legacy',
+        'streams',
+    ]
 
 
 def test_views_treat_absent_issue_tables_as_empty(
