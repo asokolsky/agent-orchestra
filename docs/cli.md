@@ -53,7 +53,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "jobs": [],
   "error": null
 }
@@ -228,7 +228,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -252,7 +252,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `16`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `17`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -468,7 +468,7 @@ but deleted content cannot be reconstructed without an independent backup.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 16 JSON views expose
+is one process execution. Four read-only, schema-version 17 JSON views expose
 that hierarchy:
 
 ```text
@@ -511,13 +511,16 @@ document level with the selected `job_id`.
 
 `job` returns one job plus a `current`
 array of non-terminal tasks; the array is empty when nothing is pending or
-running. `tasks` returns complete task history. `task` derives the parent job
-from the globally unique task ID and returns every attempt, including contained
-stdout and stderr paths and content.
+running. Source-code `job` and `tasks` documents also include every validated
+aggregate reviewer decision in `review_batches`. `tasks` returns complete task
+history. `task` derives the parent job from the globally unique task ID and
+returns every attempt, including contained stdout and stderr paths and content.
+A source reviewer task includes its iteration's aggregate decision as
+`review_batch` once that batch is complete.
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -527,7 +530,8 @@ stdout and stderr paths and content.
         "role": "reviewer",
         "attempt": 2,
         "status": "running",
-        "conclusion": null
+        "conclusion": null,
+        "reviewer_id": "security"
       }
     ]
   },
@@ -545,6 +549,7 @@ the root before use and rejects job-directory and attempt-evidence escapes.
 | `job_id` | String | Permanent opaque job identifier. |
 | `state` | String | Durable workflow state. |
 | `current` | Array | Non-terminal tasks; present only in the single-job view. |
+| `review_batches` | Array | Validated aggregate reviewer decisions, ordered by iteration; present in source-code `job` and all `tasks` views. |
 | `supersedes_job_id` | String or null | Replaced terminal job, when any. |
 | `scenario` | String | `local_changes` or `issue_review`. |
 | `provider` / `host` | String | Issue provider identity for issue-review jobs. |
@@ -558,6 +563,7 @@ the root before use and rejects job-directory and attempt-evidence escapes.
 | `task_id` | String | Globally addressable `{job_id}:{sequence}-{role}` identifier, with `-{reviewer_id}` appended for schema-5 source-review tasks. |
 | `role` | String | `developer` or `reviewer` for source-code jobs; `issue_reviewer` for issue-readiness jobs. |
 | `reviewer_id` | String | Stable configured reviewer identity on schema-5 source-review tasks and attempts; absent from earlier records and non-reviewer work. |
+| `review_batch` | Object | Aggregate decision for this reviewer task's iteration, when complete; present only in the direct `task` view. |
 | `status` | String | Task or attempt lifecycle status. |
 | `attempt_id` | String | Public identifier for one process execution. |
 | `attempt` | Integer | One-based attempt ordinal. |
@@ -575,7 +581,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-16 `job_id`,
+aliases. Callers must use the four commands above and the schema-17 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -713,7 +719,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -722,7 +728,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `16`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `17`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -765,7 +771,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -829,7 +835,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -840,7 +846,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

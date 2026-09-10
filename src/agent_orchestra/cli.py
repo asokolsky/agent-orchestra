@@ -14,6 +14,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from pydantic import ValidationError
+
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.adapter.registry import (
     DEFAULT_RUNTIME_REGISTRY,
@@ -27,7 +29,7 @@ from agent_orchestra.attempt_documents import (
     CLI_ATTEMPT_TAIL_FIELDS,
     project_attempt,
 )
-from agent_orchestra.audit import build_audit_document
+from agent_orchestra.audit import build_audit_document, is_known_temporary
 from agent_orchestra.evidence import (
     EvidencePathError,
     WorkerError,
@@ -49,6 +51,7 @@ from agent_orchestra.issue_review import (
 from agent_orchestra.issue_sources import IssueSourceError, fetch_issue, write_snapshot
 from agent_orchestra.manifests import (
     ManifestError,
+    canonical_evidence_type,
     evidence_path,
     validate_packaged_manifests,
 )
@@ -71,7 +74,7 @@ from agent_orchestra.reviewer_plan import (
     build_reviewer_execution_plan,
     select_reviewer_set,
 )
-from agent_orchestra.schemas import SchemaValidationError
+from agent_orchestra.schemas import ReviewerBatchResultSchema, SchemaValidationError
 from agent_orchestra.settings import Settings, SettingsError, load_settings
 from agent_orchestra.skill_install import SkillInstallError, install_skills
 from agent_orchestra.store import (
@@ -93,7 +96,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 16
+CLI_SCHEMA_VERSION = 17
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -836,6 +839,90 @@ def _job_tasks(
     )
 
 
+def _review_batch_documents(
+    job: Run,
+    store: JobStore,
+    runs_directory: Path,
+    *,
+    allow_missing: bool = False,
+) -> list[dict[str, object]]:
+    """Read validated aggregate reviewer-batch evidence for one job."""
+
+    job_id = str(job.id)
+    job_directory = _job_directory(job_id, runs_directory)
+    if job_directory is None:
+        if allow_missing:
+            return []
+        raise InvocationEvidenceError(f'evidence not found for job: {job_id}')
+    batch_directory = job_directory / 'review-batches'
+    if not batch_directory.exists():
+        return []
+    if batch_directory.is_symlink() or not batch_directory.is_dir():
+        message = 'review batch evidence directory is unsafe'
+        raise InvocationEvidenceError(message)
+    documents: list[dict[str, object]] = []
+    try:
+        entries = sorted(batch_directory.iterdir())
+        for path in entries:
+            relative = path.relative_to(job_directory).as_posix()
+            if path.is_symlink() or not path.is_file():
+                message = 'review batch evidence path is unsafe'
+                raise InvocationEvidenceError(message)
+            temporary_parts = path.name.removeprefix('.').rsplit('.', 2)
+            temporary_target = (
+                (Path(relative).parent / temporary_parts[0]).as_posix()
+                if len(temporary_parts) == 3 and temporary_parts[2] == 'tmp'
+                else None
+            )
+            if (
+                is_known_temporary(relative)
+                and temporary_target is not None
+                and canonical_evidence_type(temporary_target) == 'review_batch_result'
+            ):
+                continue
+            expected = evidence_path('review_batch_result', ordinal=len(documents) + 1)
+            if relative != expected:
+                raise InvocationEvidenceError(
+                    f'unexpected review batch evidence path: {relative}'
+                )
+            parsed = ReviewerBatchResultSchema.model_validate_json(
+                path.read_text(encoding='utf-8')
+            )
+            if parsed.run_id != job_id or parsed.iteration != len(documents) + 1:
+                raise InvocationEvidenceError(
+                    f'review batch evidence does not match job: {relative}'
+                )
+            document = parsed.model_dump(mode='json', exclude={'run_id'})
+            document['job_id'] = parsed.run_id
+            document['path'] = relative
+            documents.append(document)
+    except (OSError, ValidationError) as error:
+        raise InvocationEvidenceError(
+            f'invalid review batch evidence: {error}'
+        ) from error
+    if documents:
+        audit = build_audit_document(
+            job,
+            store.list_transitions(job_id),
+            (),
+            runs_directory,
+            verify=True,
+        )
+        findings = cast('list[dict[str, object]]', audit['findings'])
+        correlation_findings = [
+            finding
+            for finding in findings
+            if str(finding.get('path', '')).startswith('review-batches/')
+        ]
+        if correlation_findings:
+            first = correlation_findings[0]
+            raise InvocationEvidenceError(
+                'invalid review batch correlation: '
+                f'{first.get("code")}: {first.get("message")}'
+            )
+    return documents
+
+
 def _write_job_error(
     code: str,
     message: str,
@@ -1068,6 +1155,11 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
                     'attempt': task['attempt'],
                     'status': task['status'],
                     'conclusion': task['conclusion'],
+                    **(
+                        {'reviewer_id': task['reviewer_id']}
+                        if 'reviewer_id' in task
+                        else {}
+                    ),
                 }
                 for task in tasks
                 if task['status'] in {'pending', 'running'}
@@ -1093,6 +1185,21 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
         if isinstance(run, Run)
         else _issue_job_summary(run, store.list_issue_actions(run.id))
     )
+    try:
+        review_batches = (
+            _review_batch_documents(
+                run,
+                store,
+                args.runs_directory,
+                allow_missing=run.state is RunState.QUEUED,
+            )
+            if isinstance(run, Run)
+            else []
+        )
+    except (InvocationEvidenceError, OSError) as error:
+        _write_job_error('invalid_evidence', str(error), job_id=str(run.id))
+        return 2
+    document['review_batches'] = review_batches
     document['current'] = [
         {
             'task_id': task['task_id'],
@@ -1100,6 +1207,7 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
             'attempt': task['attempt'],
             'status': task['status'],
             'conclusion': task['conclusion'],
+            **({'reviewer_id': task['reviewer_id']} if 'reviewer_id' in task else {}),
         }
         for task in tasks
         if task['status'] in {'pending', 'running'}
@@ -1120,6 +1228,20 @@ def _tasks(args: argparse.Namespace, store: JobStore) -> int:
     if selected is None:
         return 2
     run, tasks = selected
+    try:
+        review_batches = (
+            _review_batch_documents(
+                run,
+                store,
+                args.runs_directory,
+                allow_missing=run.state is RunState.QUEUED,
+            )
+            if isinstance(run, Run)
+            else []
+        )
+    except (InvocationEvidenceError, OSError) as error:
+        _write_job_error('invalid_evidence', str(error), job_id=str(run.id))
+        return 2
     print(
         json.dumps(
             {
@@ -1134,6 +1256,7 @@ def _tasks(args: argparse.Namespace, store: JobStore) -> int:
                     ]
                 ),
                 'tasks': tasks,
+                'review_batches': review_batches,
                 'error': None,
             },
             indent=2,
@@ -1157,7 +1280,7 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
     selected = _selected_job(args, store, include_stream_content=True)
     if selected is None:
         return 2
-    _, tasks = selected
+    run, tasks = selected
     matching = [task for task in tasks if task['task_id'] == args.task_id]
     if not matching:
         _write_job_error(
@@ -1167,6 +1290,24 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
             task_id=args.task_id,
         )
         return 2
+    if isinstance(run, Run) and matching[0]['role'] == RuntimeRole.REVIEWER.value:
+        try:
+            review_batches = _review_batch_documents(run, store, args.runs_directory)
+        except (InvocationEvidenceError, OSError) as error:
+            _write_job_error(
+                'invalid_evidence',
+                str(error),
+                job_id=str(run.id),
+                task_id=args.task_id,
+            )
+            return 2
+        matching_batches = [
+            batch
+            for batch in review_batches
+            if batch['iteration'] == matching[0]['iteration']
+        ]
+        if matching_batches:
+            matching[0]['review_batch'] = matching_batches[0]
     print(
         json.dumps(
             {'schema_version': CLI_SCHEMA_VERSION, 'task': matching[0], 'error': None},

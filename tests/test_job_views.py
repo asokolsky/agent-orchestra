@@ -5,26 +5,41 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from agent_orchestra.adapter.registry import RuntimeRole
+from agent_orchestra import cli as cli_module
+from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY, RuntimeRole
+from agent_orchestra.agents import (
+    AgentRequest,
+    AgentResult,
+    CommandAgentAdapter,
+    ReviewerRequest,
+)
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
     EffectiveModelStatus,
+    InvocationIdentity,
     InvocationRecord,
     _write_record_unindexed,
     transition_attempt,
 )
 from agent_orchestra.models import Run
+from agent_orchestra.reviewer_paths import reviewer_invocation_stem, reviewer_task_id
+from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
+from agent_orchestra.worker import run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+
+
+DIGEST = f'sha256:{"a" * 64}'
 
 
 def create_job(tmp_path: Path) -> tuple[Path, Run, Path]:
@@ -50,24 +65,30 @@ def add_attempt(
     role: RuntimeRole = RuntimeRole.REVIEWER,
     attempt: int = 1,
     status: AttemptStatus = AttemptStatus.COMPLETED,
+    reviewer_id: str | None = None,
 ) -> str:
     """Write one valid attempt record and its separate streams."""
 
-    task_id = f'{job.id}:{sequence:06d}-{role.value}'
+    task_id = (
+        reviewer_task_id(str(job.id), sequence, reviewer_id)
+        if reviewer_id is not None
+        else f'{job.id}:{sequence:06d}-{role.value}'
+    )
     attempt_id = f'{task_id}:attempt-{attempt:04d}'
+    stem = (
+        reviewer_invocation_stem(sequence, reviewer_id, attempt)
+        if reviewer_id is not None
+        else f'{sequence:06d}-{role.value}-{attempt:04d}'
+    )
     logs = job_directory / 'logs'
     logs.mkdir(exist_ok=True)
-    stdout = logs / f'{sequence:06d}-{role.value}-{attempt:04d}.stdout.log'
-    stderr = logs / f'{sequence:06d}-{role.value}-{attempt:04d}.stderr.log'
+    stdout = logs / f'{stem}.stdout.log'
+    stderr = logs / f'{stem}.stderr.log'
     stdout.write_text('child stdout\n')
     stderr.write_text('child stderr\n')
-    record_path = (
-        job_directory
-        / 'invocations'
-        / f'{sequence:06d}-{role.value}-{attempt:04d}.json'
-    )
+    record_path = job_directory / 'invocations' / f'{stem}.json'
     pending = InvocationRecord(
-        schema_version=4,
+        schema_version=5 if reviewer_id is not None else 4,
         run_id=str(job.id),
         task_id=task_id,
         invocation_id=attempt_id,
@@ -88,6 +109,7 @@ def add_attempt(
         attempt=attempt,
         status=AttemptStatus.PENDING,
         conclusion=None,
+        reviewer_id=reviewer_id,
     )
     _write_record_unindexed(record_path, pending)
     if status is AttemptStatus.PENDING:
@@ -106,6 +128,132 @@ def add_attempt(
     )
     _write_record_unindexed(record_path, completed)
     return task_id
+
+
+def write_review_batch(job: Run, job_directory: Path) -> dict[str, object]:
+    """Write and return one valid public reviewer-batch summary."""
+
+    stored = {
+        'schema_version': 1,
+        'run_id': str(job.id),
+        'iteration': 1,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'diff_digest': f'sha256:{"a" * 64}',
+        'verdict': 'approved',
+        'reviewers': [
+            {
+                'reviewer_id': 'security',
+                'outcome': 'approved',
+                'result_path': 'messages/000002-security-review-result.json',
+            },
+            {
+                'reviewer_id': 'portability',
+                'outcome': 'approved',
+                'result_path': 'messages/000002-portability-review-result.json',
+            },
+        ],
+        'changes_requested_by': [],
+        'blocked_by': [],
+        'incomplete_reviewers': [],
+    }
+    batch_directory = job_directory / 'review-batches'
+    batch_directory.mkdir()
+    (batch_directory / '000001.json').write_text(json.dumps(stored))
+    return {key: value for key, value in stored.items() if key != 'run_id'} | {
+        'job_id': str(job.id),
+        'path': 'review-batches/000001.json',
+    }
+
+
+def create_reviewed_batch_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Run, Path]:
+    """Run one real reviewer set and return its persisted job state."""
+
+    database = tmp_path / 'state.db'
+    store = JobStore(database)
+    store.initialize()
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+    runs_directory = tmp_path / 'runs'
+
+    def approve(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Write one correlated reviewer approval through the real worker path."""
+
+        assert isinstance(request, ReviewerRequest)
+        if request.on_started is not None:
+            request.on_started()
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        request.artifact_path.write_text('# Review\n', encoding='utf-8')
+        response: dict[str, Any] = {
+            'schema_version': 1,
+            'message_id': str(uuid4()),
+            'in_reply_to': document['message_id'],
+            'run_id': document['run_id'],
+            'sequence': document['sequence'] + 1,
+            'iteration': document['iteration'],
+            'message_type': 'review_result',
+            'sender': 'reviewer',
+            'recipient': 'orchestrator',
+            'created_at': '2026-09-10T12:00:00Z',
+            'scope': document['scope'],
+            'payload': {
+                'verdict': 'approved',
+                'summary': 'approved',
+                'findings': [],
+                'validation': [],
+                'verification_gaps': [],
+                'artifact_path': str(request.artifact_path),
+            },
+        }
+        request.response_path.write_text(json.dumps(response), encoding='utf-8')
+        return AgentResult(
+            succeeded=True,
+            summary='approved',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', approve)
+    plan = ReviewerExecutionPlan(
+        'default',
+        tuple(
+            ReviewerExecution(
+                reviewer_id=reviewer_id,
+                command=('reviewer', reviewer_id),
+                identity=InvocationIdentity(
+                    vendor=vendor,
+                    model=None,
+                    runtime=runtime,
+                ),
+                timeout_seconds=30,
+            )
+            for reviewer_id, runtime, vendor in (
+                ('security', 'codex', 'openai'),
+                ('portability', 'claude-code', 'anthropic'),
+            )
+        ),
+    )
+    result = run_queued_reviewer_set(
+        store=store,
+        run=run,
+        objective='Review the change.',
+        reviewer_plan=plan,
+        developer_command=(),
+        runs_directory=runs_directory,
+        developer_timeout_seconds=30,
+        max_iterations=3,
+        digest_worktree=lambda _path, _base: DIGEST,
+        developer_identity=InvocationIdentity(
+            vendor='openai', model=None, runtime='codex'
+        ),
+        registry=DEFAULT_RUNTIME_REGISTRY,
+    )
+    return database, result, runs_directory
 
 
 def arguments(
@@ -139,7 +287,7 @@ def test_four_views_use_public_vocabulary_and_current_array(
 
     assert main(arguments(database, 'jobs', None, root)) == 0
     jobs = json.loads(capsys.readouterr().out)
-    assert jobs['schema_version'] == 16
+    assert jobs['schema_version'] == 17
     assert jobs['jobs'][0]['job_id'] == str(job.id)
     assert 'id' not in jobs['jobs'][0]
 
@@ -188,6 +336,244 @@ def test_four_views_use_public_vocabulary_and_current_array(
     ]
 
 
+def test_reviewer_batch_is_visible_from_job_and_reviewer_task(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose reviewer identity and the validated aggregate without storage names."""
+
+    database, job, job_directory = create_job(tmp_path)
+    task_id = add_attempt(
+        job,
+        job_directory,
+        sequence=1,
+        reviewer_id='security',
+    )
+    pending_id = add_attempt(
+        job,
+        job_directory,
+        sequence=2,
+        status=AttemptStatus.PENDING,
+        reviewer_id='portability',
+    )
+    expected = write_review_batch(job, job_directory)
+    root = evidence_root_for_job(job_directory)
+    monkeypatch.setattr(
+        cli_module,
+        'build_audit_document',
+        lambda *_args, **_kwargs: {'findings': []},
+    )
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 0
+    job_document = json.loads(capsys.readouterr().out)['job']
+    assert job_document['current'] == [
+        {
+            'task_id': pending_id,
+            'role': 'reviewer',
+            'attempt': 1,
+            'status': 'pending',
+            'conclusion': None,
+            'reviewer_id': 'portability',
+        }
+    ]
+    assert job_document['review_batches'] == [expected]
+    assert 'run_id' not in job_document['review_batches'][0]
+
+    assert main(arguments(database, 'tasks', str(job.id), root)) == 0
+    tasks_document = json.loads(capsys.readouterr().out)
+    assert tasks_document['review_batches'] == [expected]
+    assert tasks_document['tasks'][0]['reviewer_id'] == 'security'
+
+    assert main(arguments(database, 'task', task_id, root)) == 0
+    task_document = json.loads(capsys.readouterr().out)['task']
+    assert task_document['review_batch'] == expected
+
+
+def test_real_reviewer_batch_is_visible_from_all_batch_views(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render worker-produced batch evidence through the real audit validator."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    task_id = reviewer_task_id(str(job.id), 1, 'security')
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 0
+    job_document = json.loads(capsys.readouterr().out)['job']
+    assert job_document['review_batches'][0]['verdict'] == 'approved'
+
+    assert main(arguments(database, 'tasks', str(job.id), root)) == 0
+    tasks_document = json.loads(capsys.readouterr().out)
+    assert tasks_document['review_batches'] == job_document['review_batches']
+
+    assert main(arguments(database, 'task', task_id, root)) == 0
+    task_document = json.loads(capsys.readouterr().out)['task']
+    assert task_document['review_batch'] == job_document['review_batches'][0]
+
+
+def test_job_view_rejects_modified_real_reviewer_batch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject worker-produced batch evidence modified after finalization."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    job_directory = resolve_evidence_path(root, str(job.id))
+    batch_path = job_directory / 'review-batches' / '000001.json'
+    batch = json.loads(batch_path.read_text(encoding='utf-8'))
+    batch['diff_digest'] = f'sha256:{"b" * 64}'
+    batch_path.write_text(json.dumps(batch), encoding='utf-8')
+
+    assert main(arguments(database, 'job', str(job.id), root)) == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+    assert (
+        'evidence_modified: evidence file was modified' in document['error']['message']
+    )
+
+
+def test_batch_views_ignore_orphaned_atomic_write_temporary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep batch views readable after a writer is killed before cleanup."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    job_directory = resolve_evidence_path(root, str(job.id))
+    task_id = reviewer_task_id(str(job.id), 1, 'security')
+    temporary = job_directory / 'review-batches' / f'.000002.json.{uuid4()}.tmp'
+    temporary.write_text('{', encoding='utf-8')
+
+    for command, identifier in (
+        ('job', str(job.id)),
+        ('tasks', str(job.id)),
+        ('task', task_id),
+    ):
+        assert main(arguments(database, command, identifier, root)) == 0
+        assert json.loads(capsys.readouterr().out)['error'] is None
+
+
+def test_job_view_rejects_temporary_named_batch_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject a non-regular entry even when its name resembles writer output."""
+
+    database, job, job_directory = create_job(tmp_path)
+    temporary = job_directory / 'review-batches' / f'.000001.json.{uuid4()}.tmp'
+    temporary.mkdir(parents=True)
+
+    assert (
+        main(
+            arguments(
+                database,
+                'job',
+                str(job.id),
+                evidence_root_for_job(job_directory),
+            )
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+    assert document['error']['message'] == 'review batch evidence path is unsafe'
+
+
+def test_job_view_rejects_temporary_from_another_writer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject a known temporary name that no reviewer-batch writer emits."""
+
+    database, job, job_directory = create_job(tmp_path)
+    batch_directory = job_directory / 'review-batches'
+    batch_directory.mkdir()
+    (batch_directory / '.review-result.json').write_text('{}', encoding='utf-8')
+
+    assert (
+        main(
+            arguments(
+                database,
+                'job',
+                str(job.id),
+                evidence_root_for_job(job_directory),
+            )
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+    assert 'unexpected review batch evidence path' in document['error']['message']
+
+
+def test_job_view_rejects_invalid_reviewer_batch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail closed when aggregate reviewer evidence is malformed."""
+
+    database, job, job_directory = create_job(tmp_path)
+    batch_directory = job_directory / 'review-batches'
+    batch_directory.mkdir()
+    (batch_directory / '000001.json').write_text('{}')
+
+    assert (
+        main(
+            arguments(
+                database,
+                'job',
+                str(job.id),
+                evidence_root_for_job(job_directory),
+            )
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+
+
+def test_job_view_rejects_uncorrelated_reviewer_batch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an aggregate that the authoritative audit validator cannot correlate."""
+
+    database, job, job_directory = create_job(tmp_path)
+    write_review_batch(job, job_directory)
+    monkeypatch.setattr(
+        cli_module,
+        'build_audit_document',
+        lambda *_args, **_kwargs: {
+            'findings': [
+                {
+                    'code': 'scope_digest_mismatch',
+                    'message': (
+                        'review batch result digest differs from its review transition'
+                    ),
+                    'path': 'review-batches/000001.json',
+                }
+            ]
+        },
+    )
+
+    assert (
+        main(
+            arguments(
+                database,
+                'job',
+                str(job.id),
+                evidence_root_for_job(job_directory),
+            )
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_evidence'
+    assert 'scope_digest_mismatch' in document['error']['message']
+
+
 def test_views_treat_absent_issue_tables_as_empty(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -201,7 +587,7 @@ def test_views_treat_absent_issue_tables_as_empty(
 
     assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 16,
+        'schema_version': 17,
         'jobs': [],
         'error': None,
     }

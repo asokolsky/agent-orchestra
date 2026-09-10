@@ -440,7 +440,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-16 CLI. This
+column and field names. Those names are not exposed by the schema-17 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
