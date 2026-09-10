@@ -325,6 +325,68 @@ and incomplete profiles fail with `manifest_malformed`. A manifest whose
 `manifest_engine_too_old`. Neither error permits partial application. Manifests
 ship with the Python package and are never fetched remotely.
 
+### Why manifests are packaged rather than configurable
+
+Packaged manifests are part of the installation, not configuration. There is
+deliberately no override mechanism: no settings key, no environment variable, no
+`--manifests-dir` flag, and no XDG search path. A manifest that fails validation
+means the installation is invalid or incompatible, so the remedy is to reinstall
+or upgrade rather than to edit installed package data.
+
+The six manifests are not one category. What an override would do differs by
+kind, and a proposal that treats them alike is reasoning about the wrong risk:
+
+| Kind | Manifests | What an override would change |
+|---|---|---|
+| Runtime profile | `codex`, `claude-code` | The agent capability ceiling. |
+| Evidence | `evidence` | A contract with evidence already on disk. |
+| Assignment | `assignments` | The instruction text an agent is given. |
+| Provider | `github`, `gitlab` | Only the error code a diagnostic maps to. |
+
+Runtime profiles are the strongest case. They carry the exact arguments that
+bound every agent this tool launches: the Codex reviewer profile sets
+`sandbox_workspace_write.network_access=false` and excludes `/tmp` and
+`TMPDIR`, and the Claude Code reviewer profile sets `--strict-mcp-config` with
+an empty `mcpServers` object and a fixed `--tools` list. Loading those from a
+writable path would let a TOML edit grant an agent network access, filesystem
+write, or arbitrary MCP servers. The profiles also pass `--ignore-user-config`
+and `--setting-sources ""` precisely so ambient user configuration cannot reach
+the agent; making the profiles themselves user-configurable would reintroduce
+the exposure those flags exist to remove.
+
+The evidence manifest is a contract with data that already exists. Its
+templates and audit recognition patterns are two halves of one naming
+agreement, and overriding either half makes previously written evidence
+unrecognizable to the classification step: `canonical_evidence_type` returns
+`None` for a path the old manifest produced. Audit does not ignore that
+quietly. An indexed path that still falls inside a manifest-owned namespace is
+reported as `unknown_canonical_evidence`, a path whose manifest type disagrees
+with its indexed type is reported as `evidence_type_mismatch`, and integrity
+verification of indexed evidence runs independently of manifest recognition.
+
+The hazard is subtler than a missing finding. Both the recognition patterns and
+the set of manifest-owned namespaces derive from the same manifest, so an
+override moves the frame of reference along with the layout. An override that
+relocates templates to a new top-level namespace leaves evidence written under
+the old one outside every namespace audit knows to police, and `audit --verify`
+then reports against a layout that does not match what was written.
+
+The assignment manifest holds the text a tool-less role is handed in place of a
+skill. A writable assignment is prompt injection into a role that was granted no
+tools on purpose.
+
+Provider manifests are the only ones whose override would be safe in principle.
+They classify provider stderr into public error codes and grant nothing, so a
+future proposal to make any manifest configurable should start from that scope
+rather than from all six. Proposing such a change is separate work and should
+cite this section.
+
+Manifests live in `src/agent_orchestra/manifests/` and load through
+`importlib.resources` rather than shipping as top-level `data-files`. Package
+data cannot be separated from the code it must stay in sync with, and it
+resolves identically from a wheel, a zip, and an editable install, so the engine
+never has to search the filesystem for the data that bounds it.
+
 ## Job and task output
 
 CLI output schema version 10 uses the public `job` -> `task` -> `attempt`
