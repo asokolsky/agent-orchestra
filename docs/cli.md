@@ -32,8 +32,11 @@ runtime-adapter, and evidence-name manifests. An invalid manifest exits 2 with
 a schema-versioned JSON error whose code is `manifest_malformed`,
 `manifest_schema_version_unsupported`, or `manifest_engine_too_old`. These failures
 indicate an invalid or incompatible installation; reinstall or upgrade
-`agent-orchestra` rather than editing installed package data. The manifest
-schema and compatibility contract are documented in
+`agent-orchestra` rather than editing installed package data. Manifests are part
+of the installation and have no override mechanism, because runtime profiles
+carry the agent capability ceiling; see
+[Why manifests are packaged rather than configurable](design.md#why-manifests-are-packaged-rather-than-configurable).
+The manifest schema and compatibility contract are documented in
 [Design and protocol](design.md#packaged-knowledge-manifests).
 
 Examples:
