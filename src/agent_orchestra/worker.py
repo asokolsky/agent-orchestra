@@ -27,11 +27,21 @@ from agent_orchestra.agents import (
     ReviewerRequest,
 )
 from agent_orchestra.evidence import (
-    EvidencePathError,
-    EvidenceType,
-    JobEvidence,
-    evidence_root_for_job,
-    resolve_evidence_path,
+    WorkerError,
+    archive_unaccepted_response,
+    contained_job_reference,
+    finalize_temporary_path,
+    invocation_stem,
+    manifest_evidence_path,
+    output_text,
+    read_json_object,
+    record_finalized_path,
+    require_unchanged,
+    reviewer_dispatch_path,
+    run_evidence_path,
+    worktree_digest,
+    write_json_atomic,
+    write_text_atomic,
 )
 from agent_orchestra.invocations import (
     AttemptConclusion,
@@ -42,6 +52,7 @@ from agent_orchestra.invocations import (
     InvocationIdentity,
     InvocationRecord,
     RecoveryAction,
+    prepare_run_evidence_directory,
     recovery_action,
     timestamp,
     transition_attempt,
@@ -61,6 +72,10 @@ from agent_orchestra.reviewer_plan import (
     ReviewerExecution,
     ReviewerExecutionPlan,
     reviewer_execution_plan_record,
+)
+from agent_orchestra.runtime_metadata import (
+    exception_runtime_metadata,
+    runtime_metadata_path,
 )
 from agent_orchestra.schemas import (
     CHANGES_REQUESTED_WITHOUT_FINDINGS,
@@ -83,17 +98,6 @@ if TYPE_CHECKING:
     from agent_orchestra.store import JobStore
 
 
-class WorkerError(RuntimeError):
-    """Raised when a queued run cannot complete its review step."""
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        """Create an error with an optional stable machine-readable code."""
-
-        super().__init__(message)
-        self.code = code
-
-
-NOT_OBJECT = 'reviewer response must be a JSON object'
 INVALID_ENVELOPE = 'reviewer response has missing or unknown envelope fields'
 INVALID_IDENTITY = 'reviewer response has an invalid identity or timestamp'
 INVALID_PAYLOAD = 'reviewer response has invalid payload fields'
@@ -109,7 +113,6 @@ DEVELOPER_DISAGREEMENT = 'developer disputed every finding without changing the 
 ITERATION_LIMIT = 'maximum review iteration count exhausted'
 INVALID_DEVELOPER_TIMEOUT = 'developer timeout must be positive'
 INVALID_ITERATION_LIMIT = 'maximum review iterations must be positive'
-WORKTREE_CHANGED = 'worktree changed during read-only review'
 EVIDENCE_INSIDE_WORKTREE = 'run evidence directory must be outside the worktree'
 INVALID_DEVELOPER_HANDOFF = 'developer handoff is invalid'
 INVALID_FINDING_DISPOSITIONS = (
@@ -279,197 +282,6 @@ def _execution_record(
     )
 
 
-def _run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
-    """Resolve one run directory while preserving the worker error contract."""
-
-    try:
-        path = resolve_evidence_path(runs_directory, run_id)
-        path.mkdir(parents=True, exist_ok=True)
-        JobEvidence(runs_directory, run_id).recover_index()
-        InvocationEvidenceStore(path).recover_completed(run_id)
-        return path
-    except EvidencePathError as error:
-        raise WorkerError(str(error)) from error
-
-
-def _run_evidence_path(run_directory: Path, *parts: str) -> Path:
-    """Resolve one contained path beneath an established run directory."""
-
-    try:
-        return resolve_evidence_path(
-            evidence_root_for_job(run_directory), run_directory.name, *parts
-        )
-    except EvidencePathError as error:
-        raise WorkerError(str(error)) from error
-
-
-def _manifest_evidence_path(
-    run_directory: Path, evidence_type: str, ordinal: int
-) -> Path:
-    """Resolve one manifest-rendered path through the run boundary."""
-
-    return _run_evidence_path(
-        run_directory, *Path(evidence_path(evidence_type, ordinal=ordinal)).parts
-    )
-
-
-def _contained_job_reference(
-    run_directory: Path, value: str | Path, error_message: str
-) -> Path:
-    """Resolve an evidence reference through the selected run boundary."""
-
-    candidate = Path(value)
-    try:
-        relative = candidate.relative_to(run_directory)
-        return _run_evidence_path(run_directory, *relative.parts)
-    except (ValueError, WorkerError) as error:
-        raise WorkerError(error_message) from error
-
-
-def _require_unchanged(actual: str | None, expected: str) -> None:
-    """Reject a review when its worktree digest changed during execution."""
-
-    if not same_diff_digest(actual, expected):
-        raise WorkerError(WORKTREE_CHANGED)
-
-
-def _digest(
-    digest_worktree: Callable[[Path, str], str | None], worktree: Path, base_sha: str
-) -> str | None:
-    """Normalize filesystem and Git digest failures as worker errors."""
-
-    try:
-        return digest_worktree(worktree, base_sha)
-    except (OSError, RuntimeError) as error:
-        raise WorkerError(f'cannot compute worktree digest: {error}') from error
-
-
-def _write_json_atomic(
-    path: Path, document: dict[str, Any], evidence_type: EvidenceType
-) -> None:
-    """Write one UTF-8 JSON document atomically."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
-    try:
-        with temporary.open('x', encoding='utf-8') as file:
-            json.dump(document, file, indent=2)
-            file.write('\n')
-            file.flush()
-            os.fsync(file.fileno())
-        _finalize_temporary_path(temporary, path, evidence_type)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _write_text_atomic(
-    path: Path, content: str, *, evidence_type: EvidenceType | None = None
-) -> None:
-    """Write one UTF-8 text artifact atomically."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
-    try:
-        with temporary.open('x', encoding='utf-8') as file:
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
-        if evidence_type is not None:
-            _finalize_temporary_path(temporary, path, evidence_type)
-        else:
-            temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _archive_unaccepted_response(
-    path: Path, destination: Path, evidence_type: EvidenceType
-) -> None:
-    """Preserve a partial response so a retry cannot consume stale output."""
-
-    if path.exists():
-        structural = {'messages', 'artifacts', 'logs', 'invocations'}
-        job_directory = (
-            destination.parent.parent
-            if destination.parent.name in structural
-            else destination.parent
-        )
-        JobEvidence.for_directory(job_directory).relocate_finalized(
-            path, destination, evidence_type
-        )
-
-
-def _record_finalized_path(path: Path, evidence_type: EvidenceType) -> None:
-    """Record one finalized worker artifact in its owning job index."""
-
-    structural = {'messages', 'artifacts', 'logs', 'invocations', 'review-batches'}
-    job_directory = (
-        path.parent.parent if path.parent.name in structural else path.parent
-    )
-    JobEvidence.for_directory(job_directory).record_finalized(path, evidence_type)
-
-
-def _finalize_temporary_path(
-    temporary: Path, path: Path, evidence_type: EvidenceType
-) -> None:
-    """Publish one worker file through the recoverable evidence protocol."""
-
-    structural = {'messages', 'artifacts', 'logs', 'invocations', 'review-batches'}
-    job_directory = (
-        path.parent.parent if path.parent.name in structural else path.parent
-    )
-    JobEvidence.for_directory(job_directory).finalize_write(
-        temporary, path, evidence_type
-    )
-
-
-def _output_text(value: str | bytes | None) -> str:
-    """Normalize captured subprocess output for durable UTF-8 logs."""
-
-    if value is None:
-        return ''
-    return value.decode(errors='replace') if isinstance(value, bytes) else value
-
-
-def _exception_runtime_metadata(
-    error: BaseException,
-) -> tuple[tuple[str, ...], EffectiveModelStatus]:
-    """Return validated provenance preserved by a failed command adapter."""
-
-    models = getattr(error, 'effective_models', ())
-    status = getattr(error, 'effective_model_status', 'unavailable')
-    if (
-        isinstance(models, tuple)
-        and all(isinstance(model, str) and model for model in models)
-        and len(models) == len(set(models))
-        and status in EffectiveModelStatus.values()
-        and (status == EffectiveModelStatus.REPORTED) == bool(models)
-    ):
-        return tuple(models), EffectiveModelStatus(status)
-    return (), EffectiveModelStatus.UNAVAILABLE
-
-
-def _runtime_metadata_path(
-    identity: InvocationIdentity,
-    path: Path,
-    registry: RuntimeRegistry,
-) -> Path | None:
-    """Return the sidecar path only for runtimes that report provenance."""
-
-    try:
-        runtime = registry.require(identity.runtime)
-    except ValueError:
-        return None
-    return path if runtime.reports_runtime_metadata else None
-
-
-def _invocation_stem(sequence: int, role: str, attempt: int) -> str:
-    """Return the stable evidence stem for one invocation attempt."""
-
-    retry_suffix = '' if attempt == 1 else f'-attempt-{attempt:04d}'
-    return f'{sequence:06d}-{role}{retry_suffix}'
-
-
 def _persist_attempt_record(path: Path, record: InvocationRecord) -> None:
     """Normalize unsafe or conflicting attempt writes as worker failures."""
 
@@ -477,8 +289,8 @@ def _persist_attempt_record(path: Path, record: InvocationRecord) -> None:
         job_directory = path.parent.parent
         InvocationEvidenceStore(job_directory).write(path, record)
         if record.status == 'completed':
-            _record_finalized_path(Path(record.stdout_path), 'process_stdout')
-            _record_finalized_path(Path(record.stderr_path), 'process_stderr')
+            record_finalized_path(Path(record.stdout_path), 'process_stdout')
+            record_finalized_path(Path(record.stderr_path), 'process_stderr')
     except InvocationEvidenceError as error:
         code = (
             RESUME_ACTIVATION_UNCERTAIN_CODE
@@ -533,7 +345,7 @@ def _record_invocation(
     else:
         task_id = f'{run.id}:{sequence:06d}-{role}'
         invocation_id = invocation_id or f'{task_id}:attempt-{attempt:04d}'
-        log_stem = _invocation_stem(sequence, role, attempt)
+        log_stem = invocation_stem(sequence, role, attempt)
         schema_version = 4
     attempt_status = status or (
         AttemptStatus.COMPLETED if finished else AttemptStatus.PENDING
@@ -552,14 +364,14 @@ def _record_invocation(
     stdout_path = logs / f'{log_stem}.stdout.log'
     stderr_path = logs / f'{log_stem}.stderr.log'
     if stdout is not None or not stdout_path.exists():
-        _write_text_atomic(
+        write_text_atomic(
             stdout_path,
-            _output_text(stdout),
+            output_text(stdout),
         )
     if stderr is not None or not stderr_path.exists():
-        _write_text_atomic(
+        write_text_atomic(
             stderr_path,
-            _output_text(stderr),
+            output_text(stderr),
         )
     _persist_attempt_record(
         invocations / f'{log_stem}.json',
@@ -591,18 +403,6 @@ def _record_invocation(
         ),
     )
     return invocation_id
-
-
-def _read_object(path: Path) -> dict[str, Any]:
-    """Read a JSON object or raise a stable worker error."""
-
-    try:
-        document = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, json.JSONDecodeError) as error:
-        raise WorkerError(f'invalid reviewer response: {error}') from error
-    if not isinstance(document, dict):
-        raise WorkerError(NOT_OBJECT)
-    return document
 
 
 def _validate_review_response(
@@ -704,10 +504,10 @@ def _validate_remediation_request(
     if parsed.payload.allowed_actions:
         raise WorkerError(REMEDIATION_ACTIONS)
     evidence_paths = (
-        _contained_job_reference(
+        contained_job_reference(
             run_directory, parsed.payload.review_result_path, REMEDIATION_PATH_ESCAPE
         ),
-        _contained_job_reference(
+        contained_job_reference(
             run_directory, parsed.payload.review_artifact_path, REMEDIATION_PATH_ESCAPE
         ),
     )
@@ -724,11 +524,11 @@ def _validate_review_request(document: dict[str, Any], *, run_directory: Path) -
         raise WorkerError(INVALID_REVIEW_REQUEST) from error
     if parsed.payload.allowed_actions:
         raise WorkerError(INVALID_REVIEW_REQUEST)
-    _contained_job_reference(
+    contained_job_reference(
         run_directory, parsed.payload.artifact_path, REVIEW_PATH_ESCAPE
     )
     if parsed.payload.prior_review_path is not None:
-        prior_path = _contained_job_reference(
+        prior_path = contained_job_reference(
             run_directory, parsed.payload.prior_review_path, REVIEW_PATH_ESCAPE
         )
         if not prior_path.is_file():
@@ -800,9 +600,9 @@ def _is_developer_disagreement(message: DeveloperHandoffMessageSchema) -> bool:
 def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecord:
     """Read and validate the durable execution context for a resumable run."""
 
-    path = _run_evidence_path(run_directory, 'execution.json')
+    path = run_evidence_path(run_directory, 'execution.json')
     try:
-        document = _read_object(path)
+        document = read_json_object(path)
         record = EXECUTION_RECORD_ADAPTER.validate_python(document)
     except (WorkerError, ValidationError) as error:
         message = 'resume metadata is missing, legacy, or invalid'
@@ -878,13 +678,13 @@ def read_message_chain(
     for expected_sequence, (sequence, expected_type, path) in enumerate(
         sorted(candidates), start=1
     ):
-        _contained_job_reference(
+        contained_job_reference(
             run_directory, path, 'resume message path escapes the run directory'
         )
         if sequence != expected_sequence:
             message = 'resume message sequence is not contiguous'
             raise WorkerError(message)
-        document = _read_object(path)
+        document = read_json_object(path)
         message_type = document.get('message_type')
         if not isinstance(message_type, str) or message_type != expected_type:
             raise WorkerError(f'invalid canonical message: {path.name}')
@@ -945,7 +745,7 @@ def read_message_chain(
                 or not artifact_path.is_file()
             ):
                 raise WorkerError(f'invalid message correlation: {path.name}')
-            _contained_job_reference(
+            contained_job_reference(
                 run_directory,
                 artifact_path,
                 f'invalid message correlation: {path.name}',
@@ -1065,10 +865,10 @@ def _read_reviewer_message_batch(
             raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
         reviewer_documents: list[tuple[Path, dict[str, Any]]] = []
         for sequence, message_type, path in chain:
-            _contained_job_reference(
+            contained_job_reference(
                 run_directory, path, 'resume message path escapes the run directory'
             )
-            document = _read_object(path)
+            document = read_json_object(path)
             schema = schemas[message_type]
             try:
                 schema.model_validate(document)
@@ -1102,7 +902,7 @@ def _read_reviewer_message_batch(
         artifact_path = Path(result['payload']['artifact_path'])
         if not artifact_path.is_file():
             raise WorkerError(f'invalid message correlation: {result_path.name}')
-        _contained_job_reference(
+        contained_job_reference(
             run_directory,
             artifact_path,
             f'invalid message correlation: {result_path.name}',
@@ -1302,19 +1102,19 @@ def _run_queued_review(
             developer_identity, RuntimeRole.DEVELOPER, registry
         )
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
 
-    current_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
+    current_digest = worktree_digest(digest_worktree, run.worktree_path, run.base_sha)
     if current_digest is None:
         raise WorkerError(NO_CHANGES)
-    artifacts = _run_evidence_path(run_directory, 'artifacts')
-    logs = _run_evidence_path(run_directory, 'logs')
-    invocations = _run_evidence_path(run_directory, 'invocations')
+    artifacts = run_evidence_path(run_directory, 'artifacts')
+    logs = run_evidence_path(run_directory, 'logs')
+    invocations = run_evidence_path(run_directory, 'invocations')
     if continuing:
         assert continuation_sequence is not None
-        _require_unchanged(current_digest, run.diff_digest or '')
+        require_unchanged(current_digest, run.diff_digest or '')
         reviewing = run
         sequence = continuation_sequence
         prior_review_path = continuation_prior_review_path
@@ -1338,8 +1138,8 @@ def _run_queued_review(
             )
         except ValidationError as error:
             raise WorkerError(f'invalid execution record: {error}') from error
-        _write_json_atomic(
-            _run_evidence_path(run_directory, 'execution.json'),
+        write_json_atomic(
+            run_evidence_path(run_directory, 'execution.json'),
             execution.model_dump(mode='json'),
             'execution',
         )
@@ -1356,7 +1156,7 @@ def _run_queued_review(
     while True:
         if retry_review_request is None:
             artifact_path = artifacts / f'review-{reviewing.iteration:04d}.md'
-            request_path = _manifest_evidence_path(
+            request_path = manifest_evidence_path(
                 run_directory, 'review_request', sequence
             )
             request: dict[str, Any] = {
@@ -1389,19 +1189,19 @@ def _run_queued_review(
                 },
             }
             _validate_review_request(request, run_directory=run_directory)
-            _write_json_atomic(request_path, request, 'review_request')
+            write_json_atomic(request_path, request, 'review_request')
         else:
             request = retry_review_request
             retry_review_request = None
             sequence = int(request['sequence'])
             artifact_path = Path(request['payload']['artifact_path'])
-            request_path = _manifest_evidence_path(
+            request_path = manifest_evidence_path(
                 run_directory, 'review_request', sequence
             )
             _validate_review_request(request, run_directory=run_directory)
-        response_path = _run_evidence_path(run_directory, '.review-result.json')
-        reviewer_stem = _invocation_stem(sequence, 'reviewer', reviewer_attempt)
-        reviewer_metadata_path = _run_evidence_path(
+        response_path = run_evidence_path(run_directory, '.review-result.json')
+        reviewer_stem = invocation_stem(sequence, 'reviewer', reviewer_attempt)
+        reviewer_metadata_path = run_evidence_path(
             run_directory, f'.{reviewer_stem}.runtime.json'
         )
         started_at = timestamp()
@@ -1439,7 +1239,7 @@ def _run_queued_review(
                     response_path=response_path,
                     stdout_path=logs / f'{reviewer_stem}.stdout.log',
                     stderr_path=logs / f'{reviewer_stem}.stderr.log',
-                    runtime_metadata_path=_runtime_metadata_path(
+                    runtime_metadata_path=runtime_metadata_path(
                         reviewer_identity, reviewer_metadata_path, registry
                     ),
                     on_started=partial(
@@ -1463,11 +1263,9 @@ def _run_queued_review(
                 )
             )
             if artifact_path.is_file():
-                _record_finalized_path(artifact_path, 'review_artifact')
+                record_finalized_path(artifact_path, 'review_artifact')
         except subprocess.TimeoutExpired as error:
-            effective_models, effective_model_status = _exception_runtime_metadata(
-                error
-            )
+            effective_models, effective_model_status = exception_runtime_metadata(error)
             _record_invocation(
                 run=run,
                 role=RuntimeRole.REVIEWER,
@@ -1486,13 +1284,13 @@ def _run_queued_review(
                 effective_models=effective_models,
                 effective_model_status=effective_model_status,
             )
-            _archive_unaccepted_response(
+            archive_unaccepted_response(
                 response_path,
                 logs / f'{sequence + 1:06d}-rejected-review-result-attempt-'
                 f'{reviewer_attempt:04d}.json',
                 'rejected_review_result',
             )
-            _archive_unaccepted_response(
+            archive_unaccepted_response(
                 artifact_path,
                 logs / f'{sequence + 1:06d}-rejected-review-artifact-attempt-'
                 f'{reviewer_attempt:04d}.md',
@@ -1505,9 +1303,7 @@ def _run_queued_review(
                 code=RESUME_INTERRUPTED_CODE,
             ) from error
         except KeyboardInterrupt as error:
-            effective_models, effective_model_status = _exception_runtime_metadata(
-                error
-            )
+            effective_models, effective_model_status = exception_runtime_metadata(error)
             if _attempt_activation_was_persisted(
                 run_directory, sequence, RuntimeRole.REVIEWER, reviewer_attempt
             ):
@@ -1529,13 +1325,13 @@ def _run_queued_review(
                     effective_models=effective_models,
                     effective_model_status=effective_model_status,
                 )
-            _archive_unaccepted_response(
+            archive_unaccepted_response(
                 response_path,
                 logs / f'{sequence + 1:06d}-rejected-review-result-attempt-'
                 f'{reviewer_attempt:04d}.json',
                 'rejected_review_result',
             )
-            _archive_unaccepted_response(
+            archive_unaccepted_response(
                 artifact_path,
                 logs / f'{sequence + 1:06d}-rejected-review-artifact-attempt-'
                 f'{reviewer_attempt:04d}.md',
@@ -1545,9 +1341,7 @@ def _run_queued_review(
             store.update(interrupted, expected_state=RunState.REVIEWING)
             raise
         except OSError as error:
-            effective_models, effective_model_status = _exception_runtime_metadata(
-                error
-            )
+            effective_models, effective_model_status = exception_runtime_metadata(error)
             _record_invocation(
                 run=run,
                 role=RuntimeRole.REVIEWER,
@@ -1600,7 +1394,7 @@ def _run_queued_review(
             )
 
         response_valid = False
-        review_result_path = _manifest_evidence_path(
+        review_result_path = manifest_evidence_path(
             run_directory, 'review_result', sequence + 1
         )
         response_received_at = timestamp() if response_path.is_file() else None
@@ -1627,13 +1421,13 @@ def _run_queued_review(
             effective_model_status=completed.effective_model_status,
         )
         try:
-            response = _read_object(response_path)
+            response = read_json_object(response_path)
             _require_unique_message_id(response, run_directory)
             verdict = _validate_review_response(
                 response, request=request, artifact_path=artifact_path
             )
-            _require_unchanged(
-                _digest(digest_worktree, run.worktree_path, run.base_sha),
+            require_unchanged(
+                worktree_digest(digest_worktree, run.worktree_path, run.base_sha),
                 current_digest,
             )
             response_valid = True
@@ -1669,7 +1463,7 @@ def _run_queued_review(
                     if response_valid
                     else logs / f'{sequence + 1:06d}-rejected-review-result.json'
                 )
-                _finalize_temporary_path(
+                finalize_temporary_path(
                     response_path,
                     destination,
                     'review_result' if response_valid else 'rejected_review_result',
@@ -1717,10 +1511,10 @@ def _run_queued_review(
             return decided
 
         sequence += 2
-        remediation_path = _manifest_evidence_path(
+        remediation_path = manifest_evidence_path(
             run_directory, 'remediation_request', sequence
         )
-        handoff_temporary = _run_evidence_path(run_directory, '.developer-handoff.json')
+        handoff_temporary = run_evidence_path(run_directory, '.developer-handoff.json')
         remediation: dict[str, Any] = {
             'schema_version': 1,
             'message_id': str(uuid4()),
@@ -1742,11 +1536,11 @@ def _run_queued_review(
             },
         }
         _validate_remediation_request(remediation, run_directory=run_directory)
-        _write_json_atomic(remediation_path, remediation, 'remediation_request')
+        write_json_atomic(remediation_path, remediation, 'remediation_request')
         developing = transition(decided, RunState.DEVELOPING)
         store.update(developing, expected_state=RunState.CHANGES_REQUESTED)
-        developer_stem = _invocation_stem(sequence, 'developer', 1)
-        developer_metadata_path = _run_evidence_path(
+        developer_stem = invocation_stem(sequence, 'developer', 1)
+        developer_metadata_path = run_evidence_path(
             run_directory, f'.{developer_stem}.runtime.json'
         )
         started_at = timestamp()
@@ -1776,7 +1570,7 @@ def _run_queued_review(
                     response_path=handoff_temporary,
                     stdout_path=logs / f'{sequence:06d}-developer.stdout.log',
                     stderr_path=logs / f'{sequence:06d}-developer.stderr.log',
-                    runtime_metadata_path=_runtime_metadata_path(
+                    runtime_metadata_path=runtime_metadata_path(
                         developer_identity, developer_metadata_path, registry
                     ),
                     on_started=partial(
@@ -1799,9 +1593,7 @@ def _run_queued_review(
                 )
             )
         except subprocess.TimeoutExpired as error:
-            effective_models, effective_model_status = _exception_runtime_metadata(
-                error
-            )
+            effective_models, effective_model_status = exception_runtime_metadata(error)
             _record_invocation(
                 run=run,
                 role=RuntimeRole.DEVELOPER,
@@ -1819,7 +1611,7 @@ def _run_queued_review(
                 effective_models=effective_models,
                 effective_model_status=effective_model_status,
             )
-            _archive_unaccepted_response(
+            archive_unaccepted_response(
                 handoff_temporary,
                 logs
                 / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-0001.json',
@@ -1832,9 +1624,7 @@ def _run_queued_review(
                 code=RESUME_INTERRUPTED_CODE,
             ) from error
         except KeyboardInterrupt as error:
-            effective_models, effective_model_status = _exception_runtime_metadata(
-                error
-            )
+            effective_models, effective_model_status = exception_runtime_metadata(error)
             if _attempt_activation_was_persisted(
                 run_directory, sequence, RuntimeRole.DEVELOPER, 1
             ):
@@ -1855,7 +1645,7 @@ def _run_queued_review(
                     effective_models=effective_models,
                     effective_model_status=effective_model_status,
                 )
-            _archive_unaccepted_response(
+            archive_unaccepted_response(
                 handoff_temporary,
                 logs
                 / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-0001.json',
@@ -1865,9 +1655,7 @@ def _run_queued_review(
             store.update(interrupted, expected_state=RunState.DEVELOPING)
             raise
         except OSError as error:
-            effective_models, effective_model_status = _exception_runtime_metadata(
-                error
-            )
+            effective_models, effective_model_status = exception_runtime_metadata(error)
             _record_invocation(
                 run=run,
                 role=RuntimeRole.DEVELOPER,
@@ -1917,7 +1705,7 @@ def _run_queued_review(
                 code=RESUME_EXECUTION_FAILED_CODE,
             )
         handoff_valid = False
-        handoff_path = _manifest_evidence_path(
+        handoff_path = manifest_evidence_path(
             run_directory, 'developer_handoff', sequence + 1
         )
         response_received_at = timestamp() if handoff_temporary.is_file() else None
@@ -1946,12 +1734,14 @@ def _run_queued_review(
             finding['finding_id'] for finding in response['payload']['findings']
         )
         try:
-            handoff = _read_object(handoff_temporary)
+            handoff = read_json_object(handoff_temporary)
             _require_unique_message_id(handoff, run_directory)
             parsed_handoff = _validate_developer_handoff(
                 handoff, request=remediation, finding_ids=finding_ids
             )
-            handoff_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
+            handoff_digest = worktree_digest(
+                digest_worktree, run.worktree_path, run.base_sha
+            )
             is_disagreement = (
                 parsed_handoff.payload.status == 'ready_for_review'
                 and handoff_digest is not None
@@ -1989,8 +1779,8 @@ def _run_queued_review(
             if is_disagreement:
                 disagreement = transition(developing, RunState.CHANGES_REQUESTED)
                 store.update(disagreement, expected_state=RunState.DEVELOPING)
-                _write_json_atomic(
-                    _run_evidence_path(run_directory, 'decision-required.json'),
+                write_json_atomic(
+                    run_evidence_path(run_directory, 'decision-required.json'),
                     {
                         'schema_version': 1,
                         'run_id': str(run.id),
@@ -2047,7 +1837,7 @@ def _run_queued_review(
                     else logs
                     / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-0001.json'
                 )
-                _finalize_temporary_path(
+                finalize_temporary_path(
                     handoff_temporary,
                     destination,
                     'developer_handoff'
@@ -2094,22 +1884,22 @@ def _resume_developer_request(
     )
     developer_identity = plan.developer_identity
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
-    logs = _run_evidence_path(run_directory, 'logs')
-    invocations = _run_evidence_path(run_directory, 'invocations')
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
+    logs = run_evidence_path(run_directory, 'logs')
+    invocations = run_evidence_path(run_directory, 'invocations')
     sequence = int(request['sequence'])
-    response_path = _run_evidence_path(run_directory, '.developer-handoff.json')
-    handoff_path = _manifest_evidence_path(
+    response_path = run_evidence_path(run_directory, '.developer-handoff.json')
+    handoff_path = manifest_evidence_path(
         run_directory, 'developer_handoff', sequence + 1
     )
     review_result_path = Path(request['payload']['review_result_path']).resolve()
-    review_result = _read_object(review_result_path)
+    review_result = read_json_object(review_result_path)
     finding_ids = tuple(
         finding['finding_id'] for finding in review_result['payload']['findings']
     )
     adapter = CommandAgentAdapter(tuple(developer_command))
-    developer_stem = _invocation_stem(sequence, 'developer', attempt)
-    developer_metadata_path = _run_evidence_path(
+    developer_stem = invocation_stem(sequence, 'developer', attempt)
+    developer_metadata_path = run_evidence_path(
         run_directory, f'.{developer_stem}.runtime.json'
     )
     started_at = timestamp()
@@ -2138,13 +1928,13 @@ def _resume_developer_request(
                 iteration=run.iteration,
                 allowed_actions=(),
                 timeout_seconds=developer_timeout_seconds,
-                request_path=_manifest_evidence_path(
+                request_path=manifest_evidence_path(
                     run_directory, 'remediation_request', sequence
                 ),
                 response_path=response_path,
                 stdout_path=logs / f'{developer_stem}.stdout.log',
                 stderr_path=logs / f'{developer_stem}.stderr.log',
-                runtime_metadata_path=_runtime_metadata_path(
+                runtime_metadata_path=runtime_metadata_path(
                     developer_identity, developer_metadata_path, registry
                 ),
                 on_started=partial(
@@ -2168,7 +1958,7 @@ def _resume_developer_request(
             )
         )
     except subprocess.TimeoutExpired as error:
-        effective_models, effective_model_status = _exception_runtime_metadata(error)
+        effective_models, effective_model_status = exception_runtime_metadata(error)
         _record_invocation(
             run=run,
             role=RuntimeRole.DEVELOPER,
@@ -2187,7 +1977,7 @@ def _resume_developer_request(
             effective_models=effective_models,
             effective_model_status=effective_model_status,
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             response_path,
             logs / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
             f'{attempt:04d}.json',
@@ -2200,7 +1990,7 @@ def _resume_developer_request(
             code=RESUME_INTERRUPTED_CODE,
         ) from error
     except KeyboardInterrupt as error:
-        effective_models, effective_model_status = _exception_runtime_metadata(error)
+        effective_models, effective_model_status = exception_runtime_metadata(error)
         if _attempt_activation_was_persisted(
             run_directory, sequence, RuntimeRole.DEVELOPER, attempt
         ):
@@ -2222,7 +2012,7 @@ def _resume_developer_request(
                 effective_models=effective_models,
                 effective_model_status=effective_model_status,
             )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             response_path,
             logs / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
             f'{attempt:04d}.json',
@@ -2232,7 +2022,7 @@ def _resume_developer_request(
         store.update(interrupted, expected_state=RunState.DEVELOPING)
         raise
     except OSError as error:
-        effective_models, effective_model_status = _exception_runtime_metadata(error)
+        effective_models, effective_model_status = exception_runtime_metadata(error)
         _record_invocation(
             run=run,
             role=RuntimeRole.DEVELOPER,
@@ -2309,14 +2099,14 @@ def _resume_developer_request(
         effective_model_status=completed.effective_model_status,
     )
     try:
-        handoff = _read_object(response_path)
+        handoff = read_json_object(response_path)
         _require_unique_message_id(handoff, run_directory)
         parsed = _validate_developer_handoff(
             handoff, request=request, finding_ids=finding_ids
         )
         recoverable, measured_digest = _validate_resumed_progress(
             parsed.payload.status,
-            _digest(digest_worktree, run.worktree_path, run.base_sha),
+            worktree_digest(digest_worktree, run.worktree_path, run.base_sha),
             current_digest,
             allow_unchanged_ready=allow_unchanged_ready,
             is_disagreement=_is_developer_disagreement(parsed),
@@ -2392,7 +2182,7 @@ def _resume_developer_request(
                 else logs / f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
                 f'{attempt:04d}.json'
             )
-            _finalize_temporary_path(
+            finalize_temporary_path(
                 response_path,
                 destination,
                 'developer_handoff' if handoff_valid else 'rejected_developer_handoff',
@@ -2422,10 +2212,10 @@ def _attempt_record_path(
 ) -> Path:
     """Return the durable record path for one task attempt."""
 
-    return _run_evidence_path(
+    return run_evidence_path(
         run_directory,
         'invocations',
-        f'{_invocation_stem(sequence, role, attempt)}.json',
+        f'{invocation_stem(sequence, role, attempt)}.json',
     )
 
 
@@ -2542,10 +2332,10 @@ def _resume_reviewer_validation(
     runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     sequence = int(request['sequence'])
-    temporary = _run_evidence_path(run_directory, '.review-result.json')
-    canonical = _manifest_evidence_path(run_directory, 'review_result', sequence + 1)
+    temporary = run_evidence_path(run_directory, '.review-result.json')
+    canonical = manifest_evidence_path(run_directory, 'review_result', sequence + 1)
     response_path, is_temporary = _recovery_response_path(temporary, canonical)
     if action is not RecoveryAction.APPLY_CONCLUSION:
         record = _prepare_recovered_validation(
@@ -2561,14 +2351,14 @@ def _resume_reviewer_validation(
         )
     artifact_path = Path(request['payload']['artifact_path'])
     try:
-        response = _read_object(response_path)
+        response = read_json_object(response_path)
         if is_temporary:
             _require_unique_message_id(response, run_directory)
         verdict = _validate_review_response(
             response, request=request, artifact_path=artifact_path
         )
-        _require_unchanged(
-            _digest(digest_worktree, run.worktree_path, run.base_sha),
+        require_unchanged(
+            worktree_digest(digest_worktree, run.worktree_path, run.base_sha),
             run.diff_digest or '',
         )
     except WorkerError:
@@ -2581,20 +2371,20 @@ def _resume_reviewer_validation(
                 conclusion=AttemptConclusion.FAILED,
             )
         if response_path.exists():
-            destination = _run_evidence_path(
+            destination = run_evidence_path(
                 run_directory,
                 'logs',
                 f'{sequence + 1:06d}-rejected-review-result-attempt-'
                 f'{record.attempt:04d}.json',
             )
-            _finalize_temporary_path(
+            finalize_temporary_path(
                 response_path, destination, 'rejected_review_result'
             )
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.REVIEWING)
         raise
     if is_temporary:
-        _finalize_temporary_path(response_path, canonical, 'review_result')
+        finalize_temporary_path(response_path, canonical, 'review_result')
     _complete_recovered_validation(
         run_directory=run_directory,
         sequence=sequence,
@@ -2621,7 +2411,7 @@ def _resume_reviewer_validation(
         return decided
     next_sequence = sequence + 2
     review_artifact_path = Path(request['payload']['artifact_path'])
-    remediation_path = _manifest_evidence_path(
+    remediation_path = manifest_evidence_path(
         run_directory, 'remediation_request', next_sequence
     )
     remediation: dict[str, Any] = {
@@ -2645,7 +2435,7 @@ def _resume_reviewer_validation(
         },
     }
     _validate_remediation_request(remediation, run_directory=run_directory)
-    _write_json_atomic(remediation_path, remediation, 'remediation_request')
+    write_json_atomic(remediation_path, remediation, 'remediation_request')
     developing = transition(decided, RunState.DEVELOPING)
     return _resume_developer_request(
         context=context,
@@ -2679,12 +2469,10 @@ def _resume_developer_validation(
     runs_directory = context.runs_directory
     digest_worktree = context.digest_worktree
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     sequence = int(request['sequence'])
-    temporary = _run_evidence_path(run_directory, '.developer-handoff.json')
-    canonical = _manifest_evidence_path(
-        run_directory, 'developer_handoff', sequence + 1
-    )
+    temporary = run_evidence_path(run_directory, '.developer-handoff.json')
+    canonical = manifest_evidence_path(run_directory, 'developer_handoff', sequence + 1)
     response_path, is_temporary = _recovery_response_path(temporary, canonical)
     if action is not RecoveryAction.APPLY_CONCLUSION:
         record = _prepare_recovered_validation(
@@ -2699,18 +2487,20 @@ def _resume_developer_validation(
             store=store, run=run, role=RuntimeRole.DEVELOPER, record=record
         )
     review_result_path = Path(request['payload']['review_result_path']).resolve()
-    review_result = _read_object(review_result_path)
+    review_result = read_json_object(review_result_path)
     finding_ids = tuple(
         finding['finding_id'] for finding in review_result['payload']['findings']
     )
     try:
-        handoff = _read_object(response_path)
+        handoff = read_json_object(response_path)
         if is_temporary:
             _require_unique_message_id(handoff, run_directory)
         parsed = _validate_developer_handoff(
             handoff, request=request, finding_ids=finding_ids
         )
-        measured_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
+        measured_digest = worktree_digest(
+            digest_worktree, run.worktree_path, run.base_sha
+        )
         is_disagreement = (
             parsed.payload.status == 'ready_for_review'
             and measured_digest is not None
@@ -2734,20 +2524,20 @@ def _resume_developer_validation(
                 conclusion=AttemptConclusion.FAILED,
             )
         if response_path.exists():
-            destination = _run_evidence_path(
+            destination = run_evidence_path(
                 run_directory,
                 'logs',
                 f'{sequence + 1:06d}-rejected-developer-handoff-attempt-'
                 f'{record.attempt:04d}.json',
             )
-            _finalize_temporary_path(
+            finalize_temporary_path(
                 response_path, destination, 'rejected_developer_handoff'
             )
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.DEVELOPING)
         raise
     if is_temporary:
-        _finalize_temporary_path(response_path, canonical, 'developer_handoff')
+        finalize_temporary_path(response_path, canonical, 'developer_handoff')
     _complete_recovered_validation(
         run_directory=run_directory,
         sequence=sequence,
@@ -2813,13 +2603,13 @@ def _resume_active_attempt(
     request = matching[-1]
     role = 'reviewer' if run.state is RunState.REVIEWING else 'developer'
     sequence = int(request['sequence'])
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     latest = _latest_task_attempt(run_directory, sequence, role)
-    temporary = _run_evidence_path(
+    temporary = run_evidence_path(
         run_directory,
         '.review-result.json' if role == 'reviewer' else '.developer-handoff.json',
     )
-    canonical = _manifest_evidence_path(
+    canonical = manifest_evidence_path(
         run_directory,
         'review_result' if role == 'reviewer' else 'developer_handoff',
         sequence + 1,
@@ -2963,8 +2753,8 @@ def _resume_intermediate_state(
             },
         }
         _validate_remediation_request(request, run_directory=run_directory)
-        _write_json_atomic(
-            _run_evidence_path(
+        write_json_atomic(
+            run_evidence_path(
                 run_directory,
                 *Path(evidence_path('remediation_request', ordinal=sequence)).parts,
             ),
@@ -3033,7 +2823,7 @@ def _reviewer_batch_sequence(
 
     expected_ids = {reviewer.reviewer_id for reviewer in reviewer_plan.reviewers}
     sequences: dict[str, int] = {}
-    message_directory = _run_evidence_path(run_directory, 'messages')
+    message_directory = run_evidence_path(run_directory, 'messages')
     try:
         entries = tuple(message_directory.iterdir())
     except OSError as error:
@@ -3051,7 +2841,7 @@ def _reviewer_batch_sequence(
         )
         if reviewer_id is None:
             continue
-        request = _read_object(path)
+        request = read_json_object(path)
         if request.get('iteration') != run.iteration:
             continue
         if reviewer_id not in expected_ids or reviewer_id in sequences:
@@ -3074,16 +2864,16 @@ def _completed_reviewer_result(
 ) -> tuple[ReviewerDispatchResult, dict[str, Any]] | None:
     """Return one validated canonical peer result, if it already exists."""
 
-    request_path = _reviewer_dispatch_path(run_directory, dispatch.paths.request)
-    result_path = _reviewer_dispatch_path(run_directory, dispatch.paths.result)
+    request_path = reviewer_dispatch_path(run_directory, dispatch.paths.request)
+    result_path = reviewer_dispatch_path(run_directory, dispatch.paths.result)
     if not result_path.is_file():
         return None
-    request = _read_object(request_path)
+    request = read_json_object(request_path)
     _require_successful_reviewer_attempt(
         run_directory, int(request['sequence']), dispatch.reviewer_id
     )
-    result = _read_object(result_path)
-    artifact_path = _reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
+    result = read_json_object(result_path)
+    artifact_path = reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
     _validate_review_request(request, run_directory=run_directory)
     _validate_reviewer_set_request_scope(
         request,
@@ -3163,7 +2953,9 @@ def _resume_reviewer_set(
             f'reviewer-set job is not resumable from {run.state}',
             code=RUN_NOT_RESUMABLE_CODE,
         )
-    current_digest = _digest(context.digest_worktree, run.worktree_path, run.base_sha)
+    current_digest = worktree_digest(
+        context.digest_worktree, run.worktree_path, run.base_sha
+    )
     if current_digest is None or not same_diff_digest(current_digest, run.diff_digest):
         message = 'resume scope changed since the interrupted reviewer batch'
         raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
@@ -3197,10 +2989,10 @@ def _resume_reviewer_set(
                 result, _ = completed
                 results_by_id[base_dispatch.reviewer_id] = result
                 continue
-            request = _read_object(
-                _reviewer_dispatch_path(run_directory, base_dispatch.paths.request)
+            request = read_json_object(
+                reviewer_dispatch_path(run_directory, base_dispatch.paths.request)
             )
-            artifact_path = _reviewer_dispatch_path(
+            artifact_path = reviewer_dispatch_path(
                 run_directory, base_dispatch.paths.artifact
             )
             _validate_review_request(request, run_directory=run_directory)
@@ -3317,7 +3109,7 @@ def _resume_review(  # noqa: PLR0911
         raise WorkerError(
             f'job is not resumable from {run.state}', code=RUN_NOT_RESUMABLE_CODE
         )
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
     execution = _read_execution_record(run_directory, str(run.id))
@@ -3350,7 +3142,7 @@ def _resume_review(  # noqa: PLR0911
             developer_identity = _resolve_resume_identity(
                 developer_identity, RuntimeRole.DEVELOPER, registry
             )
-    measured_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
+    measured_digest = worktree_digest(digest_worktree, run.worktree_path, run.base_sha)
     if measured_digest is None:
         raise WorkerError(NO_CHANGES)
 
@@ -3493,7 +3285,7 @@ def _resume_review(  # noqa: PLR0911
         message = 'validation-required handoff is not recoverable'
         raise WorkerError(message)
     sequence = len(chain) + 1
-    request_path = _run_evidence_path(
+    request_path = run_evidence_path(
         run_directory,
         *Path(evidence_path('remediation_request', ordinal=sequence)).parts,
     )
@@ -3518,7 +3310,7 @@ def _resume_review(  # noqa: PLR0911
         },
     }
     _validate_remediation_request(recovery_request, run_directory=run_directory)
-    _write_json_atomic(request_path, recovery_request, 'remediation_request')
+    write_json_atomic(request_path, recovery_request, 'remediation_request')
     resumed = transition(run, RunState.DEVELOPING)
     return _resume_developer_request(
         context=context,
@@ -3546,7 +3338,7 @@ def resume_review(
 ) -> Run:
     """Resume one run and persist any recoverable-command failure."""
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     try:
         return _resume_review(
             context=WorkerContext(
@@ -3561,8 +3353,8 @@ def resume_review(
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:
                 durable_run = store.get(str(run.id))
-                _write_json_atomic(
-                    _run_evidence_path(run_directory, 'failure.json'),
+                write_json_atomic(
+                    run_evidence_path(run_directory, 'failure.json'),
                     {
                         'schema_version': 1,
                         'run_id': str(run.id),
@@ -3582,12 +3374,6 @@ def resume_review(
         raise
 
 
-def _reviewer_dispatch_path(run_directory: Path, relative: str) -> Path:
-    """Resolve one reviewer-owned relative path beneath the run directory."""
-
-    return _run_evidence_path(run_directory, *Path(relative).parts)
-
-
 def _execute_reviewer_dispatch(
     *,
     context: WorkerContext,
@@ -3602,18 +3388,18 @@ def _execute_reviewer_dispatch(
 ) -> ReviewerDispatchResult:
     """Execute and validate one reviewer without changing workflow state."""
 
-    run_directory = _run_evidence_directory(context.runs_directory, str(run.id))
-    logs = _run_evidence_path(run_directory, 'logs')
-    invocations = _run_evidence_path(run_directory, 'invocations')
-    request_path = _reviewer_dispatch_path(run_directory, dispatch.paths.request)
-    response_path = _reviewer_dispatch_path(
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    logs = run_evidence_path(run_directory, 'logs')
+    invocations = run_evidence_path(run_directory, 'invocations')
+    request_path = reviewer_dispatch_path(run_directory, dispatch.paths.request)
+    response_path = reviewer_dispatch_path(
         run_directory, dispatch.paths.temporary_result
     )
-    result_path = _reviewer_dispatch_path(run_directory, dispatch.paths.result)
-    artifact_path = _reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
-    stdout_path = _reviewer_dispatch_path(run_directory, dispatch.paths.stdout)
-    stderr_path = _reviewer_dispatch_path(run_directory, dispatch.paths.stderr)
-    metadata_path = _reviewer_dispatch_path(
+    result_path = reviewer_dispatch_path(run_directory, dispatch.paths.result)
+    artifact_path = reviewer_dispatch_path(run_directory, dispatch.paths.artifact)
+    stdout_path = reviewer_dispatch_path(run_directory, dispatch.paths.stdout)
+    stderr_path = reviewer_dispatch_path(run_directory, dispatch.paths.stderr)
+    metadata_path = reviewer_dispatch_path(
         run_directory, dispatch.paths.runtime_metadata
     )
     request: dict[str, Any] = retry_request or {
@@ -3643,8 +3429,8 @@ def _execute_reviewer_dispatch(
     }
     _validate_review_request(request, run_directory=run_directory)
     if retry_request is None:
-        _write_json_atomic(request_path, request, 'review_request')
-    elif _read_object(request_path) != request:
+        write_json_atomic(request_path, request, 'review_request')
+    elif read_json_object(request_path) != request:
         message = 'retry review request differs from canonical evidence'
         raise WorkerError(message)
     started_at = timestamp()
@@ -3682,7 +3468,7 @@ def _execute_reviewer_dispatch(
                 response_path=response_path,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
-                runtime_metadata_path=_runtime_metadata_path(
+                runtime_metadata_path=runtime_metadata_path(
                     dispatch.identity, metadata_path, context.registry
                 ),
                 on_started=partial(
@@ -3707,7 +3493,7 @@ def _execute_reviewer_dispatch(
             )
         )
     except subprocess.TimeoutExpired as error:
-        models, model_status = _exception_runtime_metadata(error)
+        models, model_status = exception_runtime_metadata(error)
         _record_invocation(
             run=run,
             role=RuntimeRole.REVIEWER,
@@ -3727,13 +3513,13 @@ def _execute_reviewer_dispatch(
             effective_models=models,
             effective_model_status=model_status,
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             response_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
             'rejected_review_result',
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             artifact_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
@@ -3760,13 +3546,13 @@ def _execute_reviewer_dispatch(
             attempt=attempt,
             conclusion=AttemptConclusion.FAILED,
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             response_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
             'rejected_review_result',
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             artifact_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
@@ -3793,13 +3579,13 @@ def _execute_reviewer_dispatch(
             attempt=attempt,
             conclusion=AttemptConclusion.FAILED,
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             response_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
             'rejected_review_result',
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             artifact_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
@@ -3828,13 +3614,13 @@ def _execute_reviewer_dispatch(
             effective_models=completed.effective_models,
             effective_model_status=completed.effective_model_status,
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             response_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-result-attempt-{attempt:04d}.json',
             'rejected_review_result',
         )
-        _archive_unaccepted_response(
+        archive_unaccepted_response(
             artifact_path,
             logs
             / f'{dispatch.reviewer_id}-rejected-review-artifact-attempt-{attempt:04d}.md',
@@ -3845,11 +3631,11 @@ def _execute_reviewer_dispatch(
         )
 
     if artifact_path.is_file():
-        _record_finalized_path(artifact_path, 'review_artifact')
+        record_finalized_path(artifact_path, 'review_artifact')
     received_at = timestamp() if response_path.is_file() else None
     validation_started_at = timestamp()
     try:
-        response = _read_object(response_path)
+        response = read_json_object(response_path)
         _require_unique_message_id(response, run_directory)
         verdict = _validate_review_response(
             response, request=request, artifact_path=artifact_path
@@ -3864,7 +3650,7 @@ def _execute_reviewer_dispatch(
             if valid
             else logs / f'{dispatch.reviewer_id}-rejected-review-result.json'
         )
-        _finalize_temporary_path(
+        finalize_temporary_path(
             response_path,
             destination,
             'review_result' if valid else 'rejected_review_result',
@@ -3912,8 +3698,8 @@ def _finish_reviewer_batch(
 ) -> Run:
     """Persist one complete aggregate or interrupt an incomplete batch."""
 
-    _require_unchanged(
-        _digest(context.digest_worktree, run.worktree_path, run.base_sha),
+    require_unchanged(
+        worktree_digest(context.digest_worktree, run.worktree_path, run.base_sha),
         current_digest,
     )
     _require_unique_batch_message_ids(results)
@@ -3946,9 +3732,9 @@ def _finish_reviewer_batch(
             'incomplete_reviewers': [],
         }
     )
-    run_directory = _run_evidence_directory(context.runs_directory, str(run.id))
-    _write_json_atomic(
-        _run_evidence_path(
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    write_json_atomic(
+        run_evidence_path(
             run_directory,
             *Path(
                 evidence_path('review_batch_result', ordinal=reviewing.iteration)
@@ -4015,10 +3801,10 @@ def _run_queued_reviewer_set(
     developer_identity = _resolve_resume_identity(
         developer_identity, RuntimeRole.DEVELOPER, registry
     )
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
         raise WorkerError(EVIDENCE_INSIDE_WORKTREE)
-    current_digest = _digest(digest_worktree, run.worktree_path, run.base_sha)
+    current_digest = worktree_digest(digest_worktree, run.worktree_path, run.base_sha)
     if current_digest is None:
         raise WorkerError(NO_CHANGES)
     prepared = replace(
@@ -4041,8 +3827,8 @@ def _run_queued_reviewer_set(
             run_id=str(run.id),
             created_at=datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
         )
-        _write_json_atomic(
-            _run_evidence_path(run_directory, 'execution.json'),
+        write_json_atomic(
+            run_evidence_path(run_directory, 'execution.json'),
             execution.model_dump(mode='json'),
             'execution',
         )
@@ -4054,7 +3840,7 @@ def _run_queued_reviewer_set(
         raise
     try:
         for directory in ('artifacts', 'logs', 'invocations'):
-            _run_evidence_path(run_directory, directory).mkdir(
+            run_evidence_path(run_directory, directory).mkdir(
                 parents=True, exist_ok=True
             )
         dispatches = build_review_fanout(
@@ -4117,7 +3903,7 @@ def run_queued_reviewer_set(
 ) -> Run:
     """Run a reviewer batch and persist every worker failure as durable evidence."""
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     try:
         return _run_queued_reviewer_set(
             store=store,
@@ -4136,8 +3922,8 @@ def run_queued_reviewer_set(
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:
                 durable_run = store.get(str(run.id))
-                _write_json_atomic(
-                    _run_evidence_path(run_directory, 'failure.json'),
+                write_json_atomic(
+                    run_evidence_path(run_directory, 'failure.json'),
                     {
                         'schema_version': 1,
                         'run_id': str(run.id),
@@ -4175,7 +3961,7 @@ def run_queued_review(
 ) -> Run:
     """Run the bounded loop and persist every worker failure as durable evidence."""
 
-    run_directory = _run_evidence_directory(runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(runs_directory, str(run.id))
     reviewer_identity = reviewer_identity or InvocationIdentity(
         vendor='unknown', model=None, runtime='custom-command'
     )
@@ -4206,8 +3992,8 @@ def run_queued_review(
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:
                 durable_run = store.get(str(run.id))
-                _write_json_atomic(
-                    _run_evidence_path(run_directory, 'failure.json'),
+                write_json_atomic(
+                    run_evidence_path(run_directory, 'failure.json'),
                     {
                         'schema_version': 1,
                         'run_id': str(run.id),

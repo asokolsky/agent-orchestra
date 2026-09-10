@@ -10,6 +10,12 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra.evidence import (
+    WORKTREE_CHANGED,
+    WorkerError,
+    require_unchanged,
+    worktree_digest,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import evidence_path
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
@@ -25,13 +31,9 @@ from agent_orchestra.worker import (
     INVALID_REMEDIATION_REQUEST,
     INVALID_VERDICT,
     MISSING_ARTIFACT,
-    WORKTREE_CHANGED,
     ReviewerSetReviewPlan,
-    WorkerError,
-    _digest,
     _execution_record,
     _read_execution_record,
-    _require_unchanged,
     _require_unique_message_id,
     _validate_developer_handoff,
     _validate_remediation_request,
@@ -297,14 +299,14 @@ def test_rejects_changed_worktree_digest() -> None:
     """Enforce the reviewer's read-only worktree boundary."""
 
     with pytest.raises(WorkerError, match=WORKTREE_CHANGED):
-        _require_unchanged('sha256:new', 'sha256:reviewed')
+        require_unchanged('sha256:new', 'sha256:reviewed')
 
 
 def test_accepts_legacy_digest_spelling() -> None:
     """Accept a bare persisted SHA-256 digest when content is unchanged."""
 
     bare_digest = 'a' * 64
-    _require_unchanged(f'sha256:{bare_digest}', bare_digest)
+    require_unchanged(f'sha256:{bare_digest}', bare_digest)
 
 
 def test_normalizes_digest_failures(tmp_path: Path) -> None:
@@ -314,7 +316,7 @@ def test_normalizes_digest_failures(tmp_path: Path) -> None:
         raise RuntimeError(f'{worktree}:{base_sha}')
 
     with pytest.raises(WorkerError, match='cannot compute worktree digest'):
-        _digest(fail_digest, tmp_path, 'HEAD')
+        worktree_digest(fail_digest, tmp_path, 'HEAD')
 
 
 def developer_documents() -> tuple[dict[str, Any], dict[str, Any]]:

@@ -11,6 +11,8 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra import evidence as evidence_module
+from agent_orchestra import invocations
 from agent_orchestra import worker as worker_module
 from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY
 from agent_orchestra.agents import (
@@ -20,11 +22,14 @@ from agent_orchestra.agents import (
     ReviewerRequest,
 )
 from agent_orchestra.audit import build_audit_document
+from agent_orchestra.evidence import (
+    WorkerError,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import WorkerError, resume_review, run_queued_reviewer_set
+from agent_orchestra.worker import resume_review, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -125,7 +130,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         )
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', approve)
-    original_write_json_atomic = worker_module._write_json_atomic
+    original_write_json_atomic = evidence_module.write_json_atomic
     inspected_in_flight = False
 
     def inspect_before_aggregate(
@@ -152,7 +157,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             inspected_in_flight = True
         original_write_json_atomic(path, document, cast('Any', evidence_type))
 
-    monkeypatch.setattr(worker_module, '_write_json_atomic', inspect_before_aggregate)
+    monkeypatch.setattr(worker_module, 'write_json_atomic', inspect_before_aggregate)
     plan = ReviewerExecutionPlan(
         'default',
         (
@@ -768,7 +773,7 @@ def test_reviewer_batch_sequence_comes_from_canonical_requests(tmp_path: Path) -
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
     run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
-    run_directory = worker_module._run_evidence_directory(
+    run_directory = invocations.prepare_run_evidence_directory(
         tmp_path / 'runs', str(run.id)
     )
     messages = run_directory / 'messages'
@@ -889,7 +894,7 @@ def test_unexpected_batch_exception_fails_terminally(
         raise OSError(message)
 
     if failure_point == 'preparation':
-        monkeypatch.setattr(worker_module, '_write_json_atomic', fail)
+        monkeypatch.setattr(worker_module, 'write_json_atomic', fail)
     else:
         monkeypatch.setattr(worker_module, '_execute_reviewer_dispatch', fail)
 

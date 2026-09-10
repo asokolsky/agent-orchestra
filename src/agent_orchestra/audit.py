@@ -20,6 +20,7 @@ from agent_orchestra.attempt_documents import (
 from agent_orchestra.evidence import (
     EVIDENCE_TYPES,
     HASH_CHUNK_SIZE,
+    WorkerError,
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import (
@@ -53,7 +54,7 @@ from agent_orchestra.schemas import (
     ReviewRequestMessageSchema,
     ReviewResultMessageSchema,
 )
-from agent_orchestra.worker import WorkerError, read_message_chain
+from agent_orchestra.worker import read_message_chain
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:

@@ -34,15 +34,19 @@ from agent_orchestra.agents import (
     DeveloperRequest,
 )
 from agent_orchestra.cli import build_parser
-from agent_orchestra.evidence import resolve_evidence_path
+from agent_orchestra.evidence import (
+    WorkerError,
+    resolve_evidence_path,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import parse_manifest
 from agent_orchestra.models import Run, RunState
+from agent_orchestra.runtime_metadata import (
+    runtime_metadata_path,
+)
 from agent_orchestra.skill_install import install_skills
 from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
-    WorkerError,
-    _runtime_metadata_path,
     resume_review,
 )
 
@@ -412,7 +416,7 @@ def test_worker_metadata_capability_uses_selected_registry(
     identity = InvocationIdentity(vendor='example', model=None, runtime='fake-runtime')
     path = tmp_path / 'runtime.json'
 
-    assert _runtime_metadata_path(identity, path, registry) == (
+    assert runtime_metadata_path(identity, path, registry) == (
         path if reports_metadata else None
     )
 

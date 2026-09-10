@@ -7,13 +7,16 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agent_orchestra.adapter.registry import RuntimeRole
+from agent_orchestra.evidence import (
+    WorkerError,
+)
 from agent_orchestra.invocations import (
     AttemptStatus,
     InvocationEvidenceStore,
     InvocationIdentity,
 )
 from agent_orchestra.models import Run
-from agent_orchestra.worker import WorkerError, _record_invocation
+from agent_orchestra.worker import _record_invocation
 
 if TYPE_CHECKING:
     from pathlib import Path
