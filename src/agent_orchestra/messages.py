@@ -497,26 +497,24 @@ def read_reviewer_message_batch(
     grouped: dict[str, list[tuple[int, str, Path]]] = {
         reviewer_id: [] for reviewer_id in reviewer_ids
     }
+    shared: list[tuple[int, str, Path]] = []
     for sequence, message_type, path in candidates:
         reviewer_id = reviewer_id_from_message_path(
             path, sequence=sequence, message_type=message_type
         )
         if reviewer_id is None:
-            raise WorkerError(MIXED_REVIEWER_MESSAGE_PATHS)
-        grouped[reviewer_id].append((sequence, message_type, path))
+            shared.append((sequence, message_type, path))
+        else:
+            grouped[reviewer_id].append((sequence, message_type, path))
     if len(grouped) < 2:
         raise WorkerError(SMALL_REVIEWER_MESSAGE_BATCH)
 
     documents: list[tuple[Path, dict[str, Any]]] = []
     identities: set[str] = set()
-    expected_scope: dict[str, Any] | None = None
-    expected_iteration: int | None = None
+    expected_rounds: list[tuple[int, int, int, dict[str, Any]]] | None = None
     for reviewer_id in sorted(grouped):
         chain = sorted(grouped[reviewer_id])
-        if [(sequence, message_type) for sequence, message_type, _ in chain] != [
-            (1, 'review_request'),
-            (2, 'review_result'),
-        ]:
+        if len(chain) < 2 or len(chain) % 2:
             raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
         reviewer_documents: list[tuple[Path, dict[str, Any]]] = []
         for sequence, message_type, path in chain:
@@ -543,32 +541,92 @@ def read_reviewer_message_batch(
             identities.add(message_id)
             reviewer_documents.append((path, document))
 
-        request_path, request = reviewer_documents[0]
-        result_path, result = reviewer_documents[1]
-        if (
-            request['in_reply_to'] is not None
-            or request['payload']['prior_review_path'] is not None
-            or result['in_reply_to'] != request['message_id']
-            or result['scope'] != request['scope']
-            or result['iteration'] != request['iteration']
-            or result['payload']['artifact_path'] != request['payload']['artifact_path']
-        ):
-            raise WorkerError(f'invalid message correlation: {result_path.name}')
-        artifact_path = Path(result['payload']['artifact_path'])
-        if not artifact_path.is_file():
-            raise WorkerError(f'invalid message correlation: {result_path.name}')
-        contained_job_reference(
-            run_directory,
-            artifact_path,
-            f'invalid message correlation: {result_path.name}',
-        )
-        if expected_scope is None:
-            expected_scope = request['scope']
-            expected_iteration = request['iteration']
-        elif (
-            request['scope'] != expected_scope
-            or request['iteration'] != expected_iteration
-        ):
-            raise WorkerError(f'invalid message correlation: {request_path.name}')
+        rounds: list[tuple[int, int, int, dict[str, Any]]] = []
+        prior_result_path: Path | None = None
+        for index in range(0, len(reviewer_documents), 2):
+            _request_path, request = reviewer_documents[index]
+            result_path, result = reviewer_documents[index + 1]
+            request_sequence = int(request['sequence'])
+            result_sequence = int(result['sequence'])
+            if (
+                request['message_type'] != 'review_request'
+                or result['message_type'] != 'review_result'
+                or result_sequence != request_sequence + 1
+                or request['in_reply_to'] is not None
+                or request['payload']['prior_review_path']
+                != (str(prior_result_path) if prior_result_path is not None else None)
+                or result['in_reply_to'] != request['message_id']
+                or result['scope'] != request['scope']
+                or result['iteration'] != request['iteration']
+                or result['payload']['artifact_path']
+                != request['payload']['artifact_path']
+            ):
+                raise WorkerError(f'invalid message correlation: {result_path.name}')
+            artifact_path = Path(result['payload']['artifact_path'])
+            if not artifact_path.is_file():
+                raise WorkerError(f'invalid message correlation: {result_path.name}')
+            contained_job_reference(
+                run_directory,
+                artifact_path,
+                f'invalid message correlation: {result_path.name}',
+            )
+            rounds.append(
+                (
+                    request_sequence,
+                    result_sequence,
+                    request['iteration'],
+                    request['scope'],
+                )
+            )
+            prior_result_path = result_path
+        if expected_rounds is None:
+            expected_rounds = rounds
+        elif rounds != expected_rounds:
+            raise WorkerError(f'invalid message correlation: {chain[0][2].name}')
         documents.extend(reviewer_documents)
+    assert expected_rounds is not None
+    shared_documents: list[tuple[Path, dict[str, Any]]] = []
+    for sequence, message_type, path in sorted(shared):
+        if message_type not in {'remediation_request', 'developer_handoff'}:
+            raise WorkerError(MIXED_REVIEWER_MESSAGE_PATHS)
+        contained_job_reference(
+            run_directory, path, 'resume message path escapes the run directory'
+        )
+        document = read_json_object(path)
+        try:
+            schemas[message_type].model_validate(document)
+        except ValidationError as error:
+            raise WorkerError(f'invalid canonical message: {path.name}') from error
+        if document['run_id'] != run_id or document['sequence'] != sequence:
+            raise WorkerError(f'message does not match recoverable run: {path.name}')
+        message_id = document['message_id']
+        if message_id in identities:
+            raise WorkerError(DUPLICATE_MESSAGE_ID)
+        identities.add(message_id)
+        shared_documents.append((path, document))
+    if len(shared_documents) != 2 * (len(expected_rounds) - 1):
+        raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
+    for index in range(len(expected_rounds) - 1):
+        prior_request_sequence, prior_result_sequence, iteration, scope = (
+            expected_rounds[index]
+        )
+        next_request_sequence, _, next_iteration, _ = expected_rounds[index + 1]
+        _remediation_path, remediation = shared_documents[index * 2]
+        handoff_path, handoff = shared_documents[index * 2 + 1]
+        if (
+            prior_request_sequence + 1 != prior_result_sequence
+            or remediation['message_type'] != 'remediation_request'
+            or remediation['sequence'] != prior_result_sequence + 1
+            or remediation['iteration'] != iteration
+            or remediation['scope'] != scope
+            or handoff['message_type'] != 'developer_handoff'
+            or handoff['sequence'] != remediation['sequence'] + 1
+            or handoff['iteration'] != iteration
+            or handoff['scope'] != scope
+            or handoff['in_reply_to'] != remediation['message_id']
+            or next_request_sequence != handoff['sequence'] + 1
+            or next_iteration != iteration + 1
+        ):
+            raise WorkerError(f'invalid message correlation: {handoff_path.name}')
+    documents.extend(shared_documents)
     return sorted(documents, key=lambda item: item[0].name)

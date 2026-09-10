@@ -29,15 +29,21 @@ from agent_orchestra.evidence import (
 from agent_orchestra.execution_context import WorkerContext
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
-from agent_orchestra.reviewer_batch_run import run_queued_reviewer_set
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import resume_review
+from agent_orchestra.worker import resume_review, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 DIGEST = f'sha256:{"a" * 64}'
+
+
+def test_reviewer_batch_module_does_not_depend_on_worker() -> None:
+    """Keep reviewer-batch execution below the worker orchestration facade."""
+
+    source = Path(reviewer_batch_run.__file__).read_text(encoding='utf-8')
+    assert 'agent_orchestra.worker' not in source
 
 
 def _reviewer(reviewer_id: str, runtime: str, vendor: str) -> ReviewerExecution:
@@ -687,6 +693,14 @@ def test_reviewer_set_remediates_rejected_batch_before_next_iteration(
         assert (
             run_directory / f'messages/000005-{reviewer_id}-review-request.json'
         ).is_file()
+    audit = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert audit['result'] == 'verified', audit['findings']
 
 
 @pytest.mark.parametrize(

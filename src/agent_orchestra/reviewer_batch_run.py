@@ -119,7 +119,9 @@ from agent_orchestra.schemas import (
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
+
+    DeveloperContinuation = Callable[..., Run]
 
 REVIEWER_BATCH_INCOMPLETE = 'reviewer batch did not complete'
 
@@ -556,13 +558,10 @@ def _resume_reviewer_set(  # noqa: PLR0911
     run: Run,
     run_directory: Path,
     execution: ReviewerSetExecutionRecordSchema,
+    resume_developer_request: DeveloperContinuation,
+    resume_developer_validation: DeveloperContinuation,
 ) -> Run:
     """Resume only incomplete members of one immutable reviewer batch."""
-
-    from agent_orchestra.worker import (  # noqa: PLC0415
-        _resume_developer_request,
-        _resume_developer_validation,
-    )
 
     plan = _reviewer_set_plan_from_execution(execution, context.registry)
     if run.state is RunState.CHANGES_REQUESTED:
@@ -643,7 +642,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
             request_path=request_path,
             request=request,
         )
-        return _resume_developer_request(
+        return resume_developer_request(
             context=context,
             plan=plan,
             run=transition(run, RunState.DEVELOPING),
@@ -690,7 +689,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
         )
         if current_digest is None:
             raise WorkerError(NO_CHANGES)
-        return _resume_developer_request(
+        return resume_developer_request(
             context=context,
             plan=plan,
             run=replace(run, state=RunState.DEVELOPING, updated_at=utc_now()),
@@ -729,7 +728,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
             workflow_state=run.state,
         )
         if action is RecoveryAction.LAUNCH:
-            return _resume_developer_request(
+            return resume_developer_request(
                 context=context,
                 plan=plan,
                 run=run,
@@ -743,7 +742,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
             raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
         if action is RecoveryAction.NONE:
             return run
-        return _resume_developer_validation(
+        return resume_developer_validation(
             context=context,
             run=run,
             request=request,
@@ -801,7 +800,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
         }
         validate_remediation_request(recovery_request, run_directory=run_directory)
         write_json_atomic(recovery_path, recovery_request, 'remediation_request')
-        return _resume_developer_request(
+        return resume_developer_request(
             context=context,
             plan=plan,
             run=transition(run, RunState.DEVELOPING),
@@ -939,6 +938,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
             batch_sequence=sequence,
             dispatches=base_dispatches,
             results=results,
+            resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
         if not activated:
@@ -1295,6 +1295,7 @@ def _finish_reviewer_batch(
     batch_sequence: int,
     dispatches: tuple[ReviewerDispatch, ...],
     results: tuple[ReviewerDispatchResult, ...],
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Persist one complete aggregate or interrupt an incomplete batch."""
 
@@ -1431,9 +1432,7 @@ def _finish_reviewer_batch(
         write_json_atomic(remediation_path, remediation, 'remediation_request')
         developing = transition(decided, RunState.DEVELOPING)
         context.store.update(developing, expected_state=RunState.CHANGES_REQUESTED)
-        from agent_orchestra.worker import _resume_developer_request  # noqa: PLC0415
-
-        return _resume_developer_request(
+        return resume_developer_request(
             context=context,
             plan=plan,
             run=developing,
@@ -1457,6 +1456,7 @@ def _run_reviewer_set_iteration(
     current_digest: str,
     sequence: int,
     prior_review_paths: dict[str, Path] | None = None,
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Execute one complete concurrent reviewer-set iteration."""
 
@@ -1497,6 +1497,7 @@ def _run_reviewer_set_iteration(
         batch_sequence=sequence,
         dispatches=dispatches,
         results=results,
+        resume_developer_request=resume_developer_request,
     )
 
 
@@ -1510,6 +1511,7 @@ def _run_queued_reviewer_set(
     developer_timeout_seconds: int,
     max_iterations: int,
     developer_identity: InvocationIdentity,
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Run one concurrent required-reviewer batch for a queued immutable diff."""
 
@@ -1585,6 +1587,7 @@ def _run_queued_reviewer_set(
             plan=plan,
             current_digest=current_digest,
             sequence=1,
+            resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
         if error.code == REVIEWER_BATCH_INCOMPLETE_CODE:
@@ -1612,6 +1615,7 @@ def run_queued_reviewer_set(
     developer_timeout_seconds: int,
     max_iterations: int,
     developer_identity: InvocationIdentity,
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Run a reviewer batch and persist every worker failure as durable evidence."""
 
@@ -1626,6 +1630,7 @@ def run_queued_reviewer_set(
             developer_timeout_seconds=developer_timeout_seconds,
             max_iterations=max_iterations,
             developer_identity=developer_identity,
+            resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):

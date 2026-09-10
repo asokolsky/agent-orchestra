@@ -34,6 +34,7 @@ from agent_orchestra.evidence import (
 from agent_orchestra.execution_context import (
     EVIDENCE_INSIDE_WORKTREE,
     ITERATION_LIMIT,
+    ReviewerSetReviewPlan,
     ReviewPlan,
     WorkerContext,
     _identity_from_record,
@@ -67,18 +68,72 @@ from agent_orchestra.messages import (
 )
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.queued_review import _run_queued_review
-from agent_orchestra.reviewer_batch_run import _resume_reviewer_set
+from agent_orchestra.reviewer_batch_run import (
+    _resume_reviewer_set,
+    _reviewer_set_plan_from_execution,
+    _run_reviewer_set_iteration,
+    _write_developer_disagreement,
+)
+from agent_orchestra.reviewer_batch_run import (
+    run_queued_reviewer_set as _run_queued_reviewer_set,
+)
 from agent_orchestra.schemas import (
     EXECUTION_RECORD_ADAPTER,
     DeveloperHandoffMessageSchema,
     ExecutionRecord,
     ExecutionRecordSchema,
+    ReviewerBatchResultSchemaV3,
     ReviewerSetExecutionRecordSchema,
 )
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
     from agent_orchestra.store import JobStore
+
+
+def _continue_reviewer_set_after_developer(
+    *,
+    context: WorkerContext,
+    run: Run,
+    reviewing: Run,
+    plan: ReviewerSetReviewPlan,
+    current_digest: str,
+    sequence: int,
+    review_result: dict[str, Any],
+) -> Run:
+    """Start the next reviewer batch after one accepted developer handoff."""
+
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    prior_review_paths = {
+        member['reviewer_id']: run_evidence_path(
+            run_directory, *Path(member['result_path']).parts
+        )
+        for member in review_result['reviewers']
+        if member['result_path'] is not None
+    }
+    return _run_reviewer_set_iteration(
+        context=context,
+        run=run,
+        reviewing=reviewing,
+        plan=plan,
+        current_digest=current_digest,
+        sequence=sequence,
+        prior_review_paths=prior_review_paths,
+        resume_developer_request=_resume_reviewer_set_developer_request,
+    )
+
+
+def _resume_reviewer_set_developer_request(**kwargs: Any) -> Run:
+    """Resume developer work with reviewer-set continuation hooks."""
+
+    return _resume_developer_request(
+        **kwargs,
+        reviewer_set_continuation=_continue_reviewer_set_after_developer,
+        disagreement_recorder=_write_developer_disagreement,
+    )
 
 
 def _read_execution_record(run_directory: Path, run_id: str) -> ExecutionRecord:
@@ -337,8 +392,8 @@ def _resume_developer_validation(
     request: dict[str, Any],
     record: InvocationRecord,
     action: RecoveryAction,
-    execution: ExecutionRecordSchema,
-    reviewer_identity: InvocationIdentity,
+    execution: ExecutionRecordSchema | ReviewerSetExecutionRecordSchema,
+    reviewer_identity: InvocationIdentity | None,
     developer_identity: InvocationIdentity,
 ) -> Run:
     """Revalidate a durable developer response and continue without relaunching."""
@@ -364,9 +419,12 @@ def _resume_developer_validation(
         )
     review_result_path = Path(request['payload']['review_result_path']).resolve()
     review_result = read_json_object(review_result_path)
-    finding_ids = tuple(
-        finding['finding_id'] for finding in review_result['payload']['findings']
+    findings = (
+        review_result['findings']
+        if isinstance(execution, ReviewerSetExecutionRecordSchema)
+        else review_result['payload']['findings']
     )
+    finding_ids = tuple(finding['finding_id'] for finding in findings)
     try:
         handoff = read_json_object(response_path)
         if is_temporary:
@@ -423,6 +481,8 @@ def _resume_developer_validation(
     )
     if is_disagreement:
         disagreement = transition(run, RunState.CHANGES_REQUESTED)
+        if isinstance(execution, ReviewerSetExecutionRecordSchema):
+            _write_developer_disagreement(run_directory, disagreement, canonical)
         store.update(disagreement, expected_state=RunState.DEVELOPING)
         return disagreement
     if recoverable:
@@ -439,6 +499,18 @@ def _resume_developer_validation(
         updated_at=utc_now(),
     )
     store.update(reviewing, expected_state=RunState.DEVELOPING)
+    if isinstance(execution, ReviewerSetExecutionRecordSchema):
+        batch = ReviewerBatchResultSchemaV3.model_validate(review_result)
+        return _continue_reviewer_set_after_developer(
+            context=context,
+            run=run,
+            reviewing=reviewing,
+            plan=_reviewer_set_plan_from_execution(execution, context.registry),
+            current_digest=new_digest,
+            sequence=sequence + 2,
+            review_result=batch.model_dump(mode='json'),
+        )
+    assert reviewer_identity is not None
     return _run_queued_review(
         context=context,
         plan=ReviewPlan.from_execution_record(
@@ -692,6 +764,8 @@ def _resume_review(  # noqa: PLR0911
             run=run,
             run_directory=run_directory,
             execution=execution,
+            resume_developer_request=_resume_reviewer_set_developer_request,
+            resume_developer_validation=_resume_developer_validation,
         )
     chain = read_message_chain(run_directory.resolve(), str(run.id))
     if not execution.reviewer.command:
@@ -898,6 +972,32 @@ def _resume_review(  # noqa: PLR0911
         allow_unchanged_ready=True,
         attempt=1,
         resume_expected_state=RunState.VALIDATION_REQUIRED,
+    )
+
+
+def run_queued_reviewer_set(
+    *,
+    context: WorkerContext,
+    run: Run,
+    objective: str,
+    reviewer_plan: ReviewerExecutionPlan,
+    developer_command: Sequence[str],
+    developer_timeout_seconds: int,
+    max_iterations: int,
+    developer_identity: InvocationIdentity,
+) -> Run:
+    """Run a reviewer set with worker-owned developer continuations."""
+
+    return _run_queued_reviewer_set(
+        context=context,
+        run=run,
+        objective=objective,
+        reviewer_plan=reviewer_plan,
+        developer_command=developer_command,
+        developer_timeout_seconds=developer_timeout_seconds,
+        max_iterations=max_iterations,
+        developer_identity=developer_identity,
+        resume_developer_request=_resume_reviewer_set_developer_request,
     )
 
 

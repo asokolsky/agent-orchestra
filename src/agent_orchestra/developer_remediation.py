@@ -30,6 +30,7 @@ from agent_orchestra.evidence import (
     run_evidence_path,
     worktree_digest,
 )
+from agent_orchestra.execution_context import ReviewerSetReviewPlan, ReviewPlan
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptIdentity,
@@ -56,19 +57,26 @@ from agent_orchestra.runtime_metadata import (
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
-    from agent_orchestra.execution_context import ReviewPlan, WorkerContext
+    from collections.abc import Callable
+
+    from agent_orchestra.execution_context import WorkerContext
+
+    ReviewerSetContinuation = Callable[..., Run]
+    DisagreementRecorder = Callable[[Path, Run, Path], None]
 
 
 def _resume_developer_request(
     *,
     context: WorkerContext,
-    plan: ReviewPlan,
+    plan: ReviewPlan | ReviewerSetReviewPlan,
     run: Run,
     request: dict[str, Any],
     current_digest: str,
     allow_unchanged_ready: bool,
     attempt: int,
     resume_expected_state: RunState | None = None,
+    reviewer_set_continuation: ReviewerSetContinuation | None = None,
+    disagreement_recorder: DisagreementRecorder | None = None,
 ) -> Run:
     """Retry one durable remediation request and continue the same run."""
 
@@ -96,9 +104,12 @@ def _resume_developer_request(
     )
     review_result_path = Path(request['payload']['review_result_path']).resolve()
     review_result = read_json_object(review_result_path)
-    finding_ids = tuple(
-        finding['finding_id'] for finding in review_result['payload']['findings']
+    findings = (
+        review_result['findings']
+        if isinstance(plan, ReviewerSetReviewPlan)
+        else review_result['payload']['findings']
     )
+    finding_ids = tuple(finding['finding_id'] for finding in findings)
     adapter = CommandAgentAdapter(tuple(developer_command))
     developer_stem = invocation_stem(sequence, 'developer', attempt)
     developer_metadata_path = run_evidence_path(
@@ -373,6 +384,8 @@ def _resume_developer_request(
             and is_developer_disagreement(parsed)
         ):
             disagreement = transition(run, RunState.CHANGES_REQUESTED)
+            if disagreement_recorder is not None:
+                disagreement_recorder(run_directory, disagreement, handoff_path)
             store.update(disagreement, expected_state=RunState.DEVELOPING)
             return disagreement
     except WorkerError:
@@ -425,6 +438,17 @@ def _resume_developer_request(
         updated_at=utc_now(),
     )
     store.update(reviewing, expected_state=RunState.DEVELOPING)
+    if reviewer_set_continuation is not None:
+        return reviewer_set_continuation(
+            context=context,
+            run=run,
+            reviewing=reviewing,
+            plan=plan,
+            current_digest=measured_digest,
+            sequence=sequence + 2,
+            review_result=review_result,
+        )
+    assert isinstance(plan, ReviewPlan)
     return _run_queued_review(
         context=context,
         # The objective is taken from the durable remediation request rather
