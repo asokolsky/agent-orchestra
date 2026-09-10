@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from itertools import product
 from typing import cast, get_args
 
 import pytest
@@ -13,6 +14,7 @@ from agent_orchestra.review_batch import (
     ReviewerOutcome,
     aggregate_review_batch,
 )
+from agent_orchestra.schemas import ReviewerBatchResultSchema
 
 
 def test_all_required_approvals_aggregate_to_approval() -> None:
@@ -98,3 +100,44 @@ def test_runtime_outcomes_follow_the_typed_vocabulary() -> None:
     """Keep runtime validation synchronized with the reviewer outcome type."""
 
     assert frozenset(get_args(ReviewerOutcome)) == VALID_OUTCOMES
+
+
+def test_every_aggregate_decision_validates_as_canonical_evidence() -> None:
+    """Pin schema verdict derivation to every combination of runtime outcomes."""
+
+    reviewer_ids = ('first', 'second', 'third')
+    for outcomes in product(sorted(VALID_OUTCOMES), repeat=len(reviewer_ids)):
+        decisions = tuple(
+            ReviewerDecision(reviewer_id, cast('ReviewerOutcome', outcome))
+            for reviewer_id, outcome in zip(reviewer_ids, outcomes, strict=True)
+        )
+        aggregate = aggregate_review_batch(decisions)
+        ReviewerBatchResultSchema.model_validate(
+            {
+                'schema_version': 1,
+                'run_id': 'run-1',
+                'iteration': 1,
+                'reviewer_set_id': 'default',
+                'aggregation_policy': 'all_required',
+                'diff_digest': 'sha256:' + 'a' * 64,
+                'verdict': aggregate.verdict,
+                'reviewers': [
+                    {
+                        'reviewer_id': decision.reviewer_id,
+                        'outcome': decision.outcome,
+                        'result_path': (
+                            None
+                            if decision.outcome == 'incomplete'
+                            else (
+                                'messages/000002-'
+                                f'{decision.reviewer_id}-review-result.json'
+                            )
+                        ),
+                    }
+                    for decision in decisions
+                ],
+                'changes_requested_by': list(aggregate.changes_requested_by),
+                'blocked_by': list(aggregate.blocked_by),
+                'incomplete_reviewers': list(aggregate.incomplete_reviewers),
+            }
+        )

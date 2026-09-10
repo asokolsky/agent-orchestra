@@ -675,6 +675,7 @@ def _validate_canonical_json(
                 evidence_path('review_batch_result', ordinal=review_iteration),
             )
             for review_iteration in reviewing_digests
+            if review_iteration in reviewing_outcomes
             if aggregate_iterations.count(review_iteration) != 1
         )
     if isinstance(job, IssueJob):

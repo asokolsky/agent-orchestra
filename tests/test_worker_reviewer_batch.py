@@ -125,6 +125,34 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         )
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', approve)
+    original_write_json_atomic = worker_module._write_json_atomic
+    inspected_in_flight = False
+
+    def inspect_before_aggregate(
+        path: Path, document: dict[str, Any], evidence_type: str
+    ) -> None:
+        """Confirm an active reviewer batch does not require its future aggregate."""
+
+        nonlocal inspected_in_flight
+        if evidence_type == 'review_batch_result':
+            in_flight = store.get(run.id)
+            assert in_flight.state is RunState.REVIEWING
+            audit = build_audit_document(
+                in_flight,
+                store.list_transitions(str(run.id)),
+                (),
+                tmp_path / 'runs',
+                verify=True,
+            )
+            assert not any(
+                item.get('code') == 'message_correlation_failure'
+                and item.get('path') == 'review-batches/000001.json'
+                for item in cast('list[dict[str, object]]', audit['findings'])
+            )
+            inspected_in_flight = True
+        original_write_json_atomic(path, document, cast('Any', evidence_type))
+
+    monkeypatch.setattr(worker_module, '_write_json_atomic', inspect_before_aggregate)
     plan = ReviewerExecutionPlan(
         'default',
         (
@@ -150,6 +178,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
     )
 
     assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    assert inspected_in_flight
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     assert (
         json.loads((run_directory / 'execution.json').read_text(encoding='utf-8'))[
