@@ -19,6 +19,9 @@ from agent_orchestra.adapter.registry import (
 
 MANIFEST_ENGINE_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
+# Deliberately not 'manifests': a data directory sharing this module's name
+# would become the import target as soon as it gained an __init__.py.
+MANIFEST_DIRECTORY = 'manifest'
 PROVIDER_MANIFEST_IDS = ('github', 'gitlab')
 MANIFEST_IDS = (
     *PROVIDER_MANIFEST_IDS,
@@ -80,7 +83,9 @@ class Manifest:
 def load_manifest(manifest_id: str) -> Manifest:
     """Load one packaged TOML manifest and fail closed on invalid data."""
 
-    resource = files('agent_orchestra').joinpath('manifests', f'{manifest_id}.toml')
+    resource = files('agent_orchestra').joinpath(
+        MANIFEST_DIRECTORY, f'{manifest_id}.toml'
+    )
     try:
         content = resource.read_text(encoding='utf-8')
     except (OSError, UnicodeError) as error:

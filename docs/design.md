@@ -269,7 +269,7 @@ UUID-based runs remain readable.
 ## Packaged knowledge manifests
 
 Volatile provider, runtime-adapter, and canonical evidence naming knowledge is
-stored as TOML under `agent_orchestra/manifests`. Every manifest has this
+stored as TOML under `agent_orchestra/manifest`. Every manifest has this
 required header:
 
 | Field | Type | Meaning |
@@ -381,11 +381,20 @@ future proposal to make any manifest configurable should start from that scope
 rather than from all six. Proposing such a change is separate work and should
 cite this section.
 
-Manifests live in `src/agent_orchestra/manifests/` and load through
+Manifests live in `src/agent_orchestra/manifest/` and load through
 `importlib.resources` rather than shipping as top-level `data-files`. Package
 data cannot be separated from the code it must stay in sync with, and it
 resolves identically from a wheel, a zip, and an editable install, so the engine
 never has to search the filesystem for the data that bounds it.
+
+The data directory is deliberately not named `manifests`, because the module
+`agent_orchestra/manifests.py` already owns that name. A same-named directory
+resolves as a namespace-package portion and loses to the regular module only
+while it has no `__init__.py`; adding one would silently make the directory the
+import target and break every importer of the module. Distinct names remove
+that dependence on import precedence, and the loader joins
+`MANIFEST_DIRECTORY` from the parent package rather than naming the
+directory at each call site.
 
 ## Job and task output
 
