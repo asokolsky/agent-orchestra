@@ -36,7 +36,7 @@ formatting and linting, mypy checks types, and pytest runs the test suite.
 
 Provider diagnostics, built-in runtime arguments, and canonical evidence names
 are declared in versioned TOML files under
-`src/agent_orchestra/manifests/`. These files ship in both distribution formats
+`src/agent_orchestra/manifest/`. These files ship in both distribution formats
 and are validated before the CLI handles a command. See
 [Packaged knowledge manifests](docs/design.md#packaged-knowledge-manifests) for
 the schema, compatibility rules, and stable failure codes.

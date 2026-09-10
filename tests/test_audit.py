@@ -900,7 +900,7 @@ def test_issue_audit_uses_manifest_template_for_ordinals(
     """Keep issue writers, recognition, ordinals, and audit on one path contract."""
 
     manifest_path = (
-        Path(__file__).parents[1] / 'src/agent_orchestra/manifests/evidence.toml'
+        Path(__file__).parents[1] / 'src/agent_orchestra/manifest/evidence.toml'
     )
     custom = parse_manifest(
         'evidence',

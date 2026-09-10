@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 from agent_orchestra.adapter import issue_reviewer
 from agent_orchestra.adapter.issue_reviewer import issue_review_prompt
 from agent_orchestra.manifests import (
+    MANIFEST_DIRECTORY,
     MANIFEST_IDS,
     ManifestError,
     adapter_arguments,
@@ -28,6 +30,17 @@ from agent_orchestra.manifests import (
     load_manifest,
     parse_manifest,
 )
+
+
+def _packaged_manifest_path(manifest_id: str) -> Path:
+    """Return one packaged manifest source path through the loader's constant."""
+
+    return (
+        Path(__file__).parents[1]
+        / 'src/agent_orchestra'
+        / MANIFEST_DIRECTORY
+        / f'{manifest_id}.toml'
+    )
 
 
 def test_reviewer_qualified_messages_are_canonical_evidence() -> None:
@@ -59,6 +72,41 @@ def test_every_packaged_manifest_is_schema_valid() -> None:
     assert [
         load_manifest(manifest_id).manifest_id for manifest_id in MANIFEST_IDS
     ] == list(MANIFEST_IDS)
+
+
+def test_manifest_directory_holds_exactly_the_packaged_manifests() -> None:
+    """Keep the data directory data, never an importable package."""
+
+    data_directory = Path(str(files('agent_orchestra'))) / MANIFEST_DIRECTORY
+
+    assert data_directory.is_dir()
+    assert not (data_directory / '__init__.py').exists()
+    assert sorted(path.name for path in data_directory.glob('*.toml')) == sorted(
+        f'{manifest_id}.toml' for manifest_id in MANIFEST_IDS
+    )
+
+
+def test_no_packaged_directory_shadows_a_module() -> None:
+    """Reject any directory that could take a sibling module's import name."""
+
+    # Guarding MANIFEST_DIRECTORY alone would miss the original defect coming
+    # back: recreating agent_orchestra/manifests/ next to manifests.py restores
+    # the latent collision even while the renamed directory stays correct.
+    package = Path(str(files('agent_orchestra')))
+    collisions = sorted(
+        str(directory.relative_to(package))
+        for directory in package.rglob('*')
+        if directory.is_dir() and directory.with_suffix('.py').is_file()
+    )
+
+    assert collisions == []
+
+
+def test_manifests_import_resolves_to_the_module() -> None:
+    """Prove the module, not a same-named directory, owns the import name."""
+
+    assert Path(str(manifests.__file__)).name == 'manifests.py'
+    assert not hasattr(manifests, '__path__')
 
 
 def test_loader_reuses_validated_manifest() -> None:
@@ -111,9 +159,7 @@ def test_evidence_manifest_rejects_inconsistent_or_incomplete_shapes(
 ) -> None:
     """Reject identity drift, unknown fields, omissions, and escaping paths."""
 
-    content = (
-        Path(__file__).parents[1] / 'src/agent_orchestra/manifests/evidence.toml'
-    ).read_text(encoding='utf-8')
+    content = _packaged_manifest_path('evidence').read_text(encoding='utf-8')
     with pytest.raises(ManifestError, match='manifest_malformed'):
         parse_manifest('evidence', mutation(content))
 
@@ -122,9 +168,7 @@ def test_evidence_manifest_rejects_inconsistent_or_incomplete_shapes(
 def test_runtime_manifest_rejects_invalid_format_fields(argument: str) -> None:
     """Reject malformed, unknown, converted, and formatted runtime fields."""
 
-    content = (
-        Path(__file__).parents[1] / 'src/agent_orchestra/manifests/codex.toml'
-    ).read_text(encoding='utf-8')
+    content = _packaged_manifest_path('codex').read_text(encoding='utf-8')
     content = content.replace('{cwd}', argument, 1)
 
     with pytest.raises(ManifestError, match='manifest_malformed'):
@@ -138,8 +182,7 @@ def test_runtime_manifest_rejects_incomplete_profiles(
 ) -> None:
     """Require every adapter profile to supply all of its dynamic inputs."""
 
-    path = Path(__file__).parents[1] / f'src/agent_orchestra/manifests/{runtime}.toml'
-    content = path.read_text(encoding='utf-8')
+    content = _packaged_manifest_path(runtime).read_text(encoding='utf-8')
     content = re.sub(
         rf'^{profile} = .*$',
         f'{profile} = ["exec"]',
