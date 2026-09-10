@@ -75,6 +75,9 @@ from agent_orchestra.retention import (
     parse_duration,
     plan_document,
 )
+from agent_orchestra.reviewer_batch_run import (
+    run_queued_reviewer_set,
+)
 from agent_orchestra.reviewer_plan import (
     ReviewerPlanError,
     build_reviewer_execution_plan,
@@ -92,7 +95,6 @@ from agent_orchestra.store import (
 )
 from agent_orchestra.worker import (
     resume_review,
-    run_queued_reviewer_set,
 )
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
