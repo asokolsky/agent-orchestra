@@ -553,6 +553,19 @@ NOT_OBJECT = 'reviewer response must be a JSON object'
 WORKTREE_CHANGED = 'worktree changed during read-only review'
 
 
+# Stable error codes the CLI documents. They live beside the error that carries
+# them: a code without its exception is not usable on its own, and every module
+# that raises WorkerError needs the same vocabulary.
+REVIEWER_BATCH_INCOMPLETE_CODE = 'reviewer_batch_incomplete'
+RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
+RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
+RESUME_SCOPE_CHANGED_CODE = 'resume_scope_changed'
+RESUME_INTERRUPTED_CODE = 'resume_interrupted'
+RESUME_EXECUTION_FAILED_CODE = 'resume_execution_failed'
+RESUME_ACTIVATION_UNCERTAIN_CODE = 'resume_activation_uncertain'
+RESUME_CANCELLED_CODE = 'resume_cancelled'
+
+
 class WorkerError(RuntimeError):
     """Raised when a queued run cannot complete its review step."""
 

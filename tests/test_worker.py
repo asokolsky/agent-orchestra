@@ -18,9 +18,7 @@ from agent_orchestra.evidence import (
 )
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.manifests import evidence_path
-from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
-from agent_orchestra.schemas import CHANGES_REQUESTED_WITHOUT_FINDINGS
-from agent_orchestra.worker import (
+from agent_orchestra.messages import (
     APPROVED_WITH_FINDINGS,
     DUPLICATE_MESSAGE_ID,
     INVALID_ARTIFACT_PATH,
@@ -31,15 +29,19 @@ from agent_orchestra.worker import (
     INVALID_REMEDIATION_REQUEST,
     INVALID_VERDICT,
     MISSING_ARTIFACT,
+    read_message_chain,
+    require_unique_message_id,
+    validate_developer_handoff,
+    validate_remediation_request,
+    validate_review_request,
+    validate_review_response,
+)
+from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
+from agent_orchestra.schemas import CHANGES_REQUESTED_WITHOUT_FINDINGS
+from agent_orchestra.worker import (
     ReviewerSetReviewPlan,
     _execution_record,
     _read_execution_record,
-    _require_unique_message_id,
-    _validate_developer_handoff,
-    _validate_remediation_request,
-    _validate_review_request,
-    _validate_review_response,
-    read_message_chain,
 )
 
 if TYPE_CHECKING:
@@ -175,9 +177,7 @@ def test_validate_review_response_uses_request_sequence(tmp_path: Path) -> None:
     response['iteration'] = 2
 
     assert (
-        _validate_review_response(
-            response, request=request, artifact_path=artifact_path
-        )
+        validate_review_response(response, request=request, artifact_path=artifact_path)
         == 'approved'
     )
 
@@ -282,7 +282,7 @@ def test_rejects_invalid_review_response(
     mutation(response)
 
     with pytest.raises(WorkerError, match=expected):
-        _validate_review_response(response, request=request, artifact_path=artifact)
+        validate_review_response(response, request=request, artifact_path=artifact)
 
 
 def test_rejects_missing_review_artifact(tmp_path: Path) -> None:
@@ -292,7 +292,7 @@ def test_rejects_missing_review_artifact(tmp_path: Path) -> None:
     request, response = review_documents(artifact)
 
     with pytest.raises(WorkerError, match=MISSING_ARTIFACT):
-        _validate_review_response(response, request=request, artifact_path=artifact)
+        validate_review_response(response, request=request, artifact_path=artifact)
 
 
 def test_rejects_changed_worktree_digest() -> None:
@@ -371,7 +371,7 @@ def test_validates_exact_finding_dispositions() -> None:
 
     request, response = developer_documents()
 
-    parsed = _validate_developer_handoff(
+    parsed = validate_developer_handoff(
         response, request=request, finding_ids=('F-001', 'F-002')
     )
 
@@ -385,7 +385,7 @@ def test_rejects_missing_duplicate_and_unknown_dispositions() -> None:
     response['payload']['dispositions'][1]['finding_id'] = 'F-001'
 
     with pytest.raises(WorkerError, match=INVALID_FINDING_DISPOSITIONS):
-        _validate_developer_handoff(
+        validate_developer_handoff(
             response, request=request, finding_ids=('F-001', 'F-002')
         )
 
@@ -425,11 +425,11 @@ def test_validates_contained_remediation_evidence(tmp_path: Path) -> None:
         },
     }
 
-    _validate_remediation_request(request, run_directory=tmp_path)
+    validate_remediation_request(request, run_directory=tmp_path)
 
     request['payload']['review_artifact_path'] = str(tmp_path.parent / 'outside.md')
     with pytest.raises(WorkerError, match='outside the run'):
-        _validate_remediation_request(request, run_directory=tmp_path)
+        validate_remediation_request(request, run_directory=tmp_path)
 
 
 def test_rejects_missing_remediation_evidence(tmp_path: Path) -> None:
@@ -455,7 +455,7 @@ def test_rejects_missing_remediation_evidence(tmp_path: Path) -> None:
     )
 
     with pytest.raises(WorkerError, match=INVALID_REMEDIATION_REQUEST):
-        _validate_remediation_request(request, run_directory=tmp_path)
+        validate_remediation_request(request, run_directory=tmp_path)
 
 
 def test_rejects_review_evidence_path_escape(tmp_path: Path) -> None:
@@ -482,7 +482,7 @@ def test_rejects_review_evidence_path_escape(tmp_path: Path) -> None:
     )
 
     with pytest.raises(WorkerError, match='outside the run'):
-        _validate_review_request(request, run_directory=tmp_path)
+        validate_review_request(request, run_directory=tmp_path)
 
 
 def test_rejects_duplicate_persisted_message_id(tmp_path: Path) -> None:
@@ -494,7 +494,7 @@ def test_rejects_duplicate_persisted_message_id(tmp_path: Path) -> None:
     duplicate.write_text(json.dumps({'message_id': message_id}))
 
     with pytest.raises(WorkerError, match=DUPLICATE_MESSAGE_ID):
-        _require_unique_message_id({'message_id': message_id}, tmp_path)
+        require_unique_message_id({'message_id': message_id}, tmp_path)
 
 
 def test_manifest_message_paths_are_written_and_recovered(tmp_path: Path) -> None:

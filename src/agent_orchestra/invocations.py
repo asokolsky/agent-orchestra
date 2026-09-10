@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Never, cast
+from typing import TYPE_CHECKING, Any, Literal, Never, cast
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -18,13 +18,18 @@ if TYPE_CHECKING:
 
 from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.evidence import (
+    RESUME_ACTIVATION_UNCERTAIN_CODE,
     EvidencePathError,
     EvidenceType,
     JobEvidence,
     WorkerError,
     evidence_root_for_job,
     invocation_stem,
+    output_text,
+    record_finalized_path,
     resolve_evidence_path,
+    run_evidence_path,
+    write_text_atomic,
 )
 from agent_orchestra.models import RunState
 from agent_orchestra.persisted_enum import PersistedEnum
@@ -917,3 +922,137 @@ def prepare_run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
         return path
     except EvidencePathError as error:
         raise WorkerError(str(error)) from error
+
+
+def persist_attempt_record(path: Path, record: InvocationRecord) -> None:
+    """Normalize unsafe or conflicting attempt writes as worker failures."""
+
+    try:
+        job_directory = path.parent.parent
+        InvocationEvidenceStore(job_directory).write(path, record)
+        if record.status == 'completed':
+            record_finalized_path(Path(record.stdout_path), 'process_stdout')
+            record_finalized_path(Path(record.stderr_path), 'process_stderr')
+    except InvocationEvidenceError as error:
+        code = (
+            RESUME_ACTIVATION_UNCERTAIN_CODE
+            if str(error) == 'attempt record already exists'
+            else None
+        )
+        raise WorkerError(f'invalid invocation evidence: {error}', code=code) from error
+
+
+def record_invocation(
+    attempt: AttemptIdentity,
+    outcome: ProcessOutcome,
+    *,
+    run_directory: Path,
+    lifecycle: AttemptLifecycle | None = None,
+) -> str:
+    """Persist separate streams and their adapter-neutral invocation record."""
+
+    resolved = (lifecycle or AttemptLifecycle()).resolved(outcome)
+    stem = attempt.evidence_stem
+    logs = run_evidence_path(run_directory, 'logs')
+    stdout_path = logs / f'{stem}.stdout.log'
+    stderr_path = logs / f'{stem}.stderr.log'
+    if outcome.stdout is not None or not stdout_path.exists():
+        write_text_atomic(stdout_path, output_text(outcome.stdout))
+    if outcome.stderr is not None or not stderr_path.exists():
+        write_text_atomic(stderr_path, output_text(outcome.stderr))
+    persist_attempt_record(
+        run_evidence_path(run_directory, 'invocations') / f'{stem}.json',
+        InvocationRecord(
+            schema_version=attempt.schema_version,
+            run_id=attempt.run_id,
+            task_id=attempt.task_id,
+            invocation_id=attempt.durable_invocation_id,
+            role=attempt.role,
+            agent_vendor=attempt.agent.vendor,
+            requested_model=attempt.agent.model,
+            effective_models=outcome.effective_models,
+            effective_model_status=outcome.effective_model_status,
+            runtime=attempt.agent.runtime,
+            iteration=attempt.iteration,
+            started_at=outcome.started_at,
+            finished_at=(
+                (outcome.finished_at or timestamp()) if outcome.finished else None
+            ),
+            exit_code=outcome.exit_code,
+            timed_out=outcome.timed_out,
+            interrupted=outcome.interrupted,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            attempt=attempt.attempt,
+            status=resolved.status,
+            conclusion=resolved.conclusion,
+            response_received_at=resolved.response_received_at,
+            validation_started_at=resolved.validation_started_at,
+            reviewer_id=attempt.reviewer_id,
+        ),
+    )
+    return attempt.durable_invocation_id
+
+
+def latest_task_attempt(
+    run_directory: Path, sequence: int, role: str
+) -> InvocationRecord | None:
+    """Return the latest validated attempt for one durable task."""
+
+    try:
+        records = InvocationEvidenceStore(run_directory).read_all(run_directory.name)
+    except InvocationEvidenceError as error:
+        message = 'invalid invocation evidence'
+        raise WorkerError(message) from error
+    task_id = f'{run_directory.name}:{sequence:06d}-{role}'
+    attempts = [record for record in records if record.task_id == task_id]
+    return max(attempts, key=lambda record: record.attempt) if attempts else None
+
+
+def attempt_activation_was_persisted(
+    run_directory: Path,
+    sequence: int,
+    role: Literal[RuntimeRole.DEVELOPER, RuntimeRole.REVIEWER],
+    attempt: int,
+) -> bool:
+    """Return whether activation is durable enough to finalize interruption."""
+
+    latest = latest_task_attempt(run_directory, sequence, role)
+    return (
+        latest is not None
+        and latest.attempt == attempt
+        and latest.status == AttemptStatus.RUNNING.value
+    )
+
+
+def next_attempt(
+    run_directory: Path, sequence: int, role: str, workflow_state: RunState
+) -> int:
+    """Return the next non-overwriting invocation attempt number."""
+
+    latest = latest_task_attempt(run_directory, sequence, role)
+    action = recovery_action(
+        latest,
+        workflow_state=workflow_state,
+    )
+    if action is RecoveryAction.LAUNCH:
+        return 1
+    if action is not RecoveryAction.NONE or latest is None:
+        message = 'cannot retry task with uncertain active attempt'
+        raise WorkerError(
+            message,
+            code=RESUME_ACTIVATION_UNCERTAIN_CODE,
+        )
+    return latest.attempt + 1
+
+
+def attempt_record_path(
+    run_directory: Path, sequence: int, role: str, attempt: int
+) -> Path:
+    """Return the durable record path for one task attempt."""
+
+    return run_evidence_path(
+        run_directory,
+        'invocations',
+        f'{invocation_stem(sequence, role, attempt)}.json',
+    )
