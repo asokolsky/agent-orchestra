@@ -249,14 +249,14 @@ class ReviewerBatchResultSchema(ReviewerBatchResultBaseSchema):
     schema_version: Literal[1]
 
 
-class ReviewerBatchResultV2Schema(ReviewerBatchResultBaseSchema):
-    """Schema-2 aggregate decision with reviewer-qualified findings."""
+class ReviewerBatchResultWithFindingsSchema(ReviewerBatchResultBaseSchema):
+    """Shared validation for aggregate decisions with reviewer findings."""
 
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     findings: list[ReviewerBatchFindingSchema]
 
     @model_validator(mode='after')
-    def validate_findings(self) -> ReviewerBatchResultV2Schema:
+    def validate_findings(self) -> ReviewerBatchResultWithFindingsSchema:
         """Require unique findings owned by reviewers that requested changes."""
 
         finding_ids = [finding.finding_id for finding in self.findings]
@@ -274,11 +274,16 @@ class ReviewerBatchResultV2Schema(ReviewerBatchResultBaseSchema):
         return self
 
 
-class ReviewerBatchResultV3Schema(ReviewerBatchResultBaseSchema):
+class ReviewerBatchResultV2Schema(ReviewerBatchResultWithFindingsSchema):
+    """Schema-2 aggregate decision with reviewer-qualified findings."""
+
+    schema_version: Literal[2]
+
+
+class ReviewerBatchResultSchemaV3(ReviewerBatchResultWithFindingsSchema):
     """Schema-3 aggregate decision addressable by developer remediation."""
 
     schema_version: Literal[3]
-    findings: list[ReviewerBatchFindingSchema]
     message_id: str
     artifact_path: str
 
@@ -290,29 +295,11 @@ class ReviewerBatchResultV3Schema(ReviewerBatchResultBaseSchema):
         UUID(value)
         return value
 
-    @model_validator(mode='after')
-    def validate_findings(self) -> ReviewerBatchResultV3Schema:
-        """Require unique findings owned by reviewers that requested changes."""
-
-        finding_ids = [finding.finding_id for finding in self.findings]
-        if len(finding_ids) != len(set(finding_ids)):
-            message = 'review batch result finding IDs must be unique'
-            raise ValueError(message)
-        for finding in self.findings:
-            if (
-                finding.reviewer_id not in self.changes_requested_by
-                or finding.finding_id
-                != f'{finding.reviewer_id}:{finding.source_finding_id}'
-            ):
-                message = 'review batch result contains an uncorrelated finding'
-                raise ValueError(message)
-        return self
-
 
 ReviewerBatchResult = Annotated[
     ReviewerBatchResultSchema
     | ReviewerBatchResultV2Schema
-    | ReviewerBatchResultV3Schema,
+    | ReviewerBatchResultSchemaV3,
     Field(discriminator='schema_version'),
 ]
 REVIEWER_BATCH_RESULT_ADAPTER: TypeAdapter[ReviewerBatchResult] = TypeAdapter(

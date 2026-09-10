@@ -555,15 +555,8 @@ def _validate_canonical_json(
                 expected_artifact_relative = (
                     f'artifacts/review-batch-{document["iteration"]:04d}.md'
                 )
-                expected_artifact = resolve_evidence_path(
-                    root, str(job.id), *Path(expected_artifact_relative).parts
-                )
-                try:
-                    artifact = Path(document['artifact_path']).resolve(strict=True)
-                except OSError:
-                    artifact = None
                 if (
-                    artifact != expected_artifact.resolve()
+                    document['artifact_path'] != expected_artifact_relative
                     or expected_artifact_relative not in indexed_paths
                 ):
                     findings.append(

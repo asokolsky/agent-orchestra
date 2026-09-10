@@ -8,6 +8,8 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+import pytest
+
 from agent_orchestra import cli as cli_module
 from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY, RuntimeRole
 from agent_orchestra.agents import (
@@ -36,8 +38,6 @@ from agent_orchestra.worker import run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 DIGEST = f'sha256:{"a" * 64}'
@@ -307,7 +307,7 @@ def test_four_views_use_public_vocabulary_and_current_array(
 
     assert main(arguments(database, 'jobs', None, root)) == 0
     jobs = json.loads(capsys.readouterr().out)
-    assert jobs['schema_version'] == 18
+    assert jobs['schema_version'] == 19
     assert jobs['jobs'][0]['job_id'] == str(job.id)
     assert 'id' not in jobs['jobs'][0]
 
@@ -449,6 +449,56 @@ def test_batch_view_preserves_null_finding_locations(
     finding = batch['findings'][0]
     assert finding['path'] is None
     assert finding['line'] is None
+
+
+def test_batch_views_survive_relocated_evidence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve an aggregate artifact after its external evidence root moves."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    restored_root = tmp_path / 'restored-runs'
+    root.rename(restored_root)
+    task_id = reviewer_task_id(str(job.id), 1, 'security')
+
+    for command, identifier in (
+        ('job', str(job.id)),
+        ('tasks', str(job.id)),
+        ('task', task_id),
+    ):
+        assert main(arguments(database, command, identifier, restored_root)) == 0
+        assert json.loads(capsys.readouterr().out)['error'] is None
+
+
+@pytest.mark.parametrize('change', ['missing', 'modified'])
+def test_batch_views_reject_invalid_aggregate_artifact(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """Reject a batch whose indexed aggregate artifact no longer verifies."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    job_directory = resolve_evidence_path(root, str(job.id))
+    artifact = job_directory / 'artifacts/review-batch-0001.md'
+    if change == 'missing':
+        artifact.unlink()
+    else:
+        artifact.write_text('# Modified review batch\n', encoding='utf-8')
+    task_id = reviewer_task_id(str(job.id), 1, 'security')
+
+    for command, identifier in (
+        ('job', str(job.id)),
+        ('tasks', str(job.id)),
+        ('task', task_id),
+    ):
+        assert main(arguments(database, command, identifier, root)) == 2
+        document = json.loads(capsys.readouterr().out)
+        assert document['error']['code'] == 'invalid_evidence'
+        assert f'evidence_{change}' in document['error']['message']
 
 
 def test_job_view_rejects_modified_real_reviewer_batch(
@@ -625,7 +675,7 @@ def test_views_treat_absent_issue_tables_as_empty(
 
     assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 18,
+        'schema_version': 19,
         'jobs': [],
         'error': None,
     }

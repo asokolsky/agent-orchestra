@@ -1004,10 +1004,11 @@ the worker waits for the complete batch and applies the deterministic
 all-required decision before changing workflow state. This execution boundary
 does not yet launch developer remediation after a rejected batch. It persists
 `review-batches/{iteration:06d}.json` before changing workflow state. Schema
-version 3 adds a stable message identity and a canonical aggregate Markdown
-artifact so a later remediation request can reference the whole decision rather
-than privileging one member. The strict document binds the reviewer set and
-policy, immutable diff digest,
+version 3 adds a stable message identity and the evidence-relative path of a
+canonical aggregate Markdown artifact so a later remediation request can
+reference the whole decision without privileging one member or binding durable
+evidence to its original filesystem location. The strict document binds the
+reviewer set and policy, immutable diff digest,
 ordered member outcomes and canonical result paths, aggregate verdict, and its
 ordered rationale groups. A timed-out, failed, or invalid member leaves the
 batch `interrupted` without a premature aggregate. A complete blocked batch and

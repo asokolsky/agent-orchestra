@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent_orchestra.models import Review
-    from agent_orchestra.schemas import ReviewerBatchResultV3Schema
+    from agent_orchestra.schemas import ReviewerBatchResultSchemaV3
 
 
 def render_review(review: Review) -> str:
@@ -58,7 +58,7 @@ def render_review(review: Review) -> str:
     return '\n'.join(lines).rstrip() + '\n'
 
 
-def render_reviewer_batch(batch: ReviewerBatchResultV3Schema) -> str:
+def render_reviewer_batch(batch: ReviewerBatchResultSchemaV3) -> str:
     """Render a canonical aggregate reviewer decision as Markdown."""
 
     lines = [

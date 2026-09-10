@@ -121,7 +121,7 @@ from agent_orchestra.schemas import (
     DeveloperHandoffMessageSchema,
     ExecutionRecord,
     ExecutionRecordSchema,
-    ReviewerBatchResultV3Schema,
+    ReviewerBatchResultSchemaV3,
     ReviewerSetExecutionRecordSchema,
 )
 from agent_orchestra.workflow import transition
@@ -2094,7 +2094,7 @@ def _finish_reviewer_batch(
     artifact_path = run_evidence_path(
         run_directory, 'artifacts', f'review-batch-{reviewing.iteration:04d}.md'
     )
-    batch_result = ReviewerBatchResultV3Schema.model_validate(
+    batch_result = ReviewerBatchResultSchemaV3.model_validate(
         {
             'schema_version': 3,
             'message_id': str(uuid4()),
@@ -2116,7 +2116,7 @@ def _finish_reviewer_batch(
             'blocked_by': list(decision.blocked_by),
             'incomplete_reviewers': [],
             'findings': aggregate_findings,
-            'artifact_path': str(artifact_path),
+            'artifact_path': artifact_path.relative_to(run_directory).as_posix(),
         }
     )
     write_text_atomic(

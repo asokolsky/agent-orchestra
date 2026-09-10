@@ -17,8 +17,8 @@ from agent_orchestra.schemas import (
     INVALID_REVIEW_FINDINGS,
     REVIEW_RESULT_SCHEMA,
     ReviewerBatchResultSchema,
+    ReviewerBatchResultSchemaV3,
     ReviewerBatchResultV2Schema,
-    ReviewerBatchResultV3Schema,
     ReviewerExecutionPlanSchema,
     ReviewerSetExecutionRecordSchema,
     SchemaValidationError,
@@ -88,15 +88,15 @@ def test_reviewer_batch_v3_is_addressable_for_remediation() -> None:
     document.update(
         schema_version=3,
         message_id=str(uuid4()),
-        artifact_path='/run/artifacts/review-batch-0001.md',
+        artifact_path='artifacts/review-batch-0001.md',
         findings=[],
     )
 
-    ReviewerBatchResultV3Schema.model_validate(document)
+    ReviewerBatchResultSchemaV3.model_validate(document)
 
     document['message_id'] = 'not-a-uuid'
     with pytest.raises(ValueError, match='UUID'):
-        ReviewerBatchResultV3Schema.model_validate(document)
+        ReviewerBatchResultSchemaV3.model_validate(document)
 
 
 @pytest.mark.parametrize(

@@ -214,7 +214,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
     message_id = aggregate.pop('message_id')
     artifact_path = aggregate.pop('artifact_path')
     assert isinstance(message_id, str)
-    assert artifact_path == str(run_directory / 'artifacts/review-batch-0001.md')
+    assert artifact_path == 'artifacts/review-batch-0001.md'
     assert aggregate == {
         'schema_version': 3,
         'run_id': str(run.id),
@@ -268,7 +268,7 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
         & finding_codes
     )
 
-    aggregate['artifact_path'] = str(run_directory / 'artifacts/unrelated.md')
+    aggregate['artifact_path'] = 'artifacts/unrelated.md'
     aggregate_path = run_directory / 'review-batches/000001.json'
     aggregate_path.write_text(json.dumps(aggregate), encoding='utf-8')
     mismatched_artifact = build_audit_document(
