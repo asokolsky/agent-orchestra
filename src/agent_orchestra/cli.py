@@ -85,6 +85,7 @@ from agent_orchestra.store import (
     UnreadableJob,
 )
 from agent_orchestra.worker import (
+    WorkerContext,
     resume_review,
     run_queued_review,
     run_queued_reviewer_set,
@@ -1447,33 +1448,37 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
         )
         if reviewer_plan is not None:
             result = run_queued_reviewer_set(
-                store=store,
+                context=WorkerContext(
+                    store=store,
+                    runs_directory=args.runs_directory,
+                    digest_worktree=_working_tree_digest,
+                    registry=args.runtime_registry,
+                ),
                 run=run,
                 objective=args.objective,
                 reviewer_plan=reviewer_plan,
                 developer_command=developer_command,
-                runs_directory=args.runs_directory,
                 developer_timeout_seconds=args.developer_timeout,
                 max_iterations=args.max_iterations,
-                digest_worktree=_working_tree_digest,
                 developer_identity=developer_identity,
-                registry=args.runtime_registry,
             )
         else:
             result = run_queued_review(
-                store=store,
+                context=WorkerContext(
+                    store=store,
+                    runs_directory=args.runs_directory,
+                    digest_worktree=_working_tree_digest,
+                    registry=args.runtime_registry,
+                ),
                 run=run,
                 objective=args.objective,
                 reviewer_command=reviewer_command,
                 developer_command=developer_command,
-                runs_directory=args.runs_directory,
                 timeout_seconds=args.timeout,
                 developer_timeout_seconds=args.developer_timeout,
                 max_iterations=args.max_iterations,
-                digest_worktree=_working_tree_digest,
                 reviewer_identity=reviewer_identity,
                 developer_identity=developer_identity,
-                registry=args.runtime_registry,
             )
     except (
         OSError,
@@ -1550,11 +1555,13 @@ def _resume(args: argparse.Namespace, store: JobStore) -> int:
         else:
             _require_external_database(args.database, run.worktree_path)
             result = resume_review(
-                store=store,
+                context=WorkerContext(
+                    store=store,
+                    runs_directory=args.runs_directory,
+                    digest_worktree=_working_tree_digest,
+                    registry=args.runtime_registry,
+                ),
                 run=run,
-                runs_directory=args.runs_directory,
-                digest_worktree=_working_tree_digest,
-                registry=args.runtime_registry,
             )
     except RunNotFoundError as error:
         _write_resume_document(
