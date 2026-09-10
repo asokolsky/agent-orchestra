@@ -18,6 +18,7 @@ from uuid import uuid4
 import pytest
 
 from agent_orchestra import cli, worker
+from agent_orchestra import evidence as evidence_module
 from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
 from agent_orchestra.audit import _canonical_evidence_type
@@ -27,7 +28,10 @@ from agent_orchestra.cli import (
     build_parser,
     main,
 )
-from agent_orchestra.evidence import resolve_evidence_path
+from agent_orchestra.evidence import (
+    WorkerError,
+    resolve_evidence_path,
+)
 from agent_orchestra.invocations import (
     InvocationEvidenceStore,
     InvocationIdentity,
@@ -41,7 +45,6 @@ from agent_orchestra.store import JobStore
 from agent_orchestra.worker import (
     ITERATION_LIMIT,
     NO_REMEDIATION_CHANGE,
-    WorkerError,
     resume_review,
     run_queued_review,
 )
@@ -3233,7 +3236,7 @@ def test_resume_writes_recovery_request_before_activating_developer(
         digest_worktree=_working_tree_digest,
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
-    original_write = worker._write_json_atomic
+    original_write = evidence_module.write_json_atomic
 
     def fail_recovery_request(
         path: Path, document: dict[str, object], evidence_type: Any
@@ -3245,7 +3248,7 @@ def test_resume_writes_recovery_request_before_activating_developer(
             raise OSError(message)
         original_write(path, document, evidence_type)
 
-    monkeypatch.setattr(worker, '_write_json_atomic', fail_recovery_request)
+    monkeypatch.setattr(worker, 'write_json_atomic', fail_recovery_request)
     assert main(resume_arguments(context)) == 2
 
     document = json.loads(capsys.readouterr().out)

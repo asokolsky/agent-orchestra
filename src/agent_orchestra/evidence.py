@@ -11,11 +11,17 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+from agent_orchestra.manifests import evidence_path
+from agent_orchestra.models import same_diff_digest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 HASH_CHUNK_SIZE = 1024 * 1024
 INTEGRITY_INDEX = '.integrity.json'
@@ -541,3 +547,181 @@ def _relative_evidence_path(job_directory: Path, path: Path) -> Path:
     except ValueError as error:
         message = 'evidence path escapes the selected job'
         raise EvidencePathError(message) from error
+
+
+NOT_OBJECT = 'reviewer response must be a JSON object'
+WORKTREE_CHANGED = 'worktree changed during read-only review'
+
+
+class WorkerError(RuntimeError):
+    """Raised when a queued run cannot complete its review step."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        """Create an error with an optional stable machine-readable code."""
+
+        super().__init__(message)
+        self.code = code
+
+
+def run_evidence_path(run_directory: Path, *parts: str) -> Path:
+    """Resolve one contained path beneath an established run directory."""
+
+    try:
+        return resolve_evidence_path(
+            evidence_root_for_job(run_directory), run_directory.name, *parts
+        )
+    except EvidencePathError as error:
+        raise WorkerError(str(error)) from error
+
+
+def manifest_evidence_path(
+    run_directory: Path, evidence_type: str, ordinal: int
+) -> Path:
+    """Resolve one manifest-rendered path through the run boundary."""
+
+    return run_evidence_path(
+        run_directory, *Path(evidence_path(evidence_type, ordinal=ordinal)).parts
+    )
+
+
+def contained_job_reference(
+    run_directory: Path, value: str | Path, error_message: str
+) -> Path:
+    """Resolve an evidence reference through the selected run boundary."""
+
+    candidate = Path(value)
+    try:
+        relative = candidate.relative_to(run_directory)
+        return run_evidence_path(run_directory, *relative.parts)
+    except (ValueError, WorkerError) as error:
+        raise WorkerError(error_message) from error
+
+
+def require_unchanged(actual: str | None, expected: str) -> None:
+    """Reject a review when its worktree digest changed during execution."""
+
+    if not same_diff_digest(actual, expected):
+        raise WorkerError(WORKTREE_CHANGED)
+
+
+def worktree_digest(
+    digest_worktree: Callable[[Path, str], str | None], worktree: Path, base_sha: str
+) -> str | None:
+    """Normalize filesystem and Git digest failures as worker errors."""
+
+    try:
+        return digest_worktree(worktree, base_sha)
+    except (OSError, RuntimeError) as error:
+        raise WorkerError(f'cannot compute worktree digest: {error}') from error
+
+
+def write_json_atomic(
+    path: Path, document: dict[str, Any], evidence_type: EvidenceType
+) -> None:
+    """Write one UTF-8 JSON document atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
+    try:
+        with temporary.open('x', encoding='utf-8') as file:
+            json.dump(document, file, indent=2)
+            file.write('\n')
+            file.flush()
+            os.fsync(file.fileno())
+        finalize_temporary_path(temporary, path, evidence_type)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_text_atomic(
+    path: Path, content: str, *, evidence_type: EvidenceType | None = None
+) -> None:
+    """Write one UTF-8 text artifact atomically."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
+    try:
+        with temporary.open('x', encoding='utf-8') as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        if evidence_type is not None:
+            finalize_temporary_path(temporary, path, evidence_type)
+        else:
+            temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def archive_unaccepted_response(
+    path: Path, destination: Path, evidence_type: EvidenceType
+) -> None:
+    """Preserve a partial response so a retry cannot consume stale output."""
+
+    if path.exists():
+        structural = {'messages', 'artifacts', 'logs', 'invocations'}
+        job_directory = (
+            destination.parent.parent
+            if destination.parent.name in structural
+            else destination.parent
+        )
+        JobEvidence.for_directory(job_directory).relocate_finalized(
+            path, destination, evidence_type
+        )
+
+
+def record_finalized_path(path: Path, evidence_type: EvidenceType) -> None:
+    """Record one finalized worker artifact in its owning job index."""
+
+    structural = {'messages', 'artifacts', 'logs', 'invocations', 'review-batches'}
+    job_directory = (
+        path.parent.parent if path.parent.name in structural else path.parent
+    )
+    JobEvidence.for_directory(job_directory).record_finalized(path, evidence_type)
+
+
+def finalize_temporary_path(
+    temporary: Path, path: Path, evidence_type: EvidenceType
+) -> None:
+    """Publish one worker file through the recoverable evidence protocol."""
+
+    structural = {'messages', 'artifacts', 'logs', 'invocations', 'review-batches'}
+    job_directory = (
+        path.parent.parent if path.parent.name in structural else path.parent
+    )
+    JobEvidence.for_directory(job_directory).finalize_write(
+        temporary, path, evidence_type
+    )
+
+
+def output_text(value: str | bytes | None) -> str:
+    """Normalize captured subprocess output for durable UTF-8 logs."""
+
+    if value is None:
+        return ''
+    return value.decode(errors='replace') if isinstance(value, bytes) else value
+
+
+def invocation_stem(sequence: int, role: str, attempt: int) -> str:
+    """Return the stable evidence stem for one invocation attempt."""
+
+    retry_suffix = '' if attempt == 1 else f'-attempt-{attempt:04d}'
+    return f'{sequence:06d}-{role}{retry_suffix}'
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    """Read a JSON object or raise a stable worker error."""
+
+    try:
+        document = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as error:
+        raise WorkerError(f'invalid reviewer response: {error}') from error
+    if not isinstance(document, dict):
+        raise WorkerError(NOT_OBJECT)
+    return document
+
+
+def reviewer_dispatch_path(run_directory: Path, relative: str) -> Path:
+    """Resolve one reviewer-owned relative path beneath the run directory."""
+
+    return run_evidence_path(run_directory, *Path(relative).parts)

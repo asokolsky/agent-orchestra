@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agent_orchestra.invocations import EffectiveModelStatus
+from agent_orchestra.invocations import EffectiveModelStatus, InvocationIdentity
+
+if TYPE_CHECKING:
+    from agent_orchestra.adapter.registry import RuntimeRegistry
 
 RUNTIME_METADATA_ENV = 'AGENT_ORCHESTRA_RUNTIME_METADATA_PATH'
 
@@ -106,3 +109,35 @@ def read_runtime_metadata(
         message = 'invalid runtime metadata values'
         raise RuntimeMetadataError(message)
     return tuple(models), EffectiveModelStatus(status)
+
+
+def exception_runtime_metadata(
+    error: BaseException,
+) -> tuple[tuple[str, ...], EffectiveModelStatus]:
+    """Return validated provenance preserved by a failed command adapter."""
+
+    models = getattr(error, 'effective_models', ())
+    status = getattr(error, 'effective_model_status', 'unavailable')
+    if (
+        isinstance(models, tuple)
+        and all(isinstance(model, str) and model for model in models)
+        and len(models) == len(set(models))
+        and status in EffectiveModelStatus.values()
+        and (status == EffectiveModelStatus.REPORTED) == bool(models)
+    ):
+        return tuple(models), EffectiveModelStatus(status)
+    return (), EffectiveModelStatus.UNAVAILABLE
+
+
+def runtime_metadata_path(
+    identity: InvocationIdentity,
+    path: Path,
+    registry: RuntimeRegistry,
+) -> Path | None:
+    """Return the sidecar path only for runtimes that report provenance."""
+
+    try:
+        runtime = registry.require(identity.runtime)
+    except ValueError:
+        return None
+    return path if runtime.reports_runtime_metadata else None

@@ -30,6 +30,7 @@ from agent_orchestra.attempt_documents import (
 from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import (
     EvidencePathError,
+    WorkerError,
     resolve_evidence_path,
 )
 from agent_orchestra.invocations import (
@@ -81,7 +82,6 @@ from agent_orchestra.store import (
     UnreadableJob,
 )
 from agent_orchestra.worker import (
-    WorkerError,
     resume_review,
     run_queued_review,
     run_queued_reviewer_set,

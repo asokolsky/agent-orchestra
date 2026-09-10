@@ -21,6 +21,7 @@ from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
     JobEvidence,
+    WorkerError,
     evidence_root_for_job,
     resolve_evidence_path,
 )
@@ -752,3 +753,16 @@ class InvocationEvidenceStore:
                 ).record_finalized(
                     expected, cast('EvidenceType', kind), replace_existing=False
                 )
+
+
+def prepare_run_evidence_directory(runs_directory: Path, run_id: str) -> Path:
+    """Resolve one run directory while preserving the worker error contract."""
+
+    try:
+        path = resolve_evidence_path(runs_directory, run_id)
+        path.mkdir(parents=True, exist_ok=True)
+        JobEvidence(runs_directory, run_id).recover_index()
+        InvocationEvidenceStore(path).recover_completed(run_id)
+        return path
+    except EvidencePathError as error:
+        raise WorkerError(str(error)) from error
