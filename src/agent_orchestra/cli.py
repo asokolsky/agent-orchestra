@@ -74,7 +74,7 @@ from agent_orchestra.reviewer_plan import (
     build_reviewer_execution_plan,
     select_reviewer_set,
 )
-from agent_orchestra.schemas import ReviewerBatchResultSchema, SchemaValidationError
+from agent_orchestra.schemas import REVIEWER_BATCH_RESULT_ADAPTER, SchemaValidationError
 from agent_orchestra.settings import Settings, SettingsError, load_settings
 from agent_orchestra.skill_install import SkillInstallError, install_skills
 from agent_orchestra.store import (
@@ -96,7 +96,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 17
+CLI_SCHEMA_VERSION = 18
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -885,14 +885,16 @@ def _review_batch_documents(
                 raise InvocationEvidenceError(
                     f'unexpected review batch evidence path: {relative}'
                 )
-            parsed = ReviewerBatchResultSchema.model_validate_json(
+            parsed = REVIEWER_BATCH_RESULT_ADAPTER.validate_json(
                 path.read_text(encoding='utf-8')
             )
             if parsed.run_id != job_id or parsed.iteration != len(documents) + 1:
                 raise InvocationEvidenceError(
                     f'review batch evidence does not match job: {relative}'
                 )
-            document = parsed.model_dump(mode='json', exclude={'run_id'})
+            document = parsed.model_dump(
+                mode='json', exclude={'run_id'}, exclude_none=True
+            )
             document['job_id'] = parsed.run_id
             document['path'] = relative
             documents.append(document)

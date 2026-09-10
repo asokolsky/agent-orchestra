@@ -108,7 +108,7 @@ from agent_orchestra.schemas import (
     DeveloperHandoffMessageSchema,
     ExecutionRecord,
     ExecutionRecordSchema,
-    ReviewerBatchResultSchema,
+    ReviewerBatchResultV2Schema,
     ReviewerSetExecutionRecordSchema,
 )
 from agent_orchestra.workflow import transition
@@ -3105,9 +3105,27 @@ def _finish_reviewer_batch(
         raise WorkerError(
             REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
         )
-    batch_result = ReviewerBatchResultSchema.model_validate(
+    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    aggregate_findings: list[dict[str, object]] = []
+    for dispatch, result in zip(dispatches, results, strict=True):
+        if result.decision.outcome != 'changes_requested':
+            continue
+        response = read_json_object(
+            reviewer_dispatch_path(run_directory, dispatch.paths.result)
+        )
+        for finding in response['payload']['findings']:
+            source_finding_id = str(finding['finding_id'])
+            aggregate_findings.append(
+                {
+                    **finding,
+                    'finding_id': f'{dispatch.reviewer_id}:{source_finding_id}',
+                    'reviewer_id': dispatch.reviewer_id,
+                    'source_finding_id': source_finding_id,
+                }
+            )
+    batch_result = ReviewerBatchResultV2Schema.model_validate(
         {
-            'schema_version': 1,
+            'schema_version': 2,
             'run_id': str(run.id),
             'iteration': reviewing.iteration,
             'reviewer_set_id': reviewer_plan.reviewer_set_id,
@@ -3125,9 +3143,9 @@ def _finish_reviewer_batch(
             'changes_requested_by': list(decision.changes_requested_by),
             'blocked_by': list(decision.blocked_by),
             'incomplete_reviewers': [],
+            'findings': aggregate_findings,
         }
     )
-    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     write_json_atomic(
         run_evidence_path(
             run_directory,

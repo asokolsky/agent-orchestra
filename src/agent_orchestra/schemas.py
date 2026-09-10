@@ -182,10 +182,16 @@ class ReviewerBatchMemberResultSchema(StrictSchema):
         return self
 
 
-class ReviewerBatchResultSchema(StrictSchema):
-    """Canonical aggregate decision for one immutable reviewer batch."""
+class ReviewerBatchFindingSchema(ReviewFindingSchema):
+    """Preserve one source finding and its reviewer in an aggregate batch."""
 
-    schema_version: Literal[1]
+    reviewer_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
+    source_finding_id: str
+
+
+class ReviewerBatchResultBaseSchema(StrictSchema):
+    """Fields shared by versioned aggregate reviewer-batch decisions."""
+
     run_id: str
     iteration: int = Field(gt=0)
     reviewer_set_id: str = Field(pattern=REVIEWER_ID_PATTERN.pattern)
@@ -198,7 +204,7 @@ class ReviewerBatchResultSchema(StrictSchema):
     incomplete_reviewers: list[str]
 
     @model_validator(mode='after')
-    def validate_rationale(self) -> ReviewerBatchResultSchema:
+    def validate_rationale(self) -> ReviewerBatchResultBaseSchema:
         """Require ordered unique members and rationale derived from their outcomes."""
 
         reviewer_ids = [reviewer.reviewer_id for reviewer in self.reviewers]
@@ -234,6 +240,46 @@ class ReviewerBatchResultSchema(StrictSchema):
             message = 'review batch result has inconsistent verdict'
             raise ValueError(message)
         return self
+
+
+class ReviewerBatchResultSchema(ReviewerBatchResultBaseSchema):
+    """Legacy schema-1 aggregate decision for one immutable reviewer batch."""
+
+    schema_version: Literal[1]
+
+
+class ReviewerBatchResultV2Schema(ReviewerBatchResultBaseSchema):
+    """Schema-2 aggregate decision with reviewer-qualified findings."""
+
+    schema_version: Literal[2]
+    findings: list[ReviewerBatchFindingSchema]
+
+    @model_validator(mode='after')
+    def validate_findings(self) -> ReviewerBatchResultV2Schema:
+        """Require unique findings owned by reviewers that requested changes."""
+
+        finding_ids = [finding.finding_id for finding in self.findings]
+        if len(finding_ids) != len(set(finding_ids)):
+            message = 'review batch result finding IDs must be unique'
+            raise ValueError(message)
+        for finding in self.findings:
+            if (
+                finding.reviewer_id not in self.changes_requested_by
+                or finding.finding_id
+                != f'{finding.reviewer_id}:{finding.source_finding_id}'
+            ):
+                message = 'review batch result contains an uncorrelated finding'
+                raise ValueError(message)
+        return self
+
+
+ReviewerBatchResult = Annotated[
+    ReviewerBatchResultSchema | ReviewerBatchResultV2Schema,
+    Field(discriminator='schema_version'),
+]
+REVIEWER_BATCH_RESULT_ADAPTER: TypeAdapter[ReviewerBatchResult] = TypeAdapter(
+    ReviewerBatchResult
+)
 
 
 class IssueReviewFindingSchema(StrictSchema):
