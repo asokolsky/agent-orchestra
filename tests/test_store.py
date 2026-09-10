@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agent_orchestra.models import IssueJob, Run, RunState, ScenarioType
-from agent_orchestra.store import ConcurrentUpdateError, RunNotFoundError, RunStore
+from agent_orchestra.store import ConcurrentUpdateError, JobStore, RunNotFoundError
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 def test_run_round_trip(tmp_path: Path) -> None:
     """Persist and load all initial run attributes."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = replace(
         Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
@@ -32,7 +32,7 @@ def test_run_round_trip(tmp_path: Path) -> None:
 def test_run_round_trip_preserves_superseded_lineage(tmp_path: Path) -> None:
     """Persist the run ID replaced by a newly captured run."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(
         tmp_path,
@@ -65,7 +65,7 @@ def test_initialize_adds_lineage_column_to_legacy_database(tmp_path: Path) -> No
             """
         )
 
-    RunStore(database).initialize()
+    JobStore(database).initialize()
 
     with sqlite3.connect(database) as connection:
         columns = {row[1] for row in connection.execute('PRAGMA table_info(runs)')}
@@ -109,7 +109,7 @@ def test_read_legacy_run_without_lineage_column(tmp_path: Path) -> None:
             ),
         )
 
-    loaded = RunStore(database).get(run.id)
+    loaded = JobStore(database).get(run.id)
 
     assert loaded.supersedes_run_id is None
     assert loaded.id == run.id
@@ -118,7 +118,7 @@ def test_read_legacy_run_without_lineage_column(tmp_path: Path) -> None:
 def test_update_records_new_state(tmp_path: Path) -> None:
     """Persist a valid state transition."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -139,7 +139,7 @@ def test_issue_job_records_ordered_transitions_with_source_digest(
 ) -> None:
     """Record issue-job creation and updates with immutable scope correlation."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     job = IssueJob.create(
         provider='github',
@@ -180,7 +180,7 @@ def test_list_transitions_does_not_create_an_absent_database(tmp_path: Path) -> 
 
     database = tmp_path / 'state.db'
 
-    assert RunStore(database).list_transitions('missing-job') == ()
+    assert JobStore(database).list_transitions('missing-job') == ()
     assert not database.exists()
 
 
@@ -194,7 +194,7 @@ def test_list_transitions_handles_an_absent_table_without_mutation(
         connection.execute('CREATE TABLE placeholder (id INTEGER PRIMARY KEY)')
     before = database.read_bytes()
 
-    assert RunStore(database).list_transitions('missing-job') == ()
+    assert JobStore(database).list_transitions('missing-job') == ()
     assert database.read_bytes() == before
 
 
@@ -221,7 +221,7 @@ def test_list_transitions_reads_run_only_schema_without_migrating(
             (1, run.id, None, run.state, run.created_at.isoformat()),
         )
 
-    history = RunStore(database).list_transitions(run.id)
+    history = JobStore(database).list_transitions(run.id)
 
     assert len(history) == 1
     assert history[0].scenario is ScenarioType.LOCAL_CHANGES
@@ -237,7 +237,7 @@ def test_list_transitions_reads_run_only_schema_without_migrating(
 def test_source_code_transition_allows_an_unknown_digest(tmp_path: Path) -> None:
     """Preserve an explicitly unknown run digest in transition history."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = replace(
         Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
@@ -276,7 +276,7 @@ def test_initialize_migrates_run_transitions_without_inventing_digest(
         )
         connection.execute(
             'INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            RunStore._values(run),
+            JobStore._values(run),
         )
         connection.execute(
             'INSERT INTO transitions VALUES (?, ?, ?, ?, ?)',
@@ -287,7 +287,7 @@ def test_initialize_migrates_run_transitions_without_inventing_digest(
             (8, 'orphan-run', None, run.state, run.created_at.isoformat()),
         )
 
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
 
     transition_history = store.list_transitions(run.id)
@@ -311,7 +311,7 @@ def test_initialize_resumes_an_interrupted_transition_migration(
 
     database = tmp_path / 'state.db'
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     store.add(run)
     with sqlite3.connect(database) as connection:
@@ -342,7 +342,7 @@ def test_initialize_renames_legacy_awaiting_review_state(tmp_path: Path) -> None
     """Keep databases created before the reviewing state rename readable."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -381,7 +381,7 @@ def test_read_and_update_accept_legacy_awaiting_review_state(tmp_path: Path) -> 
     """Use an in-progress legacy run without requiring initialization."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = replace(
         Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
@@ -406,7 +406,7 @@ def test_transition_reads_accept_legacy_awaiting_review_state(tmp_path: Path) ->
     """Preserve legacy normalization for both transition state columns."""
 
     database = tmp_path / 'state.db'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -428,7 +428,7 @@ def test_transition_reads_accept_legacy_awaiting_review_state(tmp_path: Path) ->
 def test_update_detects_stale_state(tmp_path: Path) -> None:
     """Reject an update whose expected state is no longer current."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -442,7 +442,7 @@ def test_update_detects_stale_state(tmp_path: Path) -> None:
 def test_update_distinguishes_missing_run(tmp_path: Path) -> None:
     """Report a missing run separately from a stale state."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     updated = transition(run, RunState.PREPARING)
@@ -454,7 +454,7 @@ def test_update_distinguishes_missing_run(tmp_path: Path) -> None:
 def test_update_does_not_rewrite_creation_time(tmp_path: Path) -> None:
     """Keep persisted creation history immutable during updates."""
 
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)
@@ -485,7 +485,7 @@ def test_public_operations_close_connections(
         return connection
 
     monkeypatch.setattr(sqlite3, 'connect', tracking_connect)
-    store = RunStore(tmp_path / 'state.db')
+    store = JobStore(tmp_path / 'state.db')
     store.initialize()
     run = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(run)

@@ -32,7 +32,7 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def create_run_id(created_at: datetime) -> str:
+def create_job_id(created_at: datetime) -> str:
     """Create a repo-independent identifier from UTC time and random entropy."""
 
     timestamp = created_at.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')
@@ -174,7 +174,7 @@ class Run:
 
         created_at = utc_now()
         return cls(
-            id=create_run_id(created_at),
+            id=create_job_id(created_at),
             scenario=ScenarioType.LOCAL_CHANGES,
             repo_path=repo_path.resolve(),
             worktree_path=worktree_path.resolve(),
@@ -227,7 +227,7 @@ class IssueJob:
 
         created_at = utc_now()
         return cls(
-            id=create_run_id(created_at),
+            id=create_job_id(created_at),
             state=RunState.QUEUED,
             provider=provider,
             host=host,

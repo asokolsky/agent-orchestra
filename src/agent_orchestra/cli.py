@@ -75,9 +75,9 @@ from agent_orchestra.settings import Settings, SettingsError, load_settings
 from agent_orchestra.skill_install import SkillInstallError, install_skills
 from agent_orchestra.store import (
     ConcurrentUpdateError,
+    JobStore,
     PersistedEnumError,
     RunNotFoundError,
-    RunStore,
     UnreadableJob,
 )
 from agent_orchestra.worker import (
@@ -452,7 +452,7 @@ def _capture_local_run(repo: Path, base: str) -> Run | None:
 
 
 def _enqueue_local(  # noqa: PLR0911
-    args: argparse.Namespace, store: RunStore
+    args: argparse.Namespace, store: JobStore
 ) -> int:
     """Enqueue local changes described by parsed CLI arguments."""
 
@@ -503,7 +503,7 @@ def _enqueue_local(  # noqa: PLR0911
     return 0
 
 
-def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
+def _enqueue_locals(args: argparse.Namespace, store: JobStore) -> int:
     """Enqueue changed child repos and write one versioned JSON result."""
 
     directory = args.directory.expanduser().resolve()
@@ -575,7 +575,7 @@ def _enqueue_locals(args: argparse.Namespace, store: RunStore) -> int:
     return 2 if not runs and failures else 0
 
 
-def _enqueue_issue(args: argparse.Namespace, store: RunStore) -> int:
+def _enqueue_issue(args: argparse.Namespace, store: JobStore) -> int:
     """Capture one immutable provider issue revision as a queued job."""
 
     try:
@@ -606,7 +606,7 @@ def _enqueue_issue(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
-def _review_issue(args: argparse.Namespace, store: RunStore) -> int:
+def _review_issue(args: argparse.Namespace, store: JobStore) -> int:
     """Run one read-only issue-readiness review."""
 
     if args.timeout <= 0:
@@ -639,7 +639,7 @@ def _review_issue(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
-def _post_issue_feedback(args: argparse.Namespace, store: RunStore) -> int:
+def _post_issue_feedback(args: argparse.Namespace, store: JobStore) -> int:
     """Publish one reviewed feedback artifact after explicit authorization."""
 
     if not args.authorize:
@@ -870,7 +870,7 @@ def _unreadable_job_summary(job: UnreadableJob) -> dict[str, object]:
     }
 
 
-def _jobs(args: argparse.Namespace, store: RunStore) -> int:
+def _jobs(args: argparse.Namespace, store: JobStore) -> int:
     """List stored jobs without reading mutable workflow state."""
 
     known_states = {state.value: state for state in RunState}
@@ -937,7 +937,7 @@ def _jobs(args: argparse.Namespace, store: RunStore) -> int:
     return 2 if unreadable else 0
 
 
-def _cancel(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
+def _cancel(args: argparse.Namespace, store: JobStore) -> int:  # noqa: PLR0911
     """Cancel one source-code job whose recorded worktree is unrunnable."""
 
     if not args.database.is_file():
@@ -999,7 +999,7 @@ def _cancel(args: argparse.Namespace, store: RunStore) -> int:  # noqa: PLR0911
 
 def _selected_job(
     args: argparse.Namespace,
-    store: RunStore,
+    store: JobStore,
     *,
     include_stream_content: bool,
 ) -> tuple[Run | IssueJob, list[dict[str, object]]] | None:
@@ -1039,7 +1039,7 @@ def _selected_job(
     return run, tasks
 
 
-def _job(args: argparse.Namespace, store: RunStore) -> int:
+def _job(args: argparse.Namespace, store: JobStore) -> int:
     """Show one job and all currently non-terminal tasks."""
 
     if args.database.is_file():
@@ -1113,7 +1113,7 @@ def _job(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
-def _tasks(args: argparse.Namespace, store: RunStore) -> int:
+def _tasks(args: argparse.Namespace, store: JobStore) -> int:
     """Show the complete durable task history for one job."""
 
     selected = _selected_job(args, store, include_stream_content=True)
@@ -1142,7 +1142,7 @@ def _tasks(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
-def _task(args: argparse.Namespace, store: RunStore) -> int:
+def _task(args: argparse.Namespace, store: JobStore) -> int:
     """Show one task addressed by its globally unique durable identifier."""
 
     separator = args.task_id.rfind(':')
@@ -1176,7 +1176,7 @@ def _task(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
-def _audit(args: argparse.Namespace, store: RunStore) -> int:
+def _audit(args: argparse.Namespace, store: JobStore) -> int:
     """Reconstruct and optionally verify one job's durable local history."""
 
     if not args.database.is_file():
@@ -1212,7 +1212,7 @@ def _audit(args: argparse.Namespace, store: RunStore) -> int:
     return 0
 
 
-def _run(args: argparse.Namespace, store: RunStore) -> int:
+def _run(args: argparse.Namespace, store: JobStore) -> int:
     """Consume one queued local run through its bounded agent loop."""
 
     if not args.database.is_file():
@@ -1383,7 +1383,7 @@ def _write_resume_document(
     )
 
 
-def _resume(args: argparse.Namespace, store: RunStore) -> int:
+def _resume(args: argparse.Namespace, store: JobStore) -> int:
     """Resume a recoverable run using its durable execution context."""
 
     if not args.database.is_file():
@@ -1544,7 +1544,7 @@ def _config_show(
     return 0
 
 
-def _prune(args: argparse.Namespace, store: RunStore, settings: Settings) -> int:
+def _prune(args: argparse.Namespace, store: JobStore, settings: Settings) -> int:
     """Preview or apply one explicit persistent-evidence retention plan."""
 
     try:
@@ -1620,7 +1620,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
     args = build_parser(settings).parse_args(arguments)
     if args.command in {'run', 'review-issue'}:
         args.reviewer_command = reviewer_command
-    store = RunStore(args.database)
+    store = JobStore(args.database)
 
     if args.command == 'init':
         store.initialize()

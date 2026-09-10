@@ -18,7 +18,7 @@ from agent_orchestra.evidence import (
     resolve_evidence_path,
 )
 from agent_orchestra.models import IssueJob, Run, RunState
-from agent_orchestra.store import RunStore, UnreadableJob
+from agent_orchestra.store import JobStore, UnreadableJob
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -194,7 +194,7 @@ def _evidence_directories(
     return tuple(sorted(found)), tuple(sorted(set(invalid)))
 
 
-def _record_counts(store: RunStore, job: Run | IssueJob) -> dict[str, int]:
+def _record_counts(store: JobStore, job: Run | IssueJob) -> dict[str, int]:
     """Return database rows affected by deleting one job."""
 
     return {
@@ -244,7 +244,7 @@ def _validate_evidence_identity(path: Path, job_id: str) -> None:
 
 
 def build_prune_plan(
-    store: RunStore,
+    store: JobStore,
     database: Path,
     runs_directory: Path,
     *,

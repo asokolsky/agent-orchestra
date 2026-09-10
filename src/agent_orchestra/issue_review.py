@@ -55,7 +55,7 @@ from agent_orchestra.schemas import (
 )
 
 if TYPE_CHECKING:
-    from agent_orchestra.store import RunStore
+    from agent_orchestra.store import JobStore
 
 
 class IssueReviewError(RuntimeError):
@@ -367,7 +367,7 @@ def _finish_invocation(
 
 def run_issue_review(
     job: IssueJob,
-    store: RunStore,
+    store: JobStore,
     runs_directory: Path,
     *,
     objective: str,
@@ -645,7 +645,7 @@ def run_issue_review(
 
 def resume_issue_review(
     job: IssueJob,
-    store: RunStore,
+    store: JobStore,
     runs_directory: Path,
     *,
     timeout: int,
@@ -698,7 +698,7 @@ def resume_issue_review(
 
 
 def _publish_issue_feedback_locked(
-    job: IssueJob, store: RunStore, runs_directory: Path
+    job: IssueJob, store: JobStore, runs_directory: Path
 ) -> ProviderAction:
     """Publish accepted feedback while holding its per-iteration lock."""
 
@@ -752,7 +752,7 @@ def _publish_issue_feedback_locked(
 
 
 def publish_issue_feedback(
-    job: IssueJob, store: RunStore, runs_directory: Path
+    job: IssueJob, store: JobStore, runs_directory: Path
 ) -> ProviderAction:
     """Serialize and publish accepted feedback once for an issue iteration."""
 

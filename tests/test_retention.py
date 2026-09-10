@@ -19,7 +19,7 @@ from agent_orchestra.retention import (
     apply_prune_plan,
     build_prune_plan,
 )
-from agent_orchestra.store import RunNotFoundError, RunStore
+from agent_orchestra.store import JobStore, RunNotFoundError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,7 +30,7 @@ def _terminal_source_job(tmp_path: Path) -> tuple[Path, Path, Run]:
 
     database = tmp_path / 'state.db'
     runs = tmp_path / 'runs'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     job = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(job)
@@ -50,7 +50,7 @@ def test_prune_defaults_to_dry_run_and_skips_active_jobs(
     """Select only old explicitly enumerated terminal states without mutation."""
 
     database, runs, failed = _terminal_source_job(tmp_path)
-    store = RunStore(database)
+    store = JobStore(database)
     active = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest')
     store.add(active)
     before = resolve_evidence_path(runs, str(failed.id), 'failure.json').read_bytes()
@@ -130,7 +130,7 @@ def test_orphan_apply_refuses_an_unrelated_database(tmp_path: Path) -> None:
     """Refuse orphan deletion when every evidence directory is unmatched."""
 
     database = tmp_path / 'state.db'
-    RunStore(database).initialize()
+    JobStore(database).initialize()
     runs = tmp_path / 'runs'
     orphan = resolve_evidence_path(runs, '20260908T000000Z-deadbeef')
     orphan.mkdir(parents=True)
@@ -138,7 +138,7 @@ def test_orphan_apply_refuses_an_unrelated_database(tmp_path: Path) -> None:
 
     with pytest.raises(RetentionError, match='orphan pruning refused'):
         build_prune_plan(
-            RunStore(database),
+            JobStore(database),
             database,
             runs,
             older_than_days=30,
@@ -241,7 +241,7 @@ def test_database_cleanup_is_explicit_and_transactional(
     capsys.readouterr()
 
     with pytest.raises(RunNotFoundError, match=str(failed.id)):
-        RunStore(database).get(str(failed.id))
+        JobStore(database).get(str(failed.id))
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             'SELECT COUNT(*) FROM transitions WHERE job_id = ?', (str(failed.id),)
@@ -253,7 +253,7 @@ def test_prune_uses_issue_review_terminal_transition_age(tmp_path: Path) -> None
 
     database = tmp_path / 'state.db'
     runs = tmp_path / 'runs'
-    store = RunStore(database)
+    store = JobStore(database)
     store.initialize()
     job = IssueJob.create(
         provider='github',
@@ -297,7 +297,7 @@ def test_interrupted_evidence_cleanup_resumes_to_completed_marker(
 
     database, runs, failed = _terminal_source_job(tmp_path)
     plan = build_prune_plan(
-        RunStore(database),
+        JobStore(database),
         database,
         runs,
         older_than_days=30,
@@ -338,7 +338,7 @@ def test_interrupted_evidence_cleanup_resumes_to_completed_marker(
     assert audit['result'] == 'incomplete'
 
     retry = build_prune_plan(
-        RunStore(database),
+        JobStore(database),
         database,
         runs,
         older_than_days=30,
@@ -353,7 +353,7 @@ def test_apply_refuses_job_that_changed_state_after_preview(tmp_path: Path) -> N
     """Preserve evidence when current workflow state no longer matches the plan."""
 
     database, runs, failed = _terminal_source_job(tmp_path)
-    store = RunStore(database)
+    store = JobStore(database)
     plan = build_prune_plan(
         store,
         database,
@@ -379,7 +379,7 @@ def test_failed_database_cleanup_can_be_retried(
 
     database, runs, failed = _terminal_source_job(tmp_path)
     plan = build_prune_plan(
-        RunStore(database),
+        JobStore(database),
         database,
         runs,
         older_than_days=30,
@@ -403,7 +403,7 @@ def test_failed_database_cleanup_can_be_retried(
     assert json.loads(marker.read_text())['status'] == 'completed'
 
     retry = build_prune_plan(
-        RunStore(database),
+        JobStore(database),
         database,
         runs,
         older_than_days=30,
@@ -413,7 +413,7 @@ def test_failed_database_cleanup_can_be_retried(
     assert retry.selected[0].action == 'delete_database_records'
     assert apply_prune_plan(retry)[0]['status'] == 'applied'
     with pytest.raises(RunNotFoundError):
-        RunStore(database).get(str(failed.id))
+        JobStore(database).get(str(failed.id))
     assert {path.name for path in marker.parent.iterdir()} == {'.retention.json'}
 
 
@@ -424,7 +424,7 @@ def test_completed_expiry_reports_unexpected_new_evidence(
 
     database, runs, failed = _terminal_source_job(tmp_path)
     plan = build_prune_plan(
-        RunStore(database),
+        JobStore(database),
         database,
         runs,
         older_than_days=30,
@@ -497,7 +497,7 @@ def test_stored_job_with_unsafe_evidence_path_is_skipped_not_fatal(
     """Skip a stored job whose own evidence path cannot be safely resolved."""
 
     database, runs, failed = _terminal_source_job(tmp_path)
-    store = RunStore(database)
+    store = JobStore(database)
     old = datetime.now(UTC) - timedelta(days=100)
     unsafe = replace(
         Run.create_local(tmp_path, tmp_path, 'base', 'head', 'digest'),
