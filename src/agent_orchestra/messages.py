@@ -604,29 +604,53 @@ def read_reviewer_message_batch(
             raise WorkerError(DUPLICATE_MESSAGE_ID)
         identities.add(message_id)
         shared_documents.append((path, document))
-    if len(shared_documents) != 2 * (len(expected_rounds) - 1):
-        raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
-    for index in range(len(expected_rounds) - 1):
-        prior_request_sequence, prior_result_sequence, iteration, scope = (
-            expected_rounds[index]
+    consumed_shared = 0
+    for index, round_metadata in enumerate(expected_rounds):
+        prior_request_sequence, prior_result_sequence, iteration, scope = round_metadata
+        next_round = (
+            expected_rounds[index + 1] if index + 1 < len(expected_rounds) else None
         )
-        next_request_sequence, _, next_iteration, _ = expected_rounds[index + 1]
-        _remediation_path, remediation = shared_documents[index * 2]
-        handoff_path, handoff = shared_documents[index * 2 + 1]
-        if (
-            prior_request_sequence + 1 != prior_result_sequence
-            or remediation['message_type'] != 'remediation_request'
-            or remediation['sequence'] != prior_result_sequence + 1
-            or remediation['iteration'] != iteration
-            or remediation['scope'] != scope
-            or handoff['message_type'] != 'developer_handoff'
-            or handoff['sequence'] != remediation['sequence'] + 1
-            or handoff['iteration'] != iteration
-            or handoff['scope'] != scope
-            or handoff['in_reply_to'] != remediation['message_id']
-            or next_request_sequence != handoff['sequence'] + 1
-            or next_iteration != iteration + 1
+        next_request_sequence = next_round[0] if next_round is not None else None
+        bridge = [
+            entry
+            for entry in shared_documents
+            if entry[1]['sequence'] > prior_result_sequence
+            and (
+                next_request_sequence is None
+                or entry[1]['sequence'] < next_request_sequence
+            )
+        ]
+        if prior_request_sequence + 1 != prior_result_sequence or len(bridge) % 2:
+            raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
+        if next_round is not None and not bridge:
+            raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
+        expected_sequence = prior_result_sequence + 1
+        remediation_parent: str | None = None
+        for bridge_index in range(0, len(bridge), 2):
+            _remediation_path, remediation = bridge[bridge_index]
+            handoff_path, handoff = bridge[bridge_index + 1]
+            if remediation_parent is None:
+                remediation_parent = remediation['in_reply_to']
+            if (
+                remediation['message_type'] != 'remediation_request'
+                or remediation['sequence'] != expected_sequence
+                or remediation['iteration'] != iteration
+                or remediation['scope'] != scope
+                or remediation['in_reply_to'] != remediation_parent
+                or handoff['message_type'] != 'developer_handoff'
+                or handoff['sequence'] != remediation['sequence'] + 1
+                or handoff['iteration'] != iteration
+                or handoff['scope'] != scope
+                or handoff['in_reply_to'] != remediation['message_id']
+            ):
+                raise WorkerError(f'invalid message correlation: {handoff_path.name}')
+            expected_sequence = handoff['sequence'] + 1
+            consumed_shared += 2
+        if next_round is not None and (
+            next_request_sequence != expected_sequence or next_round[2] != iteration + 1
         ):
-            raise WorkerError(f'invalid message correlation: {handoff_path.name}')
+            raise WorkerError(f'invalid message correlation: {bridge[-1][0].name}')
+    if consumed_shared != len(shared_documents):
+        raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
     documents.extend(shared_documents)
     return sorted(documents, key=lambda item: item[0].name)

@@ -33,6 +33,7 @@ from agent_orchestra.evidence import (
     RUN_NOT_RESUMABLE_CODE,
     WorkerError,
     archive_unaccepted_response,
+    contained_job_reference,
     finalize_temporary_path,
     manifest_evidence_path,
     read_json_object,
@@ -159,6 +160,10 @@ def _developer_disagreement_is_pending(run_directory: Path, run: Run) -> bool:
     handoff_value = marker.get('developer_handoff_path')
     handoff_path = Path(handoff_value) if isinstance(handoff_value, str) else Path()
     reason = marker.get('reason')
+    try:
+        contained_job_reference(run_directory, handoff_path, invalid)
+    except WorkerError as error:
+        raise WorkerError(invalid) from error
     if (
         marker.get('run_id') != str(run.id)
         or marker.get('state') != str(RunState.CHANGES_REQUESTED)

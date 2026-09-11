@@ -869,12 +869,21 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
         )
     assert reviewer_calls == 2
     if first_outcome == 'disagreement':
-        marker = json.loads(
-            (next((tmp_path / 'runs').rglob('decision-required.json'))).read_text(
-                encoding='utf-8'
-            )
-        )
+        marker_path = next((tmp_path / 'runs').rglob('decision-required.json'))
+        marker = json.loads(marker_path.read_text(encoding='utf-8'))
         handoff_path = Path(marker['developer_handoff_path'])
+        outside_path = tmp_path / 'outside-handoff.json'
+        outside_path.write_text(
+            handoff_path.read_text(encoding='utf-8'), encoding='utf-8'
+        )
+        marker['developer_handoff_path'] = str(outside_path)
+        marker_path.write_text(json.dumps(marker), encoding='utf-8')
+        with pytest.raises(
+            WorkerError, match='developer disagreement evidence is miscorrelated'
+        ):
+            resume_review(context=context, run=recoverable)
+        marker['developer_handoff_path'] = str(handoff_path)
+        marker_path.write_text(json.dumps(marker), encoding='utf-8')
         handoff = json.loads(handoff_path.read_text(encoding='utf-8'))
         dispositions = handoff['payload']['dispositions']
         handoff['payload']['dispositions'] = dispositions[:-1]
@@ -923,6 +932,15 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
     assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
     assert reviewer_calls == 4
     assert developer_calls == (1 if first_outcome == 'crash_window' else 2)
+    if first_outcome == 'blocked':
+        audit = build_audit_document(
+            result,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert audit['result'] == 'verified', audit['findings']
 
 
 def test_reviewer_set_mutation_fails_terminally(
