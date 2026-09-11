@@ -76,7 +76,8 @@ same interface.
 ## State transition history
 
 One ordered transition table records state changes for both source-code and
-issue-review jobs. Each row carries the opaque job ID, scenario, prior and next
+issue-review [jobs](concepts.md#jobs-tasks-and-attempts). Each row carries the
+opaque job ID, scenario, prior and next
 state, occurrence time, and the diff or source digest current at that
 transition. Job creation records an initial transition with no prior state;
 every later row is inserted in the same transaction as its successful
@@ -91,8 +92,9 @@ API that neither initializes nor changes the database.
 
 ## Evidence paths and integrity
 
-All paths beneath the configured runs directory are resolved through one
-job-scoped resolver. It rejects absolute or multi-component path segments,
+All paths beneath the configured runs directory hold a job's
+[canonical messages and artifacts](concepts.md#canonical-messages-and-artifacts),
+and are resolved through one job-scoped resolver. It rejects absolute or multi-component path segments,
 traversal, mismatched job identifiers, and symlinks in any existing component.
 The separate workflow check that keeps the runs directory outside the reviewed
 worktree remains authoritative at that boundary.
@@ -335,8 +337,9 @@ UUID-based runs remain readable.
 
 ## Packaged knowledge manifests
 
-Volatile provider, runtime-adapter, and canonical evidence naming knowledge is
-stored as TOML under `agent_orchestra/manifest`. Every manifest has this
+Volatile provider, [runtime](concepts.md#runtimes)-[adapter](concepts.md#adapters),
+and canonical evidence naming knowledge is stored as TOML under
+`agent_orchestra/manifest`. Every manifest has this
 required header:
 
 | Field | Type | Meaning |
@@ -465,8 +468,9 @@ directory at each call site.
 
 ## Job and task output
 
-CLI output uses the public `job` -> `task` -> `attempt` hierarchy, introduced in
-schema version 10. The `jobs`, `job`, `tasks`, and `task` commands are separate
+CLI output uses the public [`job` -> `task` -> `attempt`
+hierarchy](concepts.md#jobs-tasks-and-attempts), introduced in schema version
+10. The `jobs`, `job`, `tasks`, and `task` commands are separate
 read-only views. `job.current` is always an array and contains only pending or
 running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
@@ -689,7 +693,8 @@ declared schema version and treat job IDs as opaque strings.
 
 ## Issue-review source and messages
 
-Issue review uses contracts distinct from diff-scoped code review. A captured
+Issue review is the second [job](concepts.md#jobs-tasks-and-attempts) scenario,
+and uses contracts distinct from diff-scoped code review. A captured
 `issue.json` schema version 1 contains provider, host, canonical URL, namespace,
 project, provider issue number, title, body, author, labels, state, provider
 timestamps, and `source_digest`. The digest is canonical JSON SHA-256 over the
@@ -728,8 +733,9 @@ comment or note when a retry follows an interrupted local persistence step.
 
 ## Message representation
 
-Agent-orchestra messages are versioned JSON documents encoded as UTF-8. JSON is
-the canonical machine contract for assignments, handoffs, review feedback,
+Agent-orchestra [messages](concepts.md#canonical-messages-and-artifacts) are
+versioned JSON documents encoded as UTF-8. JSON is the canonical machine
+contract for assignments, handoffs, review feedback,
 authorization decisions, and operation results. Markdown is a human-readable
 artifact generated from structured JSON; it is never parsed to recover workflow
 state or findings.
@@ -1091,8 +1097,8 @@ the stream tee, the timeout controller, and attempt evidence capture.
 
 ## Invocation evidence and logs
 
-Every attempted external process writes one versioned JSON record under the
-run's `invocations/` directory. The record is runtime-neutral and contains the
+Every [attempt](concepts.md#jobs-tasks-and-attempts) at an external process
+writes one versioned JSON record under the run's `invocations/` directory. The record is runtime-neutral and contains the
 run, task, and invocation IDs; role; selected agent vendor; requested model override;
 effective model identities and reporting status, adapter runtime, iteration,
 start and finish timestamps, exit code, timeout and interruption flags, attempt
@@ -1236,8 +1242,9 @@ the agent's intent.
 
 ## Lifecycle
 
-A run state is the stored step of the workflow. The current lifecycle defines
-these states:
+A run state is the stored step of a source-code
+[job](concepts.md#jobs-tasks-and-attempts)'s workflow. The current lifecycle
+defines these states:
 
 | State | Meaning |
 |---|---|
