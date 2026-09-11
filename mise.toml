@@ -65,7 +65,13 @@ run = [
 [tasks.tests]
 description = "Execute unit tests across parallel workers"
 run = [
-    'uv run pytest -n auto tests',
+    # worksteal, not the default load scheduler. This suite waits on real child
+    # processes and deliberate timeout sleeps, so its per-test cost is very
+    # uneven: 56% of the measured work sits in 40 of 341 tests. Work stealing
+    # empirically keeps workers busier on that distribution. Measured on 14
+    # CPUs: 21.2s at 268% CPU with load, 15.2s at 346% with worksteal, same
+    # 622 passed. Raising workers instead was worse (-n 24 gave 18.1s).
+    'uv run pytest -n auto --dist worksteal tests',
 ]
 
 [tasks.tests-serial]
