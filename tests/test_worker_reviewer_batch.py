@@ -808,15 +808,19 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
 
     monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
     original_write_json_atomic = cast('Any', reviewer_batch_run).write_json_atomic
-    fail_remediation_write = first_outcome == 'crash_window'
+    fail_next_review_write = first_outcome == 'crash_window'
 
     def write_json(path: Path, document: dict[str, Any], evidence_type: str) -> None:
-        """Inject a single crash after the rejected batch becomes durable."""
+        """Inject a single crash while persisting the next reviewer batch."""
 
-        nonlocal fail_remediation_write
-        if evidence_type == 'remediation_request' and fail_remediation_write:
-            fail_remediation_write = False
-            message = 'injected remediation write failure'
+        nonlocal fail_next_review_write
+        if (
+            evidence_type == 'review_request'
+            and document.get('iteration') == 2
+            and fail_next_review_write
+        ):
+            fail_next_review_write = False
+            message = 'injected next-review write failure'
             raise OSError(message)
         original_write_json_atomic(path, document, cast('Any', evidence_type))
 
@@ -856,10 +860,48 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
         recoverable = store.get(run.id)
         assert recoverable.state is RunState.INTERRUPTED
     elif first_outcome == 'crash_window':
-        with pytest.raises(OSError, match='injected remediation write failure'):
+        with pytest.raises(OSError, match='injected next-review write failure'):
             start()
         recoverable = store.get(run.id)
-        assert recoverable.state is RunState.CHANGES_REQUESTED
+        assert recoverable.state is RunState.INTERRUPTED
+        interrupted_audit = build_audit_document(
+            recoverable,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert interrupted_audit['result'] == 'incomplete'
+        assert not any(
+            item.get('code') == 'message_correlation_failure'
+            and item.get('path') == 'messages'
+            for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+        )
+        persisted_request_path = next(
+            path
+            for path in (next((tmp_path / 'runs').rglob('messages'))).glob(
+                '*-review-request.json'
+            )
+            if json.loads(path.read_text(encoding='utf-8'))['iteration'] == 2
+        )
+        persisted_request = json.loads(
+            persisted_request_path.read_text(encoding='utf-8')
+        )
+        prior_review_path = persisted_request['payload']['prior_review_path']
+        persisted_request['payload']['prior_review_path'] = str(
+            next((tmp_path / 'runs').rglob('execution.json'))
+        )
+        persisted_request_path.write_text(
+            json.dumps(persisted_request), encoding='utf-8'
+        )
+        with pytest.raises(
+            WorkerError, match='reviewer-set request does not match its execution plan'
+        ):
+            resume_review(context=context, run=recoverable)
+        persisted_request['payload']['prior_review_path'] = prior_review_path
+        persisted_request_path.write_text(
+            json.dumps(persisted_request), encoding='utf-8'
+        )
     else:
         recoverable = start()
         assert recoverable.state is (
@@ -867,7 +909,51 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
             if first_outcome == 'disagreement'
             else RunState.VALIDATION_REQUIRED
         )
-    assert reviewer_calls == 2
+    assert reviewer_calls == (3 if first_outcome == 'crash_window' else 2)
+    if first_outcome == 'timeout':
+        interrupted_audit = build_audit_document(
+            recoverable,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert interrupted_audit['result'] == 'incomplete'
+        assert not any(
+            item.get('code') == 'message_correlation_failure'
+            for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+        )
+        request_path = next((tmp_path / 'runs').rglob('*-remediation-request.json'))
+        request = json.loads(request_path.read_text(encoding='utf-8'))
+        original_values = {
+            'in_reply_to': request['in_reply_to'],
+            'review_result_path': request['payload']['review_result_path'],
+            'review_artifact_path': request['payload']['review_artifact_path'],
+        }
+        execution_path = next((tmp_path / 'runs').rglob('execution.json'))
+        for field, invalid_value in (
+            ('in_reply_to', str(uuid4())),
+            ('review_result_path', str(execution_path)),
+            ('review_artifact_path', str(execution_path)),
+        ):
+            target = request if field == 'in_reply_to' else request['payload']
+            target[field] = invalid_value
+            request_path.write_text(json.dumps(request), encoding='utf-8')
+            invalid_audit = build_audit_document(
+                recoverable,
+                store.list_transitions(str(run.id)),
+                (),
+                tmp_path / 'runs',
+                verify=True,
+            )
+            assert any(
+                item.get('code') == 'message_correlation_failure'
+                and item.get('path')
+                == request_path.relative_to(request_path.parents[1]).as_posix()
+                for item in cast('list[dict[str, object]]', invalid_audit['findings'])
+            )
+            target[field] = original_values[field]
+        request_path.write_text(json.dumps(request), encoding='utf-8')
     if first_outcome == 'disagreement':
         marker_path = next((tmp_path / 'runs').rglob('decision-required.json'))
         marker = json.loads(marker_path.read_text(encoding='utf-8'))
@@ -897,7 +983,6 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
         assert reviewer_calls == 2
         return
     if first_outcome == 'timeout':
-        request_path = next((tmp_path / 'runs').rglob('*-remediation-request.json'))
         request = json.loads(request_path.read_text(encoding='utf-8'))
         request['payload']['objective'] = 'Tampered objective.'
         request_path.write_text(json.dumps(request), encoding='utf-8')
@@ -1177,6 +1262,19 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     assert interrupted.state is RunState.INTERRUPTED
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     assert not (run_directory / 'review-batches/000001.json').exists()
+    interrupted_audit = build_audit_document(
+        interrupted,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert interrupted_audit['result'] == 'incomplete'
+    assert not any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'messages'
+        for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+    )
 
     premature_aggregate = run_directory / 'review-batches/000001.json'
     premature_aggregate.parent.mkdir(parents=True, exist_ok=True)

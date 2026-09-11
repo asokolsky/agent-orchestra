@@ -330,6 +330,7 @@ def _reviewer_batch_sequence(
 
     expected_ids = {reviewer.reviewer_id for reviewer in reviewer_plan.reviewers}
     sequences: dict[str, int] = {}
+    prior_sequences: list[int] = []
     message_directory = run_evidence_path(run_directory, 'messages')
     try:
         entries = tuple(message_directory.iterdir())
@@ -341,6 +342,8 @@ def _reviewer_batch_sequence(
             path.relative_to(run_directory).as_posix()
         )
         if identity is None or identity[0] != 'review_request':
+            if identity is not None:
+                prior_sequences.append(identity[1])
             continue
         sequence = identity[1]
         reviewer_id = reviewer_id_from_message_path(
@@ -350,15 +353,49 @@ def _reviewer_batch_sequence(
             continue
         request = read_json_object(path)
         if request.get('iteration') != run.iteration:
+            prior_sequences.append(sequence)
             continue
         if reviewer_id not in expected_ids or reviewer_id in sequences:
             message = 'reviewer-set request evidence does not match its execution plan'
             raise WorkerError(message)
         sequences[reviewer_id] = sequence
-    if set(sequences) != expected_ids or len(set(sequences.values())) != 1:
+    if not set(sequences).issubset(expected_ids) or len(set(sequences.values())) > 1:
         message = 'reviewer-set request evidence has no single durable sequence'
         raise WorkerError(message)
-    return next(iter(sequences.values()))
+    if run.iteration == 1 and set(sequences) != expected_ids:
+        message = 'reviewer-set request evidence has no single durable sequence'
+        raise WorkerError(message)
+    if sequences:
+        return next(iter(sequences.values()))
+    return max(prior_sequences, default=0) + 1
+
+
+def _prior_reviewer_result_path(
+    run_directory: Path, *, run: Run, reviewer_id: str
+) -> Path | None:
+    """Return the preceding iteration's canonical result for one reviewer."""
+
+    if run.iteration == 1:
+        return None
+    candidates: list[Path] = []
+    for path in run_evidence_path(run_directory, 'messages').iterdir():
+        identity = canonical_message_evidence(
+            path.relative_to(run_directory).as_posix()
+        )
+        if identity is None or identity[0] != 'review_result':
+            continue
+        path_reviewer = reviewer_id_from_message_path(
+            path, sequence=identity[1], message_type='review_result'
+        )
+        if path_reviewer != reviewer_id:
+            continue
+        document = read_json_object(path)
+        if document.get('iteration') == run.iteration - 1:
+            candidates.append(path)
+    if len(candidates) != 1:
+        message = 'reviewer-set prior result evidence is incomplete'
+        raise WorkerError(message)
+    return candidates[0]
 
 
 def _completed_reviewer_result(
@@ -368,6 +405,7 @@ def _completed_reviewer_result(
     run: Run,
     objective: str,
     current_digest: str,
+    expected_prior_review_path: Path | None,
 ) -> tuple[ReviewerDispatchResult, dict[str, Any]] | None:
     """Return one validated canonical peer result, if it already exists."""
 
@@ -390,6 +428,7 @@ def _completed_reviewer_result(
         sequence=int(request['sequence']),
         dispatch=dispatch,
         artifact_path=artifact_path,
+        expected_prior_review_path=expected_prior_review_path,
     )
     verdict = validate_review_response(
         result, request=request, artifact_path=artifact_path
@@ -415,6 +454,7 @@ def _validate_reviewer_set_request_scope(
     sequence: int,
     dispatch: ReviewerDispatch,
     artifact_path: Path,
+    expected_prior_review_path: Path | None,
 ) -> None:
     """Bind one persisted reviewer request to its durable run and plan member."""
 
@@ -437,6 +477,12 @@ def _validate_reviewer_set_request_scope(
         payload['objective'] != objective
         or payload['timeout_seconds'] != dispatch.timeout_seconds
         or payload['artifact_path'] != str(artifact_path)
+        or payload['prior_review_path']
+        != (
+            str(expected_prior_review_path)
+            if expected_prior_review_path is not None
+            else None
+        )
     ):
         message = 'reviewer-set request does not match its execution plan'
         raise WorkerError(message)
@@ -844,39 +890,49 @@ def _resume_reviewer_set(  # noqa: PLR0911
         attempt=1,
     )
     results_by_id: dict[str, ReviewerDispatchResult] = {}
-    retry_requests: dict[str, dict[str, Any]] = {}
+    retry_requests: dict[str, dict[str, Any] | None] = {}
+    prior_review_paths: dict[str, Path | None] = {}
     retry_attempts: dict[str, int] = {}
     retry_dispatches: list[ReviewerDispatch] = []
     activated = False
     try:
         for base_dispatch in base_dispatches:
+            prior_review_path = _prior_reviewer_result_path(
+                run_directory, run=run, reviewer_id=base_dispatch.reviewer_id
+            )
             completed = _completed_reviewer_result(
                 run_directory,
                 base_dispatch,
                 run=run,
                 objective=execution.objective,
                 current_digest=current_digest,
+                expected_prior_review_path=prior_review_path,
             )
             if completed is not None:
                 result, _ = completed
                 results_by_id[base_dispatch.reviewer_id] = result
                 continue
-            request = read_json_object(
-                reviewer_dispatch_path(run_directory, base_dispatch.paths.request)
+            request_path = reviewer_dispatch_path(
+                run_directory, base_dispatch.paths.request
+            )
+            current_request = (
+                read_json_object(request_path) if request_path.is_file() else None
             )
             artifact_path = reviewer_dispatch_path(
                 run_directory, base_dispatch.paths.artifact
             )
-            validate_review_request(request, run_directory=run_directory)
-            _validate_reviewer_set_request_scope(
-                request,
-                run=run,
-                objective=execution.objective,
-                current_digest=current_digest,
-                sequence=sequence,
-                dispatch=base_dispatch,
-                artifact_path=artifact_path,
-            )
+            if current_request is not None:
+                validate_review_request(current_request, run_directory=run_directory)
+                _validate_reviewer_set_request_scope(
+                    current_request,
+                    run=run,
+                    objective=execution.objective,
+                    current_digest=current_digest,
+                    sequence=sequence,
+                    dispatch=base_dispatch,
+                    artifact_path=artifact_path,
+                    expected_prior_review_path=prior_review_path,
+                )
             latest = _latest_reviewer_attempt(
                 run_directory, sequence, base_dispatch.reviewer_id
             )
@@ -902,7 +958,8 @@ def _resume_reviewer_set(  # noqa: PLR0911
                 if item.reviewer_id == base_dispatch.reviewer_id
             )
             retry_dispatches.append(retry_dispatch)
-            retry_requests[retry_dispatch.reviewer_id] = request
+            retry_requests[retry_dispatch.reviewer_id] = current_request
+            prior_review_paths[retry_dispatch.reviewer_id] = prior_review_path
             retry_attempts[retry_dispatch.reviewer_id] = attempt
         if interrupted_review:
             context.store.update(reviewing, expected_state=RunState.INTERRUPTED)
@@ -921,6 +978,7 @@ def _resume_reviewer_set(  # noqa: PLR0911
                             sequence=sequence,
                             attempt=retry_attempts[dispatch.reviewer_id],
                             retry_request=retry_requests[dispatch.reviewer_id],
+                            prior_review_path=prior_review_paths[dispatch.reviewer_id],
                         ),
                         retry_dispatches,
                     )
@@ -956,8 +1014,11 @@ def _resume_reviewer_set(  # noqa: PLR0911
     except BaseException:
         if not activated:
             raise
-        failed = transition(reviewing, RunState.FAILED)
-        context.store.update(failed, expected_state=RunState.REVIEWING)
+        terminal = transition(
+            reviewing,
+            RunState.INTERRUPTED if reviewing.iteration > 1 else RunState.FAILED,
+        )
+        context.store.update(terminal, expected_state=RunState.REVIEWING)
         raise
 
 
@@ -1605,8 +1666,11 @@ def _run_queued_reviewer_set(
     except BaseException:
         durable = context.store.get(str(run.id))
         if durable.state is RunState.REVIEWING:
-            failed = transition(durable, RunState.FAILED)
-            context.store.update(failed, expected_state=RunState.REVIEWING)
+            terminal = transition(
+                durable,
+                RunState.INTERRUPTED if durable.iteration > 1 else RunState.FAILED,
+            )
+            context.store.update(terminal, expected_state=RunState.REVIEWING)
         raise
 
 

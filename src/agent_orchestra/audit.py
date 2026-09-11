@@ -751,6 +751,37 @@ def _validate_canonical_json(
             }
         )
     if isinstance(job, Run) and reviewer_plan is not None:
+        for relative, remediation in canonical_documents.items():
+            if canonical_evidence_type(relative) != 'remediation_request':
+                continue
+            iteration = cast('int', remediation['iteration'])
+            batch_relative = evidence_path('review_batch_result', ordinal=iteration)
+            batch = canonical_documents.get(batch_relative)
+            payload = cast('dict[str, object]', remediation['payload'])
+            expected_batch_path = resolve_evidence_path(
+                root, str(job.id), *Path(batch_relative).parts
+            )
+            expected_artifact_path = (
+                resolve_evidence_path(
+                    root, str(job.id), *Path(str(batch['artifact_path'])).parts
+                )
+                if batch is not None and batch.get('schema_version') == 3
+                else None
+            )
+            if (
+                batch is None
+                or batch.get('schema_version') != 3
+                or remediation['in_reply_to'] != batch.get('message_id')
+                or payload['review_result_path'] != str(expected_batch_path)
+                or payload['review_artifact_path'] != str(expected_artifact_path)
+            ):
+                findings.append(
+                    _finding(
+                        'message_correlation_failure',
+                        'remediation request does not match its reviewer batch',
+                        relative,
+                    )
+                )
         findings.extend(
             _finding(
                 'message_correlation_failure',
@@ -812,7 +843,11 @@ def _validate_source_message_chain(root: Path, job: Run) -> list[AuditFinding]:
     ):
         return []
     try:
-        read_message_chain(job_directory, str(job.id))
+        read_message_chain(
+            job_directory,
+            str(job.id),
+            allow_incomplete_tail=job.state is RunState.INTERRUPTED,
+        )
     except (OSError, ValueError, WorkerError) as error:
         return [
             _finding(
@@ -1312,6 +1347,9 @@ def build_audit_document(
     if verify:
         document['result'] = _result(
             findings,
-            in_progress=any(item['status'] == 'in_progress' for item in evidence),
+            in_progress=(
+                (isinstance(job, Run) and job.state is RunState.INTERRUPTED)
+                or any(item['status'] == 'in_progress' for item in evidence)
+            ),
         )
     return document

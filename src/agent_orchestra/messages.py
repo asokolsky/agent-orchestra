@@ -269,7 +269,7 @@ def is_developer_disagreement(message: DeveloperHandoffMessageSchema) -> bool:
 
 
 def read_message_chain(
-    run_directory: Path, run_id: str
+    run_directory: Path, run_id: str, *, allow_incomplete_tail: bool = False
 ) -> list[tuple[Path, dict[str, Any]]]:
     """Read and correlate every canonical message for recovery."""
 
@@ -329,6 +329,7 @@ def read_message_chain(
             run_directory=run_directory,
             run_id=run_id,
             schemas=schemas,
+            allow_incomplete_tail=allow_incomplete_tail,
         )
     for expected_sequence, (sequence, expected_type, path) in enumerate(
         sorted(candidates), start=1
@@ -491,6 +492,7 @@ def read_reviewer_message_batch(
     run_directory: Path,
     run_id: str,
     schemas: dict[str, type[BaseModel]],
+    allow_incomplete_tail: bool = False,
 ) -> list[tuple[Path, dict[str, Any]]]:
     """Validate one initial reviewer batch as parallel correlated chains."""
 
@@ -514,7 +516,12 @@ def read_reviewer_message_batch(
     expected_rounds: list[tuple[int, int, int, dict[str, Any]]] | None = None
     for reviewer_id in sorted(grouped):
         chain = sorted(grouped[reviewer_id])
-        if len(chain) < 2 or len(chain) % 2:
+        has_incomplete_request = (
+            allow_incomplete_tail
+            and len(chain) % 2 == 1
+            and chain[-1][1] == 'review_request'
+        )
+        if not chain or (len(chain) % 2 and not has_incomplete_request):
             raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
         reviewer_documents: list[tuple[Path, dict[str, Any]]] = []
         for sequence, message_type, path in chain:
@@ -543,7 +550,8 @@ def read_reviewer_message_batch(
 
         rounds: list[tuple[int, int, int, dict[str, Any]]] = []
         prior_result_path: Path | None = None
-        for index in range(0, len(reviewer_documents), 2):
+        completed_length = len(reviewer_documents) - int(has_incomplete_request)
+        for index in range(0, completed_length, 2):
             _request_path, request = reviewer_documents[index]
             result_path, result = reviewer_documents[index + 1]
             request_sequence = int(request['sequence'])
@@ -579,12 +587,38 @@ def read_reviewer_message_batch(
                 )
             )
             prior_result_path = result_path
+        if has_incomplete_request:
+            request_path, request = reviewer_documents[-1]
+            request_sequence = int(request['sequence'])
+            if (
+                request['message_type'] != 'review_request'
+                or request['in_reply_to'] is not None
+                or request['payload']['prior_review_path']
+                != (str(prior_result_path) if prior_result_path is not None else None)
+            ):
+                raise WorkerError(f'invalid message correlation: {request_path.name}')
+            rounds.append(
+                (
+                    request_sequence,
+                    request_sequence + 1,
+                    request['iteration'],
+                    request['scope'],
+                )
+            )
         if expected_rounds is None:
             expected_rounds = rounds
         elif rounds != expected_rounds:
-            raise WorkerError(f'invalid message correlation: {chain[0][2].name}')
+            shorter, longer = sorted((rounds, expected_rounds), key=len)
+            if (
+                not allow_incomplete_tail
+                or len(longer) - len(shorter) != 1
+                or shorter != longer[: len(shorter)]
+            ):
+                raise WorkerError(f'invalid message correlation: {chain[0][2].name}')
+            expected_rounds = longer
         documents.extend(reviewer_documents)
-    assert expected_rounds is not None
+    if expected_rounds is None:
+        raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
     shared_documents: list[tuple[Path, dict[str, Any]]] = []
     for sequence, message_type, path in sorted(shared):
         if message_type not in {'remediation_request', 'developer_handoff'}:
@@ -620,6 +654,14 @@ def read_reviewer_message_batch(
                 or entry[1]['sequence'] < next_request_sequence
             )
         ]
+        trailing_request: tuple[Path, dict[str, Any]] | None = None
+        if (
+            len(bridge) % 2
+            and next_round is None
+            and allow_incomplete_tail
+            and bridge[-1][1]['message_type'] == 'remediation_request'
+        ):
+            trailing_request = bridge.pop()
         if prior_request_sequence + 1 != prior_result_sequence or len(bridge) % 2:
             raise WorkerError(INCOMPLETE_REVIEWER_MESSAGE_BATCH)
         if next_round is not None and not bridge:
@@ -646,6 +688,19 @@ def read_reviewer_message_batch(
                 raise WorkerError(f'invalid message correlation: {handoff_path.name}')
             expected_sequence = handoff['sequence'] + 1
             consumed_shared += 2
+        if trailing_request is not None:
+            trailing_path, remediation = trailing_request
+            if (
+                remediation['sequence'] != expected_sequence
+                or remediation['iteration'] != iteration
+                or remediation['scope'] != scope
+                or (
+                    remediation_parent is not None
+                    and remediation['in_reply_to'] != remediation_parent
+                )
+            ):
+                raise WorkerError(f'invalid message correlation: {trailing_path.name}')
+            consumed_shared += 1
         if next_round is not None and (
             next_request_sequence != expected_sequence or next_round[2] != iteration + 1
         ):
