@@ -197,6 +197,23 @@ These choices optimize for local agents and minimum resource use. Python is the
 preferred implementation language, with a toolchain based on uv, Ruff, and
 mise.
 
+The public contract is the CLI: its commands, their arguments, and the versioned
+JSON documents they emit. The package root defines and re-exports no application
+names. `agent_orchestra` is a namespace for its submodules, which remain
+importable as `from agent_orchestra import cli`; what it does not offer is a
+second path to the objects those submodules define. Every caller imports a name
+from the module that defines it. Re-exporting at the root would create a
+duplicate import path for each name, couple import order to the root module, and
+go stale as modules move.
+
+The root did once re-export `Run`, `RunState`, and `ScenarioType`, from the
+package's first commit until they were removed. Removing them is an intentional
+breaking change to an importable surface, accepted rather than deprecated: the
+package is pre-1.0, is not published to any index, and no consumer of those
+imports could be identified inside or outside the repository. A deprecation shim
+would have preserved a path nothing used. Were any of those conditions to change, a
+removal of this kind would warrant a transition period instead.
+
 ## Collaborators and value types
 
 Two kinds of object carry state, and the difference decides where new code goes.
@@ -453,9 +470,12 @@ tables. Both were previously named after runs alone, which made an issue job
 look like a run or like a mistake.
 
 Two names are knowingly kept despite covering both kinds. `RunState` types and
-compares `IssueJob.state` as well as `Run.state`; it is retained because
-`agent_orchestra.__all__` exports it alongside `Run` and `ScenarioType`, so
-renaming it is a public change rather than an internal one.
+compares `IssueJob.state` as well as `Run.state`; it is retained because the two
+states are one shared vocabulary rather than two parallel ones, and no name
+covering both reads better than the one it has. The package root once exported
+it alongside `Run` and `ScenarioType`, which made renaming it a public change;
+those re-exports have since been removed, so a rename is now an internal
+decision, and still not this one.
 `InvocationRecord.run_id` carries an issue job's identifier for an issue review;
 it is retained as stored evidence under the paragraph above, and audit schema 15
 withholds it from published attempt objects. Renaming storage to match the
