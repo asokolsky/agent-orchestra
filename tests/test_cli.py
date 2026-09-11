@@ -46,6 +46,8 @@ from agent_orchestra.evidence import (
 )
 from agent_orchestra.execution_context import (
     ITERATION_LIMIT,
+    ReviewerSetReviewPlan,
+    ReviewPlan,
     WorkerContext,
 )
 from agent_orchestra.invocations import (
@@ -321,11 +323,13 @@ def test_fresh_worker_rejects_invalid_runtime_before_command(
                 registry=registry,
             ),
             run=context.run,
-            objective='Review the change.',
-            reviewer_command=(sys.executable, '-c', f'open({str(marker)!r}, "w")'),
-            developer_command=(),
-            timeout_seconds=30,
-            reviewer_identity=identity,
+            plan=ReviewPlan(
+                objective='Review the change.',
+                reviewer_command=(sys.executable, '-c', f'open({str(marker)!r}, "w")'),
+                developer_command=(),
+                timeout_seconds=30,
+                reviewer_identity=identity,
+            ),
         )
 
     assert raised.value.code == expected_code
@@ -1918,12 +1922,14 @@ def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review the change.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(),
-        timeout_seconds=30,
-        reviewer_identity=InvocationIdentity(
-            vendor='anthropic', model='requested-model', runtime='claude-code'
+        plan=ReviewPlan(
+            objective='Review the change.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(),
+            timeout_seconds=30,
+            reviewer_identity=InvocationIdentity(
+                vendor='anthropic', model='requested-model', runtime='claude-code'
+            ),
         ),
     )
 
@@ -2001,10 +2007,12 @@ def test_worker_persists_interrupted_state(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=('unused-developer',),
-            timeout_seconds=30,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=('unused-developer',),
+                timeout_seconds=30,
+            ),
         )
 
     assert context.store.get(context.run.id).state is RunState.INTERRUPTED
@@ -2063,10 +2071,12 @@ def test_worker_finalizes_interruption_after_activation(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=('unused-developer',),
-            timeout_seconds=30,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=('unused-developer',),
+                timeout_seconds=30,
+            ),
         )
 
     invocation_files = sorted(
@@ -2122,10 +2132,12 @@ def test_run_selects_reviewer_adapter(
     expected_command = [sys.executable, '-m', module]
     if model is not None:
         expected_command.extend(['--model', model])
-    assert observed['reviewer_command'] == expected_command
-    identity = observed['reviewer_identity']
-    assert isinstance(identity, InvocationIdentity)
-    assert identity == InvocationIdentity(vendor=vendor, model=model, runtime=runtime)
+    plan = observed['plan']
+    assert isinstance(plan, ReviewPlan)
+    assert plan.reviewer_command == expected_command
+    assert plan.reviewer_identity == InvocationIdentity(
+        vendor=vendor, model=model, runtime=runtime
+    )
 
 
 def test_run_selects_configured_reviewer_set(
@@ -2159,9 +2171,10 @@ def test_run_selects_configured_reviewer_set(
 
     assert main(run_arguments(enqueued_run, '--reviewer-set', 'default')) == 0
 
-    plan = observed['reviewer_plan']
-    assert isinstance(plan, ReviewerExecutionPlan)
-    assert [reviewer.reviewer_id for reviewer in plan.reviewers] == [
+    plan = observed['plan']
+    assert isinstance(plan, ReviewerSetReviewPlan)
+    assert isinstance(plan.reviewer_plan, ReviewerExecutionPlan)
+    assert [reviewer.reviewer_id for reviewer in plan.reviewer_plan.reviewers] == [
         'security',
         'portability',
     ]
@@ -2225,11 +2238,13 @@ def test_worker_remediates_and_reviews_new_digest(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=2,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=2,
+        ),
     )
 
     assert result.state.value == 'awaiting_commit_authorization'
@@ -2285,11 +2300,13 @@ def test_resume_validation_required_continues_same_run(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=3,
+        ),
     )
 
     assert blocked.id == context.run.id
@@ -2350,12 +2367,14 @@ def test_resume_retries_an_interrupted_validation_required_recovery(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        developer_timeout_seconds=1,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            developer_timeout_seconds=1,
+            max_iterations=3,
+        ),
     )
 
     assert blocked.state is RunState.VALIDATION_REQUIRED
@@ -2407,11 +2426,13 @@ def test_resume_archives_rejected_developer_handoff_by_attempt(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=3,
+        ),
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
     write_developer(developer)
@@ -2450,11 +2471,13 @@ def test_resume_rejects_handoff_with_a_non_remediation_parent(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=3,
+        ),
     )
 
     messages = evidence_directory(context) / 'messages'
@@ -2487,11 +2510,13 @@ def test_resume_rejects_handoff_linked_to_a_different_review_result(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=3,
+        ),
     )
 
     messages = evidence_directory(context) / 'messages'
@@ -2569,11 +2594,13 @@ def test_resume_rejects_tampered_review_exchange_payload_links(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=1,
-            max_iterations=3,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=1,
+                max_iterations=3,
+            ),
         )
 
     messages = evidence_directory(context) / 'messages'
@@ -2627,11 +2654,13 @@ def test_worker_stops_bounded_non_progress(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=30,
-            max_iterations=max_iterations,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=30,
+                max_iterations=max_iterations,
+            ),
         )
 
     assert context.store.get(context.run.id).state is RunState.FAILED
@@ -2659,11 +2688,13 @@ def test_worker_surfaces_developer_disagreement_for_human_decision(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=2,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=2,
+        ),
     )
 
     assert result.state.value == 'changes_requested'
@@ -2909,10 +2940,12 @@ def test_resume_revalidates_reviewer_response_without_relaunching(
                 digest_worktree=_working_tree_digest,
             ),
             run=enqueued_run.run,
-            objective='Review.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(),
-            timeout_seconds=30,
+            plan=ReviewPlan(
+                objective='Review.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(),
+                timeout_seconds=30,
+            ),
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
 
@@ -2965,10 +2998,12 @@ def test_resume_applies_completed_reviewer_conclusion_without_relaunching(
                 digest_worktree=_working_tree_digest,
             ),
             run=enqueued_run.run,
-            objective='Review.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(),
-            timeout_seconds=30,
+            plan=ReviewPlan(
+                objective='Review.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(),
+                timeout_seconds=30,
+            ),
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.REVIEWING
 
@@ -3015,10 +3050,12 @@ def test_resume_advances_persisted_approval_without_relaunching(
                 digest_worktree=_working_tree_digest,
             ),
             run=enqueued_run.run,
-            objective='Review.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(),
-            timeout_seconds=30,
+            plan=ReviewPlan(
+                objective='Review.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(),
+                timeout_seconds=30,
+            ),
         )
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.APPROVED
 
@@ -3067,12 +3104,14 @@ def test_resume_starts_persisted_remediation_request(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=30,
-            developer_timeout_seconds=30,
-            max_iterations=3,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=30,
+                developer_timeout_seconds=30,
+                max_iterations=3,
+            ),
         )
     assert context.store.get(context.run.id).state is RunState.CHANGES_REQUESTED
     assert (
@@ -3124,12 +3163,14 @@ def test_resume_recovered_review_survives_pre_attempt_crash(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=30,
-            developer_timeout_seconds=30,
-            max_iterations=3,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=30,
+                developer_timeout_seconds=30,
+                max_iterations=3,
+            ),
         )
     assert context.store.get(context.run.id).state is RunState.REVIEWING
 
@@ -3252,12 +3293,14 @@ def test_resume_interrupted_developer_reuses_remediation_request(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=30,
-            developer_timeout_seconds=1,
-            max_iterations=3,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=30,
+                developer_timeout_seconds=1,
+                max_iterations=3,
+            ),
         )
 
     assert context.store.get(context.run.id).state is RunState.INTERRUPTED
@@ -3339,11 +3382,13 @@ def test_resume_revalidates_developer_response_without_relaunching(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=30,
-            max_iterations=3,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=30,
+                max_iterations=3,
+            ),
         )
     assert context.store.get(context.run.id).state is RunState.DEVELOPING
 
@@ -3381,11 +3426,13 @@ def test_resume_writes_recovery_request_before_activating_developer(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=3,
+        ),
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
     original_write = evidence_module.write_json_atomic
@@ -3428,11 +3475,13 @@ def test_resume_recovers_request_when_activation_state_did_not_persist(
             digest_worktree=_working_tree_digest,
         ),
         run=context.run,
-        objective='Review and remediate.',
-        reviewer_command=(sys.executable, str(reviewer)),
-        developer_command=(sys.executable, str(developer)),
-        timeout_seconds=30,
-        max_iterations=3,
+        plan=ReviewPlan(
+            objective='Review and remediate.',
+            reviewer_command=(sys.executable, str(reviewer)),
+            developer_command=(sys.executable, str(developer)),
+            timeout_seconds=30,
+            max_iterations=3,
+        ),
     )
     assert blocked.state is RunState.VALIDATION_REQUIRED
     original_update = context.store.update
@@ -3510,11 +3559,13 @@ def test_concurrent_active_resumes_launch_one_process(
                 digest_worktree=_working_tree_digest,
             ),
             run=context.run,
-            objective='Review and remediate.',
-            reviewer_command=(sys.executable, str(reviewer)),
-            developer_command=(sys.executable, str(developer)),
-            timeout_seconds=30,
-            max_iterations=3,
+            plan=ReviewPlan(
+                objective='Review and remediate.',
+                reviewer_command=(sys.executable, str(reviewer)),
+                developer_command=(sys.executable, str(developer)),
+                timeout_seconds=30,
+                max_iterations=3,
+            ),
         )
     monkeypatch.setattr(queued_review, 'record_invocation', original_record)
     active = context.store.get(context.run.id)

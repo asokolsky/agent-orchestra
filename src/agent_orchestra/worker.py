@@ -34,6 +34,8 @@ from agent_orchestra.evidence import (
 from agent_orchestra.execution_context import (
     EVIDENCE_INSIDE_WORKTREE,
     ITERATION_LIMIT,
+    ResumedExecution,
+    ReviewerRound,
     ReviewerSetReviewPlan,
     ReviewPlan,
     WorkerContext,
@@ -43,7 +45,6 @@ from agent_orchestra.execution_context import (
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
-    InvocationIdentity,
     InvocationRecord,
     RecoveryAction,
     attempt_record_path,
@@ -81,32 +82,27 @@ from agent_orchestra.schemas import (
     EXECUTION_RECORD_ADAPTER,
     DeveloperHandoffMessageSchema,
     ExecutionRecord,
-    ExecutionRecordSchema,
     ReviewerBatchResultSchemaV3,
     ReviewerSetExecutionRecordSchema,
 )
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-    from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
     from agent_orchestra.store import JobStore
 
 
 def _continue_reviewer_set_after_developer(
     *,
     context: WorkerContext,
-    run: Run,
-    reviewing: Run,
+    review_round: ReviewerRound,
     plan: ReviewerSetReviewPlan,
-    current_digest: str,
-    sequence: int,
     review_result: dict[str, Any],
 ) -> Run:
     """Start the next reviewer batch after one accepted developer handoff."""
 
-    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(
+        context.runs_directory, str(review_round.run.id)
+    )
     prior_review_paths = {
         member['reviewer_id']: run_evidence_path(
             run_directory, *Path(member['result_path']).parts
@@ -116,11 +112,13 @@ def _continue_reviewer_set_after_developer(
     }
     return _run_reviewer_set_iteration(
         context=context,
-        run=run,
-        reviewing=reviewing,
+        review_round=ReviewerRound(
+            run=review_round.run,
+            reviewing=review_round.reviewing,
+            current_digest=review_round.current_digest,
+            sequence=review_round.sequence,
+        ),
         plan=plan,
-        current_digest=current_digest,
-        sequence=sequence,
         prior_review_paths=prior_review_paths,
         resume_developer_request=_resume_reviewer_set_developer_request,
     )
@@ -256,9 +254,7 @@ def _resume_reviewer_validation(
     request: dict[str, Any],
     record: InvocationRecord,
     action: RecoveryAction,
-    execution: ExecutionRecordSchema,
-    reviewer_identity: InvocationIdentity,
-    developer_identity: InvocationIdentity,
+    resumed: ResumedExecution,
 ) -> Run:
     """Revalidate a durable reviewer response and continue without relaunching."""
     store = context.store
@@ -335,11 +331,11 @@ def _resume_reviewer_validation(
         awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
         store.update(awaiting, expected_state=RunState.APPROVED)
         return awaiting
-    if run.iteration >= execution.max_review_iterations:
+    if run.iteration >= resumed.record.max_review_iterations:
         failed = transition(decided, RunState.FAILED)
         store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
         raise WorkerError(ITERATION_LIMIT)
-    if not execution.developer.command:
+    if not resumed.record.developer.command:
         return decided
     next_sequence = sequence + 2
     review_artifact_path = Path(request['payload']['artifact_path'])
@@ -359,9 +355,9 @@ def _resume_reviewer_validation(
         'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
         'scope': request['scope'],
         'payload': {
-            'objective': execution.objective,
+            'objective': resumed.record.objective,
             'allowed_actions': [],
-            'timeout_seconds': execution.developer.timeout_seconds,
+            'timeout_seconds': resumed.record.developer.timeout_seconds,
             'review_result_path': str(canonical),
             'review_artifact_path': str(review_artifact_path),
         },
@@ -371,11 +367,7 @@ def _resume_reviewer_validation(
     developing = transition(decided, RunState.DEVELOPING)
     return _resume_developer_request(
         context=context,
-        plan=ReviewPlan.from_execution_record(
-            execution,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-        ),
+        plan=resumed.review_plan(),
         run=developing,
         request=remediation,
         current_digest=run.diff_digest or '',
@@ -392,9 +384,7 @@ def _resume_developer_validation(
     request: dict[str, Any],
     record: InvocationRecord,
     action: RecoveryAction,
-    execution: ExecutionRecordSchema | ReviewerSetExecutionRecordSchema,
-    reviewer_identity: InvocationIdentity | None,
-    developer_identity: InvocationIdentity,
+    resumed: ResumedExecution,
 ) -> Run:
     """Revalidate a durable developer response and continue without relaunching."""
     store = context.store
@@ -421,7 +411,7 @@ def _resume_developer_validation(
     review_result = read_json_object(review_result_path)
     findings = (
         review_result['findings']
-        if isinstance(execution, ReviewerSetExecutionRecordSchema)
+        if isinstance(resumed.record, ReviewerSetExecutionRecordSchema)
         else review_result['payload']['findings']
     )
     finding_ids = tuple(finding['finding_id'] for finding in findings)
@@ -481,7 +471,7 @@ def _resume_developer_validation(
     )
     if is_disagreement:
         disagreement = transition(run, RunState.CHANGES_REQUESTED)
-        if isinstance(execution, ReviewerSetExecutionRecordSchema):
+        if isinstance(resumed.record, ReviewerSetExecutionRecordSchema):
             _write_developer_disagreement(run_directory, disagreement, canonical)
         store.update(disagreement, expected_state=RunState.DEVELOPING)
         return disagreement
@@ -499,25 +489,23 @@ def _resume_developer_validation(
         updated_at=utc_now(),
     )
     store.update(reviewing, expected_state=RunState.DEVELOPING)
-    if isinstance(execution, ReviewerSetExecutionRecordSchema):
+    if isinstance(resumed.record, ReviewerSetExecutionRecordSchema):
         batch = ReviewerBatchResultSchemaV3.model_validate(review_result)
         return _continue_reviewer_set_after_developer(
             context=context,
-            run=run,
-            reviewing=reviewing,
-            plan=_reviewer_set_plan_from_execution(execution, context.registry),
-            current_digest=new_digest,
-            sequence=sequence + 2,
+            review_round=ReviewerRound(
+                run=run,
+                reviewing=reviewing,
+                current_digest=new_digest,
+                sequence=sequence + 2,
+            ),
+            plan=_reviewer_set_plan_from_execution(resumed.record, context.registry),
             review_result=batch.model_dump(mode='json'),
         )
-    assert reviewer_identity is not None
+    assert resumed.reviewer_identity is not None
     return _run_queued_review(
         context=context,
-        plan=ReviewPlan.from_execution_record(
-            execution,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-        ),
+        plan=resumed.review_plan(),
         run=reviewing,
         continuation_sequence=sequence + 2,
         continuation_prior_review_path=review_result_path,
@@ -529,9 +517,7 @@ def _resume_active_attempt(
     context: WorkerContext,
     run: Run,
     chain: tuple[tuple[Path, dict[str, Any]], ...],
-    execution: ExecutionRecordSchema,
-    reviewer_identity: InvocationIdentity,
-    developer_identity: InvocationIdentity,
+    resumed: ResumedExecution,
 ) -> Run:
     """Recover an active workflow state from its latest durable task evidence."""
 
@@ -571,11 +557,7 @@ def _resume_active_attempt(
         if role == 'reviewer':
             return _run_queued_review(
                 context=context,
-                plan=ReviewPlan.from_execution_record(
-                    execution,
-                    reviewer_identity=reviewer_identity,
-                    developer_identity=developer_identity,
-                ),
+                plan=resumed.review_plan(),
                 run=run,
                 continuation_sequence=sequence,
                 continuation_prior_review_path=None,
@@ -583,11 +565,7 @@ def _resume_active_attempt(
             )
         return _resume_developer_request(
             context=context,
-            plan=ReviewPlan.from_execution_record(
-                execution,
-                reviewer_identity=reviewer_identity,
-                developer_identity=developer_identity,
-            ),
+            plan=resumed.review_plan(),
             run=run,
             request=request,
             current_digest=run.diff_digest or '',
@@ -620,9 +598,7 @@ def _resume_active_attempt(
         request=request,
         record=latest,
         action=action,
-        execution=execution,
-        reviewer_identity=reviewer_identity,
-        developer_identity=developer_identity,
+        resumed=resumed,
     )
 
 
@@ -632,9 +608,7 @@ def _resume_intermediate_state(
     run: Run,
     run_directory: Path,
     chain: list[tuple[Path, dict[str, Any]]],
-    execution: ExecutionRecordSchema,
-    reviewer_identity: InvocationIdentity,
-    developer_identity: InvocationIdentity,
+    resumed: ResumedExecution,
     measured_digest: str,
 ) -> Run:
     """Continue one crash-stopped review decision without rerunning review."""
@@ -662,12 +636,12 @@ def _resume_intermediate_state(
     if (
         last_message['message_type'] == 'review_result'
         and last_message['payload']['verdict'] == 'changes_requested'
-        and run.iteration >= execution.max_review_iterations
+        and run.iteration >= resumed.record.max_review_iterations
     ):
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
         raise WorkerError(ITERATION_LIMIT)
-    if not execution.developer.command:
+    if not resumed.record.developer.command:
         raise WorkerError(
             f'job is not resumable from {run.state}',
             code=RUN_NOT_RESUMABLE_CODE,
@@ -692,9 +666,9 @@ def _resume_intermediate_state(
             'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
             'scope': last_message['scope'],
             'payload': {
-                'objective': execution.objective,
+                'objective': resumed.record.objective,
                 'allowed_actions': [],
-                'timeout_seconds': execution.developer.timeout_seconds,
+                'timeout_seconds': resumed.record.developer.timeout_seconds,
                 'review_result_path': str(last_path),
                 'review_artifact_path': last_message['payload']['artifact_path'],
             },
@@ -714,11 +688,7 @@ def _resume_intermediate_state(
     developing = transition(run, RunState.DEVELOPING)
     return _resume_developer_request(
         context=context,
-        plan=ReviewPlan.from_execution_record(
-            execution,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
-        ),
+        plan=resumed.review_plan(),
         run=developing,
         request=request,
         current_digest=measured_digest,
@@ -789,6 +759,11 @@ def _resume_review(  # noqa: PLR0911
             developer_identity = _resolve_resume_identity(
                 developer_identity, RuntimeRole.DEVELOPER, registry
             )
+    resumed_execution = ResumedExecution(
+        record=execution,
+        developer_identity=developer_identity,
+        reviewer_identity=reviewer_identity,
+    )
     measured_digest = worktree_digest(digest_worktree, run.worktree_path, run.base_sha)
     if measured_digest is None:
         raise WorkerError(NO_CHANGES)
@@ -799,9 +774,7 @@ def _resume_review(  # noqa: PLR0911
             run=run,
             run_directory=run_directory,
             chain=chain,
-            execution=execution,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
+            resumed=resumed_execution,
             measured_digest=measured_digest,
         )
 
@@ -812,12 +785,7 @@ def _resume_review(  # noqa: PLR0911
             message = 'resume scope changed during active task recovery'
             raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
         return _resume_active_attempt(
-            context=context,
-            run=run,
-            chain=tuple(chain),
-            execution=execution,
-            reviewer_identity=reviewer_identity,
-            developer_identity=developer_identity,
+            context=context, run=run, chain=tuple(chain), resumed=resumed_execution
         )
 
     if run.state is RunState.INTERRUPTED:
@@ -979,24 +947,14 @@ def run_queued_reviewer_set(
     *,
     context: WorkerContext,
     run: Run,
-    objective: str,
-    reviewer_plan: ReviewerExecutionPlan,
-    developer_command: Sequence[str],
-    developer_timeout_seconds: int,
-    max_iterations: int,
-    developer_identity: InvocationIdentity,
+    plan: ReviewerSetReviewPlan,
 ) -> Run:
     """Run a reviewer set with worker-owned developer continuations."""
 
     return _run_queued_reviewer_set(
         context=context,
         run=run,
-        objective=objective,
-        reviewer_plan=reviewer_plan,
-        developer_command=developer_command,
-        developer_timeout_seconds=developer_timeout_seconds,
-        max_iterations=max_iterations,
-        developer_identity=developer_identity,
+        plan=plan,
         resume_developer_request=_resume_reviewer_set_developer_request,
     )
 

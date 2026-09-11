@@ -7,9 +7,12 @@ takes from the caller and the resume path rebuilds from durable evidence. They
 are kept apart deliberately: merging them would silently use caller values when
 resuming.
 
-None of these holds a `Run`. `workflow.transition` returns a replacement with a
-new state and iteration, so an object holding one would go stale on every
-transition; only the run's identity is durable, and it is passed alongside.
+No long-lived type here holds a `Run`. `workflow.transition` returns a
+replacement with a new state and iteration, so a context or plan holding one
+would go stale on every transition; only the run's identity is durable, and it
+is passed alongside. `ReviewerRound` is the deliberate exception: it is the
+state of one batch iteration, is rebuilt for the next, and holds exactly the
+run objects that iteration's steps were already being passed individually.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agent_orchestra.adapter.registry import RuntimeRegistry
+    from agent_orchestra.models import Run
     from agent_orchestra.store import JobStore
 
 
@@ -67,6 +71,66 @@ class WorkerContext:
     registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY
 
 
+CUSTOM_COMMAND_IDENTITY = InvocationIdentity(
+    vendor='unknown', model=None, runtime='custom-command'
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewerRound:
+    """
+    One reviewer batch iteration's run states, reviewed digest, and position.
+
+    These four advance together as a batch proceeds and are read by every step
+    of one iteration, so they travel as one value rather than as four parameters
+    through the batch chain. They are per-iteration workflow state, which is why
+    they are separate from ReviewerSetReviewPlan, whose configuration is fixed
+    for the whole workflow. The request-scope check deliberately does not take
+    this value: it validates a sequence read from the request under review,
+    which is not this iteration's position.
+    """
+
+    run: Run
+    reviewing: Run
+    current_digest: str
+    sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResumedExecution:
+    """
+    One stopped run's durable execution record and the identities resolved for it.
+
+    The resume path reads the record once, resolves each role's identity against
+    the registry, and then needs all three together at every point where it
+    rebuilds the plan the run was executing, so they travel as one value rather
+    than as three parameters down the resume chain. This is workflow state
+    recovered from evidence, which is why it is kept apart from WorkerContext.
+    reviewer_identity is None for an approved run, whose reviewer is
+    deliberately left unresolved because it will not run again.
+    """
+
+    record: ExecutionRecordSchema | ReviewerSetExecutionRecordSchema
+    developer_identity: InvocationIdentity
+    reviewer_identity: InvocationIdentity | None = None
+
+    def review_plan(self) -> ReviewPlan:
+        """Rebuild the single-reviewer plan the stopped run was executing."""
+
+        # Holding one bundle costs the narrowing each separate parameter used to
+        # carry, so the two conditions the resume chain relies on are asserted
+        # here rather than restated at every site that rebuilds the plan. Both
+        # are unreachable: only the single-reviewer path rebuilds a ReviewPlan,
+        # and it resolves the reviewer identity before doing so.
+        assert isinstance(self.record, ExecutionRecordSchema)
+        assert self.reviewer_identity is not None
+        return ReviewPlan.from_execution_record(
+            self.record,
+            reviewer_identity=self.reviewer_identity,
+            developer_identity=self.developer_identity,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewPlan:
     """
@@ -81,10 +145,10 @@ class ReviewPlan:
     reviewer_command: Sequence[str]
     developer_command: Sequence[str]
     timeout_seconds: int
-    developer_timeout_seconds: int | None
-    max_iterations: int
-    reviewer_identity: InvocationIdentity
-    developer_identity: InvocationIdentity
+    developer_timeout_seconds: int | None = None
+    max_iterations: int = 3
+    reviewer_identity: InvocationIdentity = CUSTOM_COMMAND_IDENTITY
+    developer_identity: InvocationIdentity = CUSTOM_COMMAND_IDENTITY
 
     @classmethod
     def from_execution_record(

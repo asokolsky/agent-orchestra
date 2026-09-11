@@ -240,12 +240,27 @@ and `InvocationEvidenceStore` owns one job directory. Callers ask them to do
 things rather than reading their fields.
 
 *Parameter groups* name a set of values that belong together and are consumed by
-functions rather than by methods. `WorkerContext` groups the four collaborators
-a worker invocation needs, and `ReviewPlan` groups one workflow's objective,
-commands, limits, and identities; both are frozen dataclasses, and the worker
-functions unpack them. A parameter group may still carry a constructor that
-builds it from somewhere else, as `ReviewPlan.from_execution_record` builds one
-from durable evidence.
+functions rather than by methods. All are frozen dataclasses in
+`execution_context.py`, and the worker functions unpack them:
+
+| Group | Holds | Scope |
+|---|---|---|
+| `WorkerContext` | The four collaborators a worker invocation needs. | Caller-supplied; invariant for the whole invocation. |
+| `ReviewPlan` | One single-reviewer workflow's objective, commands, limits, and identities. | Fixed for the workflow; taken from the caller or rebuilt from evidence. |
+| `ReviewerSetReviewPlan` | The same for a reviewer batch, with a reviewer execution plan in place of one command. | As above. |
+| `ResumedExecution` | A stopped run's execution record and the identities resolved for it. | Recovered from evidence at the start of one resume. |
+| `ReviewerRound` | One batch iteration's run states, reviewed digest, and sequence position. | Rebuilt for each iteration. |
+
+A parameter group may carry a constructor that builds it from somewhere else, as
+`ReviewPlan.from_execution_record` builds one from durable evidence.
+
+A parameter group does not hold a `Run`. `workflow.transition` returns a
+replacement carrying a new state and iteration, so a group that stored one would
+go stale at every transition; only the run's identity is durable, and it is
+passed alongside. `ReviewerRound` is the single scoped exception: it holds the
+two run snapshots one iteration's steps were already being passed individually,
+and it is rebuilt for the next iteration rather than updated, so it cannot
+outlive the transitions that would make it stale.
 
 The distinction is worth keeping: a service collaborator earns its methods,
 while a parameter group exists to stop a set of values being threaded by hand.

@@ -22,7 +22,10 @@ from agent_orchestra.agents import (
 from agent_orchestra.audit import build_audit_document
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
-from agent_orchestra.execution_context import WorkerContext
+from agent_orchestra.execution_context import (
+    ReviewerSetReviewPlan,
+    WorkerContext,
+)
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptStatus,
@@ -266,13 +269,15 @@ def create_reviewed_batch_job(
             registry=DEFAULT_RUNTIME_REGISTRY,
         ),
         run=run,
-        objective='Review the change.',
-        reviewer_plan=plan,
-        developer_command=(),
-        developer_timeout_seconds=30,
-        max_iterations=3,
-        developer_identity=InvocationIdentity(
-            vendor='openai', model=None, runtime='codex'
+        plan=ReviewerSetReviewPlan(
+            objective='Review the change.',
+            reviewer_plan=plan,
+            developer_command=(),
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
         ),
     )
     return database, result, runs_directory
@@ -459,13 +464,15 @@ def test_job_current_lists_every_live_reviewer_during_fanout(
                         registry=DEFAULT_RUNTIME_REGISTRY,
                     ),
                     run=run,
-                    objective='Review the change.',
-                    reviewer_plan=plan,
-                    developer_command=(),
-                    developer_timeout_seconds=30,
-                    max_iterations=3,
-                    developer_identity=InvocationIdentity(
-                        vendor='openai', model=None, runtime='codex'
+                    plan=ReviewerSetReviewPlan(
+                        objective='Review the change.',
+                        reviewer_plan=plan,
+                        developer_command=(),
+                        developer_timeout_seconds=30,
+                        max_iterations=3,
+                        developer_identity=InvocationIdentity(
+                            vendor='openai', model=None, runtime='codex'
+                        ),
                     ),
                 )
             )
