@@ -53,7 +53,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "jobs": [],
   "error": null
 }
@@ -228,7 +228,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -252,7 +252,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `19`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `20`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -414,19 +414,26 @@ must contain at least one named set. Select a set for one source-code review
 batch with `run --reviewer-set NAME`; its required reviewers execute
 concurrently against the same immutable diff and keep disjoint request, result,
 artifact, stream, runtime-metadata, and invocation evidence. The batch advances
-to approval only when every reviewer approves and otherwise stops at the review
-boundary. A timed-out, failed, blocked, or invalid reviewer batch fails
-terminally because reviewer-set resume is not yet supported; its `failure.json`
-records the stable code `reviewer_batch_incomplete`. Worktree mutation is
-rejected separately as `worktree changed during read-only review`. Reviewer-set
-width is the configured member count, with one
+to approval only when every reviewer approves. A complete changes-requested
+batch launches developer remediation, then sends the amended immutable diff
+through the full reviewer set again. A timed-out, failed, or invalid member
+leaves the batch interrupted; `resume` preserves accepted peer responses and
+retries only incomplete reviewers with incremented attempts. A complete blocked
+batch and a worktree mutation fail terminally. Reviewer-set width is the
+configured member count, with one
 concurrent agent process per member and no separate concurrency cap; operators
 should size sets for available local resources. The canonical aggregate decision
 is stored under `review-batches/`, has a human-readable aggregate artifact under
-`artifacts/`, and is included in audit history. Developer
-remediation and reviewer-set resume remain tracked by
-[#26](https://github.com/asokolsky/agent-orchestra/issues/26). `config show`
-therefore reports reviewer sets with a `status` of `"review_only"`.
+`artifacts/`, and is included in audit history. `config show` reports configured
+reviewer sets with a `status` of `"full_workflow"`.
+
+The separate-job fallback remains available when a native reviewer set cannot
+be configured. Freeze the worktree, enqueue one reviewer-only job per reviewer
+against the same base SHA, head SHA, and diff digest, and keep each job's
+evidence under a separate external directory. Do not start developer work until
+all jobs finish; compare their verdicts manually, and invalidate every result if
+the worktree changes. This fallback has no shared lineage or canonical aggregate,
+so prefer `run --reviewer-set` when every required runtime is available.
 
 ## Persistent evidence retention
 
@@ -469,7 +476,7 @@ but deleted content cannot be reconstructed without an independent backup.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 17 JSON views expose
+is one process execution. Four read-only, schema-version 20 JSON views expose
 that hierarchy:
 
 ```text
@@ -526,7 +533,7 @@ batch-evidence schema versions remain readable and omit fields they predate.
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -592,7 +599,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-17 `job_id`,
+aliases. Callers must use the four commands above and the schema-20 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -730,7 +737,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -739,7 +746,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `19`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `20`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -782,7 +789,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -846,7 +853,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -857,7 +864,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 19,
+  "schema_version": 20,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {
