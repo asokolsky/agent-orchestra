@@ -128,7 +128,7 @@ def test_issue_review_error_codes(
         (RunNotFoundError('missing'), ('job_not_found', 'job not found: missing')),
         (
             RuntimeRegistryError('runtime_unknown', 'missing'),
-            ('runtime_unknown', 'runtime_unknown: missing'),
+            ('runtime_unknown', 'missing'),
         ),
         (
             WorkerError('specific failure', code='worker_specific'),

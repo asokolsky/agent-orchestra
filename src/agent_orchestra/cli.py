@@ -1173,7 +1173,7 @@ def _run_error(error: BaseException) -> tuple[str, str]:
     if isinstance(error, RunNotFoundError):
         return 'job_not_found', f'job not found: {error}'
     if isinstance(error, RuntimeRegistryError):
-        return error.code, str(error)
+        return error.code, str(error).removeprefix(f'{error.code}: ')
     if isinstance(error, WorkerError):
         return error.code or 'worker_error', str(error)
     if isinstance(error, ReviewerPlanError):
