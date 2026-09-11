@@ -6,7 +6,7 @@ import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from typing import TYPE_CHECKING, Any, Never, cast
 from uuid import uuid4
 
@@ -1194,6 +1194,100 @@ def test_incomplete_reviewer_set_is_resumable(
     )
     aggregate_path = run_directory / 'review-batches/000001.json'
     assert aggregate_path.exists() is (mode == 'blocked')
+
+
+@pytest.mark.parametrize(
+    'mode', ['stale_digest', 'wrong_correlation', 'duplicate_message_id']
+)
+def test_reviewer_set_rejects_invalid_member_correlation(
+    mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed on stale, miscorrelated, or duplicate member responses."""
+
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+    duplicate_message_id = str(uuid4())
+    wait_for_canonical_result = Event()
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Write one valid response and one response with invalid correlation."""
+
+        assert isinstance(request, ReviewerRequest)
+        if request.on_started is not None:
+            request.on_started()
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        request.artifact_path.write_text('# Review\n', encoding='utf-8')
+        response = _approved_response(document, request.artifact_path)
+        if mode == 'duplicate_message_id':
+            response['message_id'] = duplicate_message_id
+            if request.artifact_path.stem.endswith('portability'):
+                security_result = request.request_path.with_name(
+                    '000002-security-review-result.json'
+                )
+                for _ in range(500):
+                    if security_result.is_file():
+                        break
+                    wait_for_canonical_result.wait(0.01)
+                assert security_result.is_file()
+        elif request.artifact_path.stem.endswith('portability'):
+            if mode == 'stale_digest':
+                response['scope']['diff_digest'] = f'sha256:{"b" * 64}'
+            else:
+                response['in_reply_to'] = str(uuid4())
+        request.response_path.write_text(json.dumps(response), encoding='utf-8')
+        return AgentResult(
+            succeeded=True,
+            summary='approved',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+
+    with pytest.raises(WorkerError) as caught:
+        run_queued_reviewer_set(
+            context=WorkerContext(
+                store=store,
+                runs_directory=tmp_path / 'runs',
+                digest_worktree=lambda _path, _base: DIGEST,
+            ),
+            run=run,
+            objective='Review the change.',
+            reviewer_plan=ReviewerExecutionPlan(
+                'default',
+                (
+                    _reviewer('security', 'codex', 'openai'),
+                    _reviewer('portability', 'claude-code', 'anthropic'),
+                ),
+            ),
+            developer_command=('developer',),
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
+        )
+
+    durable = store.get(run.id)
+    assert durable.state is RunState.INTERRUPTED
+    run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
+    assert not (run_directory / 'review-batches/000001.json').exists()
+    audit = build_audit_document(
+        durable,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert caught.value.code == 'reviewer_batch_incomplete'
+    assert audit['result'] == 'incomplete'
+    assert (run_directory / 'messages/000002-security-review-result.json').is_file()
+    assert (run_directory / 'logs/portability-rejected-review-result.json').is_file()
 
 
 def test_resume_reviewer_set_retries_only_incomplete_member(
