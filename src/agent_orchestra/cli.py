@@ -102,7 +102,7 @@ from agent_orchestra.worker import (
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
@@ -266,28 +266,12 @@ def _working_tree_digest(repo: Path, base_sha: str) -> str | None:
     return f'sha256:{digest.hexdigest()}'
 
 
-def build_parser(
-    settings: Settings | None = None,
-    runtime_registry: RuntimeRegistry | None = None,
-) -> argparse.ArgumentParser:
-    """Build the CLI argument parser."""
-
-    runtimes = runtime_registry or DEFAULT_RUNTIME_REGISTRY
-    effective = settings or load_settings(
-        default_database=DEFAULT_DATABASE,
-        default_runs_directory=DEFAULT_RUNS_DIRECTORY,
-        runtime_registry=runtimes,
-    )
-    runs_default = cast('Path', effective.runs_directory.value)
-    parser = argparse.ArgumentParser(prog='agent-orchestra')
-    parser.set_defaults(runtime_registry=runtimes)
-    parser.add_argument(
-        '--version',
-        action='version',
-        version=f'%(prog)s {_distribution_version()}',
-    )
-    parser.add_argument('--database', type=Path, default=effective.database.value)
-    commands = parser.add_subparsers(dest='command', required=True)
+def _add_intake_commands(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    evidence: argparse.ArgumentParser,
+    runtimes: RuntimeRegistry,
+) -> None:
+    """Register the commands that bring work into the system."""
 
     commands.add_parser('init', help='initialize the local state database')
 
@@ -308,13 +292,16 @@ def build_parser(
     enqueue_many.add_argument('--base', default='HEAD')
 
     enqueue_issue = commands.add_parser(
-        'enqueue-issue', help='capture one GitHub or GitLab issue for review'
+        'enqueue-issue',
+        help='capture one GitHub or GitLab issue for review',
+        parents=[evidence],
     )
     enqueue_issue.add_argument('issue_url')
-    enqueue_issue.add_argument('--runs-directory', type=Path, default=runs_default)
 
     review_issue = commands.add_parser(
-        'review-issue', help='review a captured issue for implementation readiness'
+        'review-issue',
+        help='review a captured issue for implementation readiness',
+        parents=[evidence],
     )
     review_issue.add_argument('job_id')
     review_issue.add_argument(
@@ -328,17 +315,24 @@ def build_parser(
         default=runtimes.default(RuntimeRole.ISSUE_REVIEWER).identifier,
     )
     review_issue.add_argument('--reviewer-model')
-    review_issue.add_argument('--runs-directory', type=Path, default=runs_default)
     review_issue.set_defaults(reviewer_command=())
 
     publish_feedback = commands.add_parser(
-        'post-issue-feedback', help='publish reviewed feedback to an issue provider'
+        'post-issue-feedback',
+        help='publish reviewed feedback to an issue provider',
+        parents=[evidence],
     )
     publish_feedback.add_argument('job_id')
     publish_feedback.add_argument(
         '--authorize', action='store_true', help='authorize this provider write'
     )
-    publish_feedback.add_argument('--runs-directory', type=Path, default=runs_default)
+
+
+def _add_query_commands(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    evidence: argparse.ArgumentParser,
+) -> None:
+    """Register the read-only commands over stored jobs and evidence."""
 
     jobs = commands.add_parser('jobs', help='list stored jobs')
     jobs.add_argument(
@@ -358,24 +352,37 @@ def build_parser(
         help='include jobs in states that require human action',
     )
 
-    job = commands.add_parser('job', help='show one stored job')
+    job = commands.add_parser('job', help='show one stored job', parents=[evidence])
     job.add_argument('job_id')
-    job.add_argument('--runs-directory', type=Path, default=runs_default)
 
-    tasks = commands.add_parser('tasks', help='show one job task history')
+    tasks = commands.add_parser(
+        'tasks', help='show one job task history', parents=[evidence]
+    )
     tasks.add_argument('job_id')
-    tasks.add_argument('--runs-directory', type=Path, default=runs_default)
 
-    task = commands.add_parser('task', help='show one task and its attempts')
+    task = commands.add_parser(
+        'task', help='show one task and its attempts', parents=[evidence]
+    )
     task.add_argument('task_id')
-    task.add_argument('--runs-directory', type=Path, default=runs_default)
 
-    audit = commands.add_parser('audit', help='audit one job and its durable evidence')
+    audit = commands.add_parser(
+        'audit', help='audit one job and its durable evidence', parents=[evidence]
+    )
     audit.add_argument('job_id')
     audit.add_argument('--verify', action='store_true')
-    audit.add_argument('--runs-directory', type=Path, default=runs_default)
 
-    run = commands.add_parser('run', help='run a bounded review-remediation loop')
+
+def _add_execution_commands(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    evidence: argparse.ArgumentParser,
+    runtimes: RuntimeRegistry,
+    effective: Settings,
+) -> None:
+    """Register the commands that run or resume bounded review work."""
+
+    run = commands.add_parser(
+        'run', help='run a bounded review-remediation loop', parents=[evidence]
+    )
     run.add_argument('job_id')
     run.add_argument('--objective', required=True)
     run.add_argument('--timeout', type=int, default=1800)
@@ -401,28 +408,30 @@ def build_parser(
         help='run every required reviewer in this configured reviewer set',
     )
     run.set_defaults(settings=effective)
-    run.add_argument(
-        '--runs-directory',
-        type=Path,
-        default=runs_default,
-    )
     run.set_defaults(reviewer_command=())
 
-    resume = commands.add_parser('resume', help='resume one recoverable job')
-    resume.add_argument('job_id')
-    resume.add_argument(
-        '--runs-directory',
-        type=Path,
-        default=runs_default,
+    resume = commands.add_parser(
+        'resume', help='resume one recoverable job', parents=[evidence]
     )
+    resume.add_argument('job_id')
+
+
+def _add_administration_commands(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    evidence: argparse.ArgumentParser,
+    runtimes: RuntimeRegistry,
+) -> None:
+    """Register the commands that manage settings, retention, and skills."""
 
     config = commands.add_parser('config', help='show effective global settings')
     config_commands = config.add_subparsers(dest='config_command', required=True)
-    config_show = config_commands.add_parser('show', help='show effective settings')
-    config_show.add_argument('--runs-directory', type=Path, default=runs_default)
+    config_commands.add_parser(
+        'show', help='show effective settings', parents=[evidence]
+    )
 
-    prune = commands.add_parser('prune', help='preview or apply evidence retention')
-    prune.add_argument('--runs-directory', type=Path, default=runs_default)
+    prune = commands.add_parser(
+        'prune', help='preview or apply evidence retention', parents=[evidence]
+    )
     prune.add_argument('--older-than')
     prune.add_argument('--orphans', action='store_true')
     prune.add_argument('--apply', action='store_true')
@@ -449,6 +458,37 @@ def build_parser(
         metavar='RUNTIME=PATH',
         help='override one registered runtime skill root; repeat as needed',
     )
+
+
+def build_parser(
+    settings: Settings | None = None,
+    runtime_registry: RuntimeRegistry | None = None,
+) -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
+
+    runtimes = runtime_registry or DEFAULT_RUNTIME_REGISTRY
+    effective = settings or load_settings(
+        default_database=DEFAULT_DATABASE,
+        default_runs_directory=DEFAULT_RUNS_DIRECTORY,
+        runtime_registry=runtimes,
+    )
+    runs_default = cast('Path', effective.runs_directory.value)
+    parser = argparse.ArgumentParser(prog='agent-orchestra')
+    parser.set_defaults(runtime_registry=runtimes)
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {_distribution_version()}',
+    )
+    parser.add_argument('--database', type=Path, default=effective.database.value)
+    evidence = argparse.ArgumentParser(add_help=False)
+    evidence.add_argument('--runs-directory', type=Path, default=runs_default)
+    commands = parser.add_subparsers(dest='command', required=True)
+
+    _add_intake_commands(commands, evidence, runtimes)
+    _add_query_commands(commands, evidence)
+    _add_execution_commands(commands, evidence, runtimes, effective)
+    _add_administration_commands(commands, evidence, runtimes)
     return parser
 
 
@@ -521,21 +561,17 @@ def _enqueue_locals(args: argparse.Namespace, store: JobStore) -> int:
 
     directory = args.directory.expanduser().resolve()
     if not directory.is_dir():
-        print(
-            json.dumps(
-                {
-                    'schema_version': CLI_SCHEMA_VERSION,
-                    'directory': str(directory),
-                    'jobs': [],
-                    'summary': {'enqueued': 0, 'clean': 0, 'failed': 0},
-                    'failures': [],
-                    'error': {
-                        'code': 'directory_not_found',
-                        'message': f'directory not found: {directory}',
-                    },
-                },
-                indent=2,
-            )
+        _write_document(
+            {
+                'directory': str(directory),
+                'jobs': [],
+                'summary': {'enqueued': 0, 'clean': 0, 'failed': 0},
+                'failures': [],
+            },
+            error={
+                'code': 'directory_not_found',
+                'message': f'directory not found: {directory}',
+            },
         )
         return 2
 
@@ -565,25 +601,20 @@ def _enqueue_locals(args: argparse.Namespace, store: JobStore) -> int:
         store.initialize()
         for run in runs:
             store.add(run)
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'directory': str(directory),
-                'jobs': [
-                    {'job_id': str(run.id), 'worktree_path': str(run.worktree_path)}
-                    for run in runs
-                ],
-                'summary': {
-                    'enqueued': len(runs),
-                    'clean': clean_count,
-                    'failed': len(failures),
-                },
-                'failures': failures,
-                'error': None,
+    _write_document(
+        {
+            'directory': str(directory),
+            'jobs': [
+                {'job_id': str(run.id), 'worktree_path': str(run.worktree_path)}
+                for run in runs
+            ],
+            'summary': {
+                'enqueued': len(runs),
+                'clean': clean_count,
+                'failed': len(failures),
             },
-            indent=2,
-        )
+            'failures': failures,
+        }
     )
     return 2 if not runs and failures else 0
 
@@ -664,22 +695,17 @@ def _post_issue_feedback(args: argparse.Namespace, store: JobStore) -> int:
     except (RunNotFoundError, IssueReviewError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'job_id': action.job_id,
-                'iteration': action.iteration,
-                'action': action.action,
-                'provider_id': action.provider_id,
-                'remote_url': action.remote_url,
-                'created_at': action.created_at.astimezone(UTC)
-                .isoformat()
-                .replace('+00:00', 'Z'),
-                'error': None,
-            },
-            indent=2,
-        )
+    _write_document(
+        {
+            'job_id': action.job_id,
+            'iteration': action.iteration,
+            'action': action.action,
+            'provider_id': action.provider_id,
+            'remote_url': action.remote_url,
+            'created_at': action.created_at.astimezone(UTC)
+            .isoformat()
+            .replace('+00:00', 'Z'),
+        }
     )
     return 0
 
@@ -1074,6 +1100,22 @@ def _attach_reviewer_results(
             task['review_result'] = result
 
 
+def _write_document(
+    payload: Mapping[str, object] | None = None, *, error: object = None
+) -> None:
+    """Write one versioned CLI document."""
+
+    # Every public document is the schema version, the command's own payload in
+    # its declared order, then error. Building it here is what keeps a new
+    # command from omitting either bracket of that contract.
+    print(
+        json.dumps(
+            {'schema_version': CLI_SCHEMA_VERSION, **(payload or {}), 'error': error},
+            indent=2,
+        )
+    )
+
+
 def _write_job_error(
     code: str,
     message: str,
@@ -1083,13 +1125,12 @@ def _write_job_error(
 ) -> None:
     """Write a versioned error for a public job or task query."""
 
-    document: dict[str, object] = {'schema_version': CLI_SCHEMA_VERSION}
+    payload: dict[str, object] = {}
     if job_id is not None:
-        document['job_id'] = job_id
+        payload['job_id'] = job_id
     if task_id is not None:
-        document['task_id'] = task_id
-    document['error'] = {'code': code, 'message': message}
-    print(json.dumps(document, indent=2))
+        payload['task_id'] = task_id
+    _write_document(payload, error={'code': code, 'message': message})
 
 
 def _persisted_enum_error(error: PersistedEnumError) -> dict[str, str]:
@@ -1162,15 +1203,8 @@ def _jobs(args: argparse.Namespace, store: JobStore) -> int:
         ]
     summaries.sort(key=lambda item: str(item['created_at']), reverse=True)
     unreadable = [summary for summary in summaries if 'error' in summary]
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'jobs': summaries,
-                'error': unreadable[0]['error'] if unreadable else None,
-            },
-            indent=2,
-        )
+    _write_document(
+        {'jobs': summaries}, error=unreadable[0]['error'] if unreadable else None
     )
     return 2 if unreadable else 0
 
@@ -1220,17 +1254,12 @@ def _cancel(args: argparse.Namespace, store: JobStore) -> int:  # noqa: PLR0911
     except (ConcurrentUpdateError, ValueError) as error:
         _write_job_error('job_not_cancellable', str(error), job_id=args.job_id)
         return 2
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'job_id': str(cancelled.id),
-                'state': str(cancelled.state),
-                'reason': args.reason.strip(),
-                'error': None,
-            },
-            indent=2,
-        )
+    _write_document(
+        {
+            'job_id': str(cancelled.id),
+            'state': str(cancelled.state),
+            'reason': args.reason.strip(),
+        }
     )
     return 0
 
@@ -1315,16 +1344,7 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
                 for task in tasks
                 if task['status'] in {'pending', 'running'}
             ]
-            print(
-                json.dumps(
-                    {
-                        'schema_version': CLI_SCHEMA_VERSION,
-                        'job': document,
-                        'error': None,
-                    },
-                    indent=2,
-                )
-            )
+            _write_document({'job': document})
             return 0
 
     selected = _selected_job(args, store, include_stream_content=False)
@@ -1363,12 +1383,7 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
         for task in tasks
         if task['status'] in {'pending', 'running'}
     ]
-    print(
-        json.dumps(
-            {'schema_version': CLI_SCHEMA_VERSION, 'job': document, 'error': None},
-            indent=2,
-        )
-    )
+    _write_document({'job': document})
     return 0
 
 
@@ -1404,25 +1419,18 @@ def _tasks(args: argparse.Namespace, store: JobStore) -> int:
     except (InvocationEvidenceError, OSError) as error:
         _write_job_error('invalid_evidence', str(error), job_id=str(run.id))
         return 2
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'job_id': str(run.id),
-                'provider_actions': (
-                    []
-                    if isinstance(run, Run)
-                    else [
-                        _provider_action_summary(action)
-                        for action in store.list_issue_actions(run.id)
-                    ]
-                ),
-                'tasks': tasks,
-                'review_batches': review_batches,
-                'error': None,
-            },
-            indent=2,
-        )
+    _write_document(
+        {
+            'job_id': str(run.id),
+            'provider_actions': []
+            if isinstance(run, Run)
+            else [
+                _provider_action_summary(action)
+                for action in store.list_issue_actions(run.id)
+            ],
+            'tasks': tasks,
+            'review_batches': review_batches,
+        }
     )
     return 0
 
@@ -1500,12 +1508,7 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
         and matching_batches
     ):
         matching[0]['review_batch'] = matching_batches[0]
-    print(
-        json.dumps(
-            {'schema_version': CLI_SCHEMA_VERSION, 'task': matching[0], 'error': None},
-            indent=2,
-        )
-    )
+    _write_document({'task': matching[0]})
     return 0
 
 
@@ -1680,17 +1683,7 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
     ) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'job_id': str(result.id),
-                'state': result.state,
-                'error': None,
-            },
-            indent=2,
-        )
-    )
+    _write_document({'job_id': str(result.id), 'state': result.state})
     return 0
 
 
@@ -1703,20 +1696,11 @@ def _write_resume_document(
 ) -> None:
     """Write one versioned resume result to standard output."""
 
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'job_id': job_id,
-                'state': state,
-                'error': (
-                    {'code': error_code, 'message': error_message}
-                    if error_code is not None
-                    else None
-                ),
-            },
-            indent=2,
-        )
+    _write_document(
+        {'job_id': job_id, 'state': state},
+        error={'code': error_code, 'message': error_message}
+        if error_code is not None
+        else None,
     )
 
 
@@ -1836,49 +1820,44 @@ def _config_show(
         if '--runs-directory' in arguments
         else settings.runs_directory.source
     )
-    print(
-        json.dumps(
-            {
-                'schema_version': CLI_SCHEMA_VERSION,
-                'config_file': str(settings.path),
-                'settings': {
-                    'storage.database': {
-                        'value': str(args.database),
-                        'source': database_source,
-                    },
-                    'storage.runs_directory': {
-                        'value': str(args.runs_directory),
-                        'source': runs_source,
-                    },
-                    'retention.job_evidence_days': {
-                        'value': settings.job_evidence_days.value,
-                        'source': settings.job_evidence_days.source,
-                    },
-                    'reviewer_sets': {
-                        'value': [
-                            {
-                                'id': reviewer_set.identifier,
-                                'members': [
-                                    {
-                                        'id': member.identifier,
-                                        'runtime': member.runtime,
-                                        'vendor': member.vendor,
-                                        'model': member.model,
-                                        'required': True,
-                                    }
-                                    for member in reviewer_set.members
-                                ],
-                            }
-                            for reviewer_set in settings.reviewer_sets
-                        ],
-                        'source': 'file' if settings.reviewer_sets else 'built_in',
-                        'status': 'full_workflow',
-                    },
+    _write_document(
+        {
+            'config_file': str(settings.path),
+            'settings': {
+                'storage.database': {
+                    'value': str(args.database),
+                    'source': database_source,
                 },
-                'error': None,
+                'storage.runs_directory': {
+                    'value': str(args.runs_directory),
+                    'source': runs_source,
+                },
+                'retention.job_evidence_days': {
+                    'value': settings.job_evidence_days.value,
+                    'source': settings.job_evidence_days.source,
+                },
+                'reviewer_sets': {
+                    'value': [
+                        {
+                            'id': reviewer_set.identifier,
+                            'members': [
+                                {
+                                    'id': member.identifier,
+                                    'runtime': member.runtime,
+                                    'vendor': member.vendor,
+                                    'model': member.model,
+                                    'required': True,
+                                }
+                                for member in reviewer_set.members
+                            ],
+                        }
+                        for reviewer_set in settings.reviewer_sets
+                    ],
+                    'source': 'file' if settings.reviewer_sets else 'built_in',
+                    'status': 'full_workflow',
+                },
             },
-            indent=2,
-        )
+        }
     )
     return 0
 
@@ -1899,15 +1878,7 @@ def _prune(args: argparse.Namespace, store: JobStore, settings: Settings) -> int
         )
         outcomes = apply_prune_plan(plan) if args.apply else ()
     except (OSError, RetentionError) as error:
-        print(
-            json.dumps(
-                {
-                    'schema_version': CLI_SCHEMA_VERSION,
-                    'error': {'code': 'prune_unsafe', 'message': str(error)},
-                },
-                indent=2,
-            )
-        )
+        _write_document(error={'code': 'prune_unsafe', 'message': str(error)})
         return 2
     print(
         json.dumps(plan_document(plan, applied=args.apply, outcomes=outcomes), indent=2)
@@ -1922,15 +1893,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
     try:
         validate_packaged_manifests()
     except ManifestError as error:
-        print(
-            json.dumps(
-                {
-                    'schema_version': CLI_SCHEMA_VERSION,
-                    'error': {'code': error.code, 'message': str(error)},
-                },
-                indent=2,
-            )
-        )
+        _write_document(error={'code': error.code, 'message': str(error)})
         return 2
     reviewer_command: list[str] = []
     command_name = next(
@@ -1946,15 +1909,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
             default_runs_directory=DEFAULT_RUNS_DIRECTORY,
         )
     except SettingsError as error:
-        print(
-            json.dumps(
-                {
-                    'schema_version': CLI_SCHEMA_VERSION,
-                    'error': {'code': 'invalid_settings', 'message': str(error)},
-                },
-                indent=2,
-            )
-        )
+        _write_document(error={'code': 'invalid_settings', 'message': str(error)})
         return 2
     args = build_parser(settings).parse_args(arguments)
     if args.command in {'run', 'review-issue'}:
