@@ -25,9 +25,11 @@ from agent_orchestra import (
     worker,
 )
 from agent_orchestra import evidence as evidence_module
+from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.adapter.registry import (
     RuntimeDefinition,
     RuntimeRegistry,
+    RuntimeRegistryError,
     RuntimeRole,
 )
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
@@ -48,10 +50,12 @@ from agent_orchestra.execution_context import (
 )
 from agent_orchestra.invocations import (
     AttemptIdentity,
+    InvocationEvidenceError,
     InvocationEvidenceStore,
     InvocationIdentity,
     InvocationRecord,
 )
+from agent_orchestra.issue_review import IssueReviewError
 from agent_orchestra.manifests import ENGINE_TOO_OLD, ManifestError
 from agent_orchestra.messages import (
     NO_REMEDIATION_CHANGE,
@@ -60,9 +64,10 @@ from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
 from agent_orchestra.queued_review import (
     run_queued_review,
 )
-from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
+from agent_orchestra.reviewer_plan import ReviewerExecutionPlan, ReviewerPlanError
+from agent_orchestra.schemas import SchemaValidationError
 from agent_orchestra.settings import load_settings
-from agent_orchestra.store import JobStore
+from agent_orchestra.store import JobStore, RunNotFoundError
 from agent_orchestra.worker import (
     resume_review,
 )
@@ -77,6 +82,70 @@ class CliRunContext:
     store: JobStore
     run: Run
     runs_directory: Path
+
+
+@pytest.mark.parametrize(
+    ('error', 'expected'),
+    [
+        (RunNotFoundError('missing'), ('job_not_found', 'job not found: missing')),
+        (
+            IssueReviewerError('timed out', timed_out=True),
+            ('issue_review_timed_out', 'timed out'),
+        ),
+        (
+            IssueReviewerError('interrupted', interrupted=True),
+            ('issue_review_interrupted', 'interrupted'),
+        ),
+        (
+            IssueReviewerError('failed'),
+            ('issue_reviewer_failed', 'failed'),
+        ),
+        (
+            SchemaValidationError('invalid result'),
+            ('issue_review_result_invalid', 'invalid result'),
+        ),
+        (
+            InvocationEvidenceError('invalid evidence'),
+            ('invalid_evidence', 'invalid evidence'),
+        ),
+        (
+            IssueReviewError('review failed'),
+            ('issue_review_failed', 'review failed'),
+        ),
+    ],
+)
+def test_issue_review_error_codes(
+    error: BaseException, expected: tuple[str, str]
+) -> None:
+    """Pin every public issue-review classifier result."""
+
+    assert cli._issue_review_error(error) == expected
+
+
+@pytest.mark.parametrize(
+    ('error', 'expected'),
+    [
+        (RunNotFoundError('missing'), ('job_not_found', 'job not found: missing')),
+        (
+            RuntimeRegistryError('runtime_unknown', 'missing'),
+            ('runtime_unknown', 'runtime_unknown: missing'),
+        ),
+        (
+            WorkerError('specific failure', code='worker_specific'),
+            ('worker_specific', 'specific failure'),
+        ),
+        (WorkerError('worker failure'), ('worker_error', 'worker failure')),
+        (
+            ReviewerPlanError('invalid plan'),
+            ('reviewer_plan_invalid', 'invalid plan'),
+        ),
+        (OSError('run failed'), ('run_failed', 'run failed')),
+    ],
+)
+def test_run_error_codes(error: BaseException, expected: tuple[str, str]) -> None:
+    """Pin every public run classifier result."""
+
+    assert cli._run_error(error) == expected
 
 
 def evidence_directory(context: CliRunContext) -> Path:
