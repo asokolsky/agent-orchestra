@@ -18,6 +18,7 @@ from agent_orchestra.agents import (
     CommandAgentAdapter,
     ReviewerRequest,
 )
+from agent_orchestra.audit import build_audit_document
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import evidence_root_for_job, resolve_evidence_path
 from agent_orchestra.execution_context import WorkerContext
@@ -424,7 +425,17 @@ def test_real_reviewer_batch_is_visible_from_all_batch_views(
     job_document = json.loads(capsys.readouterr().out)['job']
     assert job_document['review_batches'][0]['verdict'] == 'approved'
 
+    audit_calls: list[None] = []
+
+    def record_audit(*args: Any, **kwargs: Any) -> dict[str, object]:
+        """Record each verification while preserving the real audit behavior."""
+
+        audit_calls.append(None)
+        return build_audit_document(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, 'build_audit_document', record_audit)
     assert main(arguments(database, 'tasks', str(job.id), root)) == 0
+    assert len(audit_calls) == 1
     tasks_document = json.loads(capsys.readouterr().out)
     assert tasks_document['review_batches'] == job_document['review_batches']
     security_task = next(
@@ -455,6 +466,7 @@ def test_real_reviewer_batch_is_visible_from_all_batch_views(
     [
         'messages/000001-security-review-request.json',
         'messages/000002-security-review-result.json',
+        'artifacts/review-0001-security.md',
     ],
 )
 def test_batch_views_reject_modified_reviewer_evidence(
@@ -468,9 +480,12 @@ def test_batch_views_reject_modified_reviewer_evidence(
     database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
     job_directory = resolve_evidence_path(root, str(job.id))
     message_path = job_directory / relative_path
-    message = json.loads(message_path.read_text(encoding='utf-8'))
-    message['created_at'] = '2026-09-10T12:01:00Z'
-    message_path.write_text(json.dumps(message), encoding='utf-8')
+    if message_path.suffix == '.json':
+        message = json.loads(message_path.read_text(encoding='utf-8'))
+        message['created_at'] = '2026-09-10T12:01:00Z'
+        message_path.write_text(json.dumps(message), encoding='utf-8')
+    else:
+        message_path.write_text('# Modified review\n', encoding='utf-8')
     task_id = reviewer_task_id(str(job.id), 1, 'security')
 
     for command, identifier in (

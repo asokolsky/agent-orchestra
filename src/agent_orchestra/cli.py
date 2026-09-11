@@ -864,18 +864,18 @@ def _review_batch_documents(
     runs_directory: Path,
     *,
     allow_missing: bool = False,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Read validated aggregate reviewer-batch evidence for one job."""
 
     job_id = str(job.id)
     job_directory = _job_directory(job_id, runs_directory)
     if job_directory is None:
         if allow_missing:
-            return []
+            return [], []
         raise InvocationEvidenceError(f'evidence not found for job: {job_id}')
     batch_directory = job_directory / 'review-batches'
     if not batch_directory.exists():
-        return []
+        return [], []
     if batch_directory.is_symlink() or not batch_directory.is_dir():
         message = 'review batch evidence directory is unsafe'
         raise InvocationEvidenceError(message)
@@ -919,6 +919,7 @@ def _review_batch_documents(
         raise InvocationEvidenceError(
             f'invalid review batch evidence: {error}'
         ) from error
+    findings: list[dict[str, object]] = []
     if documents:
         audit = build_audit_document(
             job,
@@ -945,15 +946,14 @@ def _review_batch_documents(
                 'invalid review batch correlation: '
                 f'{first.get("code")}: {first.get("message")}'
             )
-    return documents
+    return documents, findings
 
 
 def _review_result_documents(
     job: Run,
-    store: JobStore,
-    runs_directory: Path,
     job_directory: Path,
     batches: list[dict[str, object]],
+    audit_findings: list[dict[str, object]],
 ) -> dict[tuple[int, str], dict[str, object]]:
     """Project correlated per-reviewer results from validated batch evidence."""
 
@@ -981,17 +981,10 @@ def _review_result_documents(
                     attempt=1,
                 )
                 relevant_paths.update((paths.request, paths.result, paths.artifact))
-        audit = build_audit_document(
-            job,
-            store.list_transitions(str(job.id)),
-            (),
-            runs_directory,
-            verify=True,
-        )
         invalid = next(
             (
                 finding
-                for finding in cast('list[dict[str, object]]', audit['findings'])
+                for finding in audit_findings
                 if finding.get('path') in relevant_paths
             ),
             None,
@@ -1344,7 +1337,7 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
         else _issue_job_summary(run, store.list_issue_actions(run.id))
     )
     try:
-        review_batches = (
+        review_batches, _ = (
             _review_batch_documents(
                 run,
                 store,
@@ -1352,7 +1345,7 @@ def _job(args: argparse.Namespace, store: JobStore) -> int:
                 allow_missing=run.state is RunState.QUEUED,
             )
             if isinstance(run, Run)
-            else []
+            else ([], [])
         )
     except (InvocationEvidenceError, OSError) as error:
         _write_job_error('invalid_evidence', str(error), job_id=str(run.id))
@@ -1387,7 +1380,7 @@ def _tasks(args: argparse.Namespace, store: JobStore) -> int:
         return 2
     run, tasks = selected
     try:
-        review_batches = (
+        review_batches, audit_findings = (
             _review_batch_documents(
                 run,
                 store,
@@ -1395,7 +1388,7 @@ def _tasks(args: argparse.Namespace, store: JobStore) -> int:
                 allow_missing=run.state is RunState.QUEUED,
             )
             if isinstance(run, Run)
-            else []
+            else ([], [])
         )
         if isinstance(run, Run) and review_batches:
             job_directory = _required_job_directory(str(run.id), args.runs_directory)
@@ -1403,10 +1396,9 @@ def _tasks(args: argparse.Namespace, store: JobStore) -> int:
                 tasks,
                 _review_result_documents(
                     run,
-                    store,
-                    args.runs_directory,
                     job_directory,
                     review_batches,
+                    audit_findings,
                 ),
             )
     except (InvocationEvidenceError, OSError) as error:
@@ -1461,9 +1453,12 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
         )
         return 2
     review_batches: list[dict[str, object]] = []
+    matching_batches: list[dict[str, object]] = []
     try:
         if isinstance(run, Run) and matching[0]['role'] == RuntimeRole.REVIEWER.value:
-            review_batches = _review_batch_documents(run, store, args.runs_directory)
+            review_batches, audit_findings = _review_batch_documents(
+                run, store, args.runs_directory
+            )
             matching_batches = [
                 batch
                 for batch in review_batches
@@ -1486,10 +1481,9 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
                     matching,
                     _review_result_documents(
                         run,
-                        store,
-                        args.runs_directory,
                         job_directory,
                         [selected_batch],
+                        audit_findings,
                     ),
                 )
     except (InvocationEvidenceError, OSError) as error:
@@ -1500,14 +1494,12 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
             task_id=args.task_id,
         )
         return 2
-    if isinstance(run, Run) and matching[0]['role'] == RuntimeRole.REVIEWER.value:
-        matching_batches = [
-            batch
-            for batch in review_batches
-            if batch['iteration'] == matching[0]['iteration']
-        ]
-        if matching_batches:
-            matching[0]['review_batch'] = matching_batches[0]
+    if (
+        isinstance(run, Run)
+        and matching[0]['role'] == RuntimeRole.REVIEWER.value
+        and matching_batches
+    ):
+        matching[0]['review_batch'] = matching_batches[0]
     print(
         json.dumps(
             {'schema_version': CLI_SCHEMA_VERSION, 'task': matching[0], 'error': None},
