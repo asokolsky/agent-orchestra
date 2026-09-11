@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -18,6 +19,15 @@ RUNTIME_METADATA_ENV = 'AGENT_ORCHESTRA_RUNTIME_METADATA_PATH'
 
 class RuntimeMetadataError(OSError):
     """Raised when runtime provenance is malformed."""
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeMetadata:
+    """What one built-in adapter reports about the process it bounded."""
+
+    effective_models: tuple[str, ...] = ()
+    effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
+    timed_out: bool = False
 
 
 def child_process_environment(**overrides: str) -> dict[str, str]:
@@ -49,21 +59,22 @@ def reviewer_process_environment(
     return child_process_environment(**values)
 
 
-def write_runtime_metadata(models: tuple[str, ...]) -> None:
-    """Write effective model identities to the orchestrator-provided path."""
+def write_runtime_metadata(models: tuple[str, ...], *, timed_out: bool = False) -> None:
+    """Write effective model identities and bounding outcome to the given path."""
 
     value = os.environ.get(RUNTIME_METADATA_ENV)
     if value is None:
         return
     path = Path(value)
     document = {
-        'schema_version': 1,
+        'schema_version': 2,
         'effective_models': list(dict.fromkeys(models)),
         'status': (
             EffectiveModelStatus.REPORTED
             if models
             else EffectiveModelStatus.UNAVAILABLE
         ).value,
+        'timed_out': timed_out,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
@@ -78,9 +89,7 @@ def write_runtime_metadata(models: tuple[str, ...]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def read_runtime_metadata(
-    path: Path,
-) -> tuple[tuple[str, ...], EffectiveModelStatus]:
+def read_runtime_metadata(path: Path) -> RuntimeMetadata:
     """Read and remove one validated adapter metadata exchange file."""
 
     try:
@@ -93,31 +102,39 @@ def read_runtime_metadata(
         'schema_version',
         'effective_models',
         'status',
+        'timed_out',
     }:
         message = 'invalid runtime metadata fields'
         raise RuntimeMetadataError(message)
     models = document['effective_models']
     status = document['status']
+    timed_out = document['timed_out']
     if (
-        document['schema_version'] != 1
+        document['schema_version'] != 2
         or not isinstance(models, list)
         or not all(isinstance(model, str) and model for model in models)
         or len(models) != len(set(models))
         or status not in EffectiveModelStatus.values()
         or (status == EffectiveModelStatus.REPORTED) != bool(models)
+        or type(timed_out) is not bool
     ):
         message = 'invalid runtime metadata values'
         raise RuntimeMetadataError(message)
-    return tuple(models), EffectiveModelStatus(status)
+    return RuntimeMetadata(
+        effective_models=tuple(models),
+        effective_model_status=EffectiveModelStatus(status),
+        timed_out=timed_out,
+    )
 
 
-def exception_runtime_metadata(
-    error: BaseException,
-) -> tuple[tuple[str, ...], EffectiveModelStatus]:
+def exception_runtime_metadata(error: BaseException) -> RuntimeMetadata:
     """Return validated provenance preserved by a failed command adapter."""
 
     models = getattr(error, 'effective_models', ())
     status = getattr(error, 'effective_model_status', 'unavailable')
+    timed_out = getattr(error, 'timed_out', False)
+    if type(timed_out) is not bool:
+        timed_out = False
     if (
         isinstance(models, tuple)
         and all(isinstance(model, str) and model for model in models)
@@ -125,8 +142,12 @@ def exception_runtime_metadata(
         and status in EffectiveModelStatus.values()
         and (status == EffectiveModelStatus.REPORTED) == bool(models)
     ):
-        return tuple(models), EffectiveModelStatus(status)
-    return (), EffectiveModelStatus.UNAVAILABLE
+        return RuntimeMetadata(
+            effective_models=tuple(models),
+            effective_model_status=EffectiveModelStatus(status),
+            timed_out=timed_out,
+        )
+    return RuntimeMetadata(timed_out=timed_out)
 
 
 def runtime_metadata_path(

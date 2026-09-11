@@ -27,6 +27,7 @@ from agent_orchestra.adapter.developer import (
     read_request,
     write_handoff,
 )
+from agent_orchestra.adapter.errors import AdapterError
 from agent_orchestra.adapter.issue_reviewer import (
     IssueReviewerError,
     issue_review_prompt,
@@ -42,6 +43,7 @@ from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
     child_process_environment,
     reviewer_process_environment,
+    write_runtime_metadata,
 )
 from agent_orchestra.schemas import (
     DEVELOPER_RESULT_SCHEMA,
@@ -53,7 +55,7 @@ from agent_orchestra.schemas import (
 from agent_orchestra.skill_install import skill_destination
 
 
-class CodexReviewerError(RuntimeError):
+class CodexReviewerError(AdapterError):
     """Raised when Codex cannot produce a valid structured review."""
 
 
@@ -235,7 +237,7 @@ def _execute_codex_reviewer(
         raise CodexReviewerError(MISSING_REQUEST_PATHS) from error
     _require_safe_artifact_path(request_path, artifact_path)
     if timeout_seconds <= 0:
-        raise CodexReviewerError(CODEX_TIMEOUT)
+        raise CodexReviewerError(CODEX_TIMEOUT, timed_out=True)
     codex = shutil.which('codex')
     if codex is None:
         raise CodexReviewerError(CODEX_NOT_FOUND)
@@ -273,7 +275,7 @@ def _execute_codex_reviewer(
                 timeout=max(1, timeout_seconds - 5),
             )
         except subprocess.TimeoutExpired as error:
-            raise CodexReviewerError(CODEX_TIMEOUT) from error
+            raise CodexReviewerError(CODEX_TIMEOUT, timed_out=True) from error
         if completed.returncode != 0:
             diagnostic = completed.stderr.strip() or completed.stdout.strip()
             raise CodexReviewerError(
@@ -387,7 +389,7 @@ def _execute_codex_developer(
     except (KeyError, TypeError, ValueError) as error:
         raise DeveloperAdapterError(MISSING_REQUEST_PATHS) from error
     if timeout_seconds <= 0:
-        raise DeveloperAdapterError(CODEX_DEVELOPER_TIMEOUT)
+        raise DeveloperAdapterError(CODEX_DEVELOPER_TIMEOUT, timed_out=True)
     codex = shutil.which('codex')
     if codex is None:
         raise DeveloperAdapterError(CODEX_NOT_FOUND)
@@ -430,7 +432,9 @@ def _execute_codex_developer(
                 timeout=max(1, timeout_seconds - 5),
             )
         except subprocess.TimeoutExpired as error:
-            raise DeveloperAdapterError(CODEX_DEVELOPER_TIMEOUT) from error
+            raise DeveloperAdapterError(
+                CODEX_DEVELOPER_TIMEOUT, timed_out=True
+            ) from error
         if completed.returncode != 0:
             diagnostic = completed.stderr.strip() or completed.stdout.strip()
             raise DeveloperAdapterError(
@@ -481,6 +485,11 @@ def main(argv: list[str] | None = None) -> int:
             CodexDeveloperAdapter(parsed.model).execute(parsed.request, parsed.response)
     except (CodexReviewerError, DeveloperAdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
+        if isinstance(error, AdapterError) and error.timed_out:
+            # The orchestrator sees only a non-zero exit, so report the reason
+            # through the sidecar. Nothing has written it yet on this path: the
+            # adapter records models only after its child returns normally.
+            write_runtime_metadata((), timed_out=True)
         return 2
     return 0
 

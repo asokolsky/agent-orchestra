@@ -384,9 +384,10 @@ def write_provenance_reviewer(path: Path) -> None:
         'request_path = Path(sys.argv[1])',
         """metadata_path = Path(os.environ["AGENT_ORCHESTRA_RUNTIME_METADATA_PATH"])
 metadata_path.write_text(json.dumps({
-    "schema_version": 1,
+    "schema_version": 2,
     "effective_models": ["claude-primary", "claude-fallback"],
     "status": "reported",
+    "timed_out": False,
 }))
 request_path = Path(sys.argv[1])""",
         1,
@@ -3525,7 +3526,7 @@ def test_concurrent_active_resumes_launch_one_process(
     [
         ('approved', '30', 0, 'succeeded', None),
         ('nonzero', '30', 2, 'failed', 'codex exec failed with code 9'),
-        ('timeout', '8', 2, 'failed', 'codex review timed out'),
+        ('timeout', '8', 2, 'timed_out', 'codex review timed out'),
     ],
 )
 def test_builtin_run_exposes_child_output_through_task_view(
@@ -3545,6 +3546,8 @@ def test_builtin_run_exposes_child_output_through_task_view(
     # equal deadlines make which bound fires a race, which is what made this
     # test flaky under CI load. test_run_marks_reviewer_timeout covers the
     # orchestrator killing an adapter that overruns, where nothing competes.
+    # Either bound records timed_out: the adapter reports its own expiry through
+    # the runtime metadata sidecar, so the two agree.
     mode, timeout, expected_result, conclusion, diagnostic = case
     fake_codex = tmp_path / 'bin/codex'
     write_fake_codex(fake_codex, mode=mode)

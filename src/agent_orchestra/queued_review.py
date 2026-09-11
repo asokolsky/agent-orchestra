@@ -62,6 +62,7 @@ from agent_orchestra.invocations import (
     InvocationIdentity,
     ProcessOutcome,
     attempt_activation_was_persisted,
+    failure_conclusion,
     prepare_run_evidence_directory,
     record_invocation,
     timestamp,
@@ -310,7 +311,7 @@ def _run_queued_review(
             if artifact_path.is_file():
                 record_finalized_path(artifact_path, 'review_artifact')
         except subprocess.TimeoutExpired as error:
-            effective_models, effective_model_status = exception_runtime_metadata(error)
+            metadata = exception_runtime_metadata(error)
             record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
@@ -327,8 +328,8 @@ def _run_queued_review(
                     stderr=error.stderr,
                     exit_code=None,
                     timed_out=True,
-                    effective_models=effective_models,
-                    effective_model_status=effective_model_status,
+                    effective_models=metadata.effective_models,
+                    effective_model_status=metadata.effective_model_status,
                 ),
                 run_directory=run_directory,
             )
@@ -351,7 +352,7 @@ def _run_queued_review(
                 code=RESUME_INTERRUPTED_CODE,
             ) from error
         except KeyboardInterrupt as error:
-            effective_models, effective_model_status = exception_runtime_metadata(error)
+            metadata = exception_runtime_metadata(error)
             if attempt_activation_was_persisted(
                 run_directory, sequence, RuntimeRole.REVIEWER, reviewer_attempt
             ):
@@ -371,8 +372,8 @@ def _run_queued_review(
                         stderr=None,
                         exit_code=None,
                         interrupted=True,
-                        effective_models=effective_models,
-                        effective_model_status=effective_model_status,
+                        effective_models=metadata.effective_models,
+                        effective_model_status=metadata.effective_model_status,
                     ),
                     run_directory=run_directory,
                 )
@@ -392,7 +393,7 @@ def _run_queued_review(
             store.update(interrupted, expected_state=RunState.REVIEWING)
             raise
         except OSError as error:
-            effective_models, effective_model_status = exception_runtime_metadata(error)
+            metadata = exception_runtime_metadata(error)
             record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
@@ -408,8 +409,8 @@ def _run_queued_review(
                     stdout='',
                     stderr=str(error),
                     exit_code=None,
-                    effective_models=effective_models,
-                    effective_model_status=effective_model_status,
+                    effective_models=metadata.effective_models,
+                    effective_model_status=metadata.effective_model_status,
                 ),
                 run_directory=run_directory,
             )
@@ -436,12 +437,15 @@ def _run_queued_review(
                     stdout=completed.stdout,
                     stderr=completed.stderr,
                     exit_code=completed.exit_code,
+                    timed_out=completed.timed_out,
                     effective_models=completed.effective_models,
                     effective_model_status=completed.effective_model_status,
                     finished_at=process_finished_at,
                 ),
                 run_directory=run_directory,
-                lifecycle=AttemptLifecycle(conclusion=AttemptConclusion.FAILED),
+                lifecycle=AttemptLifecycle(
+                    conclusion=failure_conclusion(completed.timed_out)
+                ),
             )
             failed = transition(reviewing, RunState.FAILED)
             store.update(failed, expected_state=RunState.REVIEWING)
@@ -471,6 +475,7 @@ def _run_queued_review(
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 exit_code=completed.exit_code,
+                timed_out=completed.timed_out,
                 finished_at=process_finished_at,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
@@ -509,13 +514,14 @@ def _run_queued_review(
                     stdout=None,
                     stderr=None,
                     exit_code=completed.exit_code,
+                    timed_out=completed.timed_out,
                     finished_at=process_finished_at,
                     effective_models=completed.effective_models,
                     effective_model_status=completed.effective_model_status,
                 ),
                 run_directory=run_directory,
                 lifecycle=AttemptLifecycle(
-                    conclusion=AttemptConclusion.FAILED,
+                    conclusion=failure_conclusion(completed.timed_out),
                     response_received_at=response_received_at,
                     validation_started_at=validation_started_at,
                 ),
@@ -551,6 +557,7 @@ def _run_queued_review(
                 stdout=None,
                 stderr=None,
                 exit_code=completed.exit_code,
+                timed_out=completed.timed_out,
                 finished_at=process_finished_at,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
@@ -671,7 +678,7 @@ def _run_queued_review(
                 )
             )
         except subprocess.TimeoutExpired as error:
-            effective_models, effective_model_status = exception_runtime_metadata(error)
+            metadata = exception_runtime_metadata(error)
             record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
@@ -687,8 +694,8 @@ def _run_queued_review(
                     stderr=error.stderr,
                     exit_code=None,
                     timed_out=True,
-                    effective_models=effective_models,
-                    effective_model_status=effective_model_status,
+                    effective_models=metadata.effective_models,
+                    effective_model_status=metadata.effective_model_status,
                 ),
                 run_directory=run_directory,
             )
@@ -705,7 +712,7 @@ def _run_queued_review(
                 code=RESUME_INTERRUPTED_CODE,
             ) from error
         except KeyboardInterrupt as error:
-            effective_models, effective_model_status = exception_runtime_metadata(error)
+            metadata = exception_runtime_metadata(error)
             if attempt_activation_was_persisted(
                 run_directory, sequence, RuntimeRole.DEVELOPER, 1
             ):
@@ -724,8 +731,8 @@ def _run_queued_review(
                         stderr=None,
                         exit_code=None,
                         interrupted=True,
-                        effective_models=effective_models,
-                        effective_model_status=effective_model_status,
+                        effective_models=metadata.effective_models,
+                        effective_model_status=metadata.effective_model_status,
                     ),
                     run_directory=run_directory,
                 )
@@ -739,7 +746,7 @@ def _run_queued_review(
             store.update(interrupted, expected_state=RunState.DEVELOPING)
             raise
         except OSError as error:
-            effective_models, effective_model_status = exception_runtime_metadata(error)
+            metadata = exception_runtime_metadata(error)
             record_invocation(
                 AttemptIdentity(
                     run_id=str(run.id),
@@ -754,8 +761,8 @@ def _run_queued_review(
                     stdout='',
                     stderr=str(error),
                     exit_code=None,
-                    effective_models=effective_models,
-                    effective_model_status=effective_model_status,
+                    effective_models=metadata.effective_models,
+                    effective_model_status=metadata.effective_model_status,
                 ),
                 run_directory=run_directory,
             )
@@ -781,12 +788,15 @@ def _run_queued_review(
                     stdout=completed.stdout,
                     stderr=completed.stderr,
                     exit_code=completed.exit_code,
+                    timed_out=completed.timed_out,
                     finished_at=process_finished_at,
                     effective_models=completed.effective_models,
                     effective_model_status=completed.effective_model_status,
                 ),
                 run_directory=run_directory,
-                lifecycle=AttemptLifecycle(conclusion=AttemptConclusion.FAILED),
+                lifecycle=AttemptLifecycle(
+                    conclusion=failure_conclusion(completed.timed_out)
+                ),
             )
             failed = transition(developing, RunState.FAILED)
             store.update(failed, expected_state=RunState.DEVELOPING)
@@ -814,6 +824,7 @@ def _run_queued_review(
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 exit_code=completed.exit_code,
+                timed_out=completed.timed_out,
                 finished_at=process_finished_at,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
@@ -864,6 +875,7 @@ def _run_queued_review(
                     stdout=None,
                     stderr=None,
                     exit_code=completed.exit_code,
+                    timed_out=completed.timed_out,
                     finished_at=process_finished_at,
                     effective_models=completed.effective_models,
                     effective_model_status=completed.effective_model_status,
@@ -920,13 +932,14 @@ def _run_queued_review(
                     stdout=None,
                     stderr=None,
                     exit_code=completed.exit_code,
+                    timed_out=completed.timed_out,
                     finished_at=process_finished_at,
                     effective_models=completed.effective_models,
                     effective_model_status=completed.effective_model_status,
                 ),
                 run_directory=run_directory,
                 lifecycle=AttemptLifecycle(
-                    conclusion=AttemptConclusion.FAILED,
+                    conclusion=failure_conclusion(completed.timed_out),
                     response_received_at=response_received_at,
                     validation_started_at=validation_started_at,
                 ),

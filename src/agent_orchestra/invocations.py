@@ -76,6 +76,12 @@ class AttemptConclusion(PersistedEnum):
     INTERRUPTED = 'interrupted'
 
 
+def failure_conclusion(timed_out: bool) -> AttemptConclusion:
+    """Return the outcome for a failed attempt, separating an expired bound."""
+
+    return AttemptConclusion.TIMED_OUT if timed_out else AttemptConclusion.FAILED
+
+
 class TaskStatus(StrEnum):
     """Status derived from the latest attempt for one durable request."""
 

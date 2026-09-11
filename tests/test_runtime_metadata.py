@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from agent_orchestra.adapter.claude_code import _effective_models
+from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
+    RuntimeMetadata,
     RuntimeMetadataError,
     read_runtime_metadata,
     reviewer_process_environment,
@@ -61,22 +63,31 @@ def test_reviewer_environment_confines_transient_outputs(
 
 @pytest.mark.parametrize(
     ('models', 'expected_status'),
-    [(('model-a', 'model-b'), 'reported'), ((), 'unavailable')],
+    [
+        (('model-a', 'model-b'), EffectiveModelStatus.REPORTED),
+        ((), EffectiveModelStatus.UNAVAILABLE),
+    ],
 )
+@pytest.mark.parametrize('timed_out', [False, True])
 def test_runtime_metadata_round_trip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     models: tuple[str, ...],
-    expected_status: str,
+    expected_status: EffectiveModelStatus,
+    timed_out: bool,
 ) -> None:
-    """Exchange effective identities without retaining a transient sidecar."""
+    """Exchange identities and bounding outcome without retaining a sidecar."""
 
     path = tmp_path / 'runtime.json'
     monkeypatch.setenv(RUNTIME_METADATA_ENV, str(path))
 
-    write_runtime_metadata(models)
+    write_runtime_metadata(models, timed_out=timed_out)
 
-    assert read_runtime_metadata(path) == (models, expected_status)
+    assert read_runtime_metadata(path) == RuntimeMetadata(
+        effective_models=models,
+        effective_model_status=expected_status,
+        timed_out=timed_out,
+    )
     assert not path.exists()
 
 
@@ -89,9 +100,10 @@ def test_runtime_metadata_rejects_inconsistent_status(
     path.write_text(
         json.dumps(
             {
-                'schema_version': 1,
+                'schema_version': 2,
                 'effective_models': [],
                 'status': 'reported',
+                'timed_out': False,
             }
         )
     )

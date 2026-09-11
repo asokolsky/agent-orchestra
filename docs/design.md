@@ -1007,6 +1007,21 @@ These typed layers deliberately reuse familiar values such as `failed`,
 `cancelled`, and `interrupted`: an attempt conclusion describes process execution,
 developer status and reviewer verdict describe protocol messages, and `RunState`
 alone controls workflow progression.
+
+An attempt concludes `timed_out` whenever the work exceeded the time it was
+given, no matter which component noticed. Two bounds apply to one invocation:
+the orchestrator waits `timeout_seconds` for the adapter, and a built-in adapter
+allows its own child `max(1, timeout_seconds - 5)`, so that the adapter normally
+detects the overrun first and can report it. Only the orchestrator's bound raises
+a timeout in the orchestrator process; the adapter is a separate process and can
+report its own expiry only by exiting. Since that exit would otherwise be
+indistinguishable from a crash, the adapter records the expiry in the runtime
+metadata sidecar it already uses for model provenance, and the orchestrator maps
+that to the same conclusion.
+Without this, the common case — a reviewer that runs too long — would persist as
+`failed`, and only the adapter's English diagnostic on stderr would say
+otherwise. `timed_out` on the attempt record stays derived from the conclusion,
+so the two can never disagree.
 Schema version 3 separates `requested_model` from the ordered
 `effective_models` collection. `effective_model_status` is `reported` only when
 stable machine-readable runtime metadata supplied at least one identity;
