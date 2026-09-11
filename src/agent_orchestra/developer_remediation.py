@@ -30,7 +30,11 @@ from agent_orchestra.evidence import (
     run_evidence_path,
     worktree_digest,
 )
-from agent_orchestra.execution_context import ReviewerSetReviewPlan, ReviewPlan
+from agent_orchestra.execution_context import (
+    ReviewerRound,
+    ReviewerSetReviewPlan,
+    ReviewPlan,
+)
 from agent_orchestra.invocations import (
     AttemptConclusion,
     AttemptIdentity,
@@ -448,11 +452,13 @@ def _resume_developer_request(
     if reviewer_set_continuation is not None:
         return reviewer_set_continuation(
             context=context,
-            run=run,
-            reviewing=reviewing,
+            review_round=ReviewerRound(
+                run=run,
+                reviewing=reviewing,
+                current_digest=measured_digest,
+                sequence=sequence + 2,
+            ),
             plan=plan,
-            current_digest=measured_digest,
-            sequence=sequence + 2,
             review_result=review_result,
         )
     assert isinstance(plan, ReviewPlan)

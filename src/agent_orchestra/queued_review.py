@@ -17,7 +17,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -59,7 +59,6 @@ from agent_orchestra.invocations import (
     AttemptIdentity,
     AttemptLifecycle,
     AttemptStatus,
-    InvocationIdentity,
     ProcessOutcome,
     attempt_activation_was_persisted,
     failure_conclusion,
@@ -83,9 +82,6 @@ from agent_orchestra.runtime_metadata import (
     runtime_metadata_path,
 )
 from agent_orchestra.workflow import transition
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 DEVELOPER_DISAGREEMENT = 'developer disputed every finding without changing the diff'
 EMPTY_COMMAND = 'reviewer command must not be empty'
@@ -977,39 +973,13 @@ def run_queued_review(
     *,
     context: WorkerContext,
     run: Run,
-    objective: str,
-    reviewer_command: Sequence[str],
-    developer_command: Sequence[str],
-    timeout_seconds: int,
-    developer_timeout_seconds: int | None = None,
-    max_iterations: int = 3,
-    reviewer_identity: InvocationIdentity | None = None,
-    developer_identity: InvocationIdentity | None = None,
+    plan: ReviewPlan,
 ) -> Run:
     """Run the bounded loop and persist every worker failure as durable evidence."""
 
     run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
-    reviewer_identity = reviewer_identity or InvocationIdentity(
-        vendor='unknown', model=None, runtime='custom-command'
-    )
-    developer_identity = developer_identity or InvocationIdentity(
-        vendor='unknown', model=None, runtime='custom-command'
-    )
     try:
-        return _run_queued_review(
-            context=context,
-            plan=ReviewPlan(
-                objective=objective,
-                reviewer_command=reviewer_command,
-                developer_command=developer_command,
-                timeout_seconds=timeout_seconds,
-                developer_timeout_seconds=developer_timeout_seconds,
-                max_iterations=max_iterations,
-                reviewer_identity=reviewer_identity,
-                developer_identity=developer_identity,
-            ),
-            run=run,
-        )
+        return _run_queued_review(context=context, plan=plan, run=run)
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):
             try:

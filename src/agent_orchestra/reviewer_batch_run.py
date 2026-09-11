@@ -51,6 +51,8 @@ from agent_orchestra.execution_context import (
     INVALID_DEVELOPER_TIMEOUT,
     INVALID_ITERATION_LIMIT,
     ITERATION_LIMIT,
+    ResumedExecution,
+    ReviewerRound,
     ReviewerSetReviewPlan,
     WorkerContext,
     _execution_record,
@@ -64,7 +66,6 @@ from agent_orchestra.invocations import (
     AttemptStatus,
     InvocationEvidenceError,
     InvocationEvidenceStore,
-    InvocationIdentity,
     InvocationRecord,
     ProcessOutcome,
     RecoveryAction,
@@ -121,7 +122,7 @@ from agent_orchestra.schemas import (
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     DeveloperContinuation = Callable[..., Run]
 
@@ -800,9 +801,10 @@ def _resume_reviewer_set(  # noqa: PLR0911
             request=request,
             record=latest,
             action=action,
-            execution=execution,
-            reviewer_identity=None,
-            developer_identity=plan.developer_identity,
+            resumed=ResumedExecution(
+                record=execution,
+                developer_identity=plan.developer_identity,
+            ),
         )
 
     if run.state is RunState.VALIDATION_REQUIRED:
@@ -971,12 +973,14 @@ def _resume_reviewer_set(  # noqa: PLR0911
                     executor.map(
                         lambda dispatch: _execute_reviewer_dispatch(
                             context=context,
-                            run=run,
-                            reviewing=reviewing,
+                            review_round=ReviewerRound(
+                                run=run,
+                                reviewing=reviewing,
+                                current_digest=current_digest,
+                                sequence=sequence,
+                            ),
                             objective=execution.objective,
-                            current_digest=current_digest,
                             dispatch=dispatch,
-                            sequence=sequence,
                             attempt=retry_attempts[dispatch.reviewer_id],
                             retry_request=retry_requests[dispatch.reviewer_id],
                             prior_review_path=prior_review_paths[dispatch.reviewer_id],
@@ -995,11 +999,13 @@ def _resume_reviewer_set(  # noqa: PLR0911
         )
         return _finish_reviewer_batch(
             context=context,
-            run=run,
-            reviewing=reviewing,
+            review_round=ReviewerRound(
+                run=run,
+                reviewing=reviewing,
+                current_digest=current_digest,
+                sequence=sequence,
+            ),
             plan=_reviewer_set_plan_from_execution(execution, context.registry),
-            current_digest=current_digest,
-            batch_sequence=sequence,
             dispatches=base_dispatches,
             results=results,
             resume_developer_request=resume_developer_request,
@@ -1026,19 +1032,18 @@ def _resume_reviewer_set(  # noqa: PLR0911
 def _execute_reviewer_dispatch(
     *,
     context: WorkerContext,
-    run: Run,
-    reviewing: Run,
+    review_round: ReviewerRound,
     objective: str,
-    current_digest: str,
     dispatch: ReviewerDispatch,
-    sequence: int,
     attempt: int,
     retry_request: dict[str, Any] | None = None,
     prior_review_path: Path | None = None,
 ) -> ReviewerDispatchResult:
     """Execute and validate one reviewer without changing workflow state."""
 
-    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(
+        context.runs_directory, str(review_round.run.id)
+    )
     logs = run_evidence_path(run_directory, 'logs')
     request_path = reviewer_dispatch_path(run_directory, dispatch.paths.request)
     response_path = reviewer_dispatch_path(
@@ -1055,18 +1060,18 @@ def _execute_reviewer_dispatch(
         'schema_version': 1,
         'message_id': str(uuid4()),
         'in_reply_to': None,
-        'run_id': str(run.id),
-        'sequence': sequence,
-        'iteration': reviewing.iteration,
+        'run_id': str(review_round.run.id),
+        'sequence': review_round.sequence,
+        'iteration': review_round.reviewing.iteration,
         'message_type': 'review_request',
         'sender': 'orchestrator',
         'recipient': 'reviewer',
         'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
         'scope': {
-            'worktree_path': str(run.worktree_path),
-            'base_sha': run.base_sha,
-            'head_sha': run.head_sha,
-            'diff_digest': current_digest,
+            'worktree_path': str(review_round.run.worktree_path),
+            'base_sha': review_round.run.base_sha,
+            'head_sha': review_round.run.head_sha,
+            'diff_digest': review_round.current_digest,
         },
         'payload': {
             'objective': objective,
@@ -1087,11 +1092,11 @@ def _execute_reviewer_dispatch(
     started_at = timestamp()
     invocation_id = record_invocation(
         AttemptIdentity(
-            run_id=str(run.id),
+            run_id=str(review_round.run.id),
             role=RuntimeRole.REVIEWER,
             reviewer_id=dispatch.reviewer_id,
             agent=dispatch.identity,
-            iteration=reviewing.iteration,
+            iteration=review_round.reviewing.iteration,
             sequence=request['sequence'],
             attempt=attempt,
             invocation_id=dispatch.invocation_id,
@@ -1106,13 +1111,13 @@ def _execute_reviewer_dispatch(
         completed = adapter.execute(
             ReviewerRequest(
                 objective=objective,
-                worktree_path=run.worktree_path,
-                iteration=reviewing.iteration,
+                worktree_path=review_round.run.worktree_path,
+                iteration=review_round.reviewing.iteration,
                 allowed_actions=(),
                 timeout_seconds=dispatch.timeout_seconds,
-                base_sha=run.base_sha,
-                head_sha=run.head_sha,
-                diff_digest=current_digest,
+                base_sha=review_round.run.base_sha,
+                head_sha=review_round.run.head_sha,
+                diff_digest=review_round.current_digest,
                 artifact_path=artifact_path,
                 request_path=request_path,
                 response_path=response_path,
@@ -1124,11 +1129,11 @@ def _execute_reviewer_dispatch(
                 on_started=partial(
                     record_invocation,
                     AttemptIdentity(
-                        run_id=str(run.id),
+                        run_id=str(review_round.run.id),
                         role=RuntimeRole.REVIEWER,
                         reviewer_id=dispatch.reviewer_id,
                         agent=dispatch.identity,
-                        iteration=reviewing.iteration,
+                        iteration=review_round.reviewing.iteration,
                         sequence=request['sequence'],
                         invocation_id=invocation_id,
                         attempt=attempt,
@@ -1149,11 +1154,11 @@ def _execute_reviewer_dispatch(
         metadata = exception_runtime_metadata(error)
         record_invocation(
             AttemptIdentity(
-                run_id=str(run.id),
+                run_id=str(review_round.run.id),
                 role=RuntimeRole.REVIEWER,
                 reviewer_id=dispatch.reviewer_id,
                 agent=dispatch.identity,
-                iteration=reviewing.iteration,
+                iteration=review_round.reviewing.iteration,
                 sequence=request['sequence'],
                 invocation_id=invocation_id,
                 attempt=attempt,
@@ -1187,11 +1192,11 @@ def _execute_reviewer_dispatch(
     except OSError as error:
         record_invocation(
             AttemptIdentity(
-                run_id=str(run.id),
+                run_id=str(review_round.run.id),
                 role=RuntimeRole.REVIEWER,
                 reviewer_id=dispatch.reviewer_id,
                 agent=dispatch.identity,
-                iteration=reviewing.iteration,
+                iteration=review_round.reviewing.iteration,
                 sequence=request['sequence'],
                 invocation_id=invocation_id,
                 attempt=attempt,
@@ -1220,11 +1225,11 @@ def _execute_reviewer_dispatch(
     except BaseException as error:
         record_invocation(
             AttemptIdentity(
-                run_id=str(run.id),
+                run_id=str(review_round.run.id),
                 role=RuntimeRole.REVIEWER,
                 reviewer_id=dispatch.reviewer_id,
                 agent=dispatch.identity,
-                iteration=reviewing.iteration,
+                iteration=review_round.reviewing.iteration,
                 sequence=request['sequence'],
                 invocation_id=invocation_id,
                 attempt=attempt,
@@ -1252,11 +1257,11 @@ def _execute_reviewer_dispatch(
     if not completed.succeeded:
         record_invocation(
             AttemptIdentity(
-                run_id=str(run.id),
+                run_id=str(review_round.run.id),
                 role=RuntimeRole.REVIEWER,
                 reviewer_id=dispatch.reviewer_id,
                 agent=dispatch.identity,
-                iteration=reviewing.iteration,
+                iteration=review_round.reviewing.iteration,
                 sequence=request['sequence'],
                 invocation_id=invocation_id,
                 attempt=attempt,
@@ -1319,11 +1324,11 @@ def _execute_reviewer_dispatch(
         )
     record_invocation(
         AttemptIdentity(
-            run_id=str(run.id),
+            run_id=str(review_round.run.id),
             role=RuntimeRole.REVIEWER,
             reviewer_id=dispatch.reviewer_id,
             agent=dispatch.identity,
-            iteration=reviewing.iteration,
+            iteration=review_round.reviewing.iteration,
             sequence=request['sequence'],
             invocation_id=invocation_id,
             attempt=attempt,
@@ -1359,11 +1364,8 @@ def _execute_reviewer_dispatch(
 def _finish_reviewer_batch(
     *,
     context: WorkerContext,
-    run: Run,
-    reviewing: Run,
+    review_round: ReviewerRound,
     plan: ReviewerSetReviewPlan,
-    current_digest: str,
-    batch_sequence: int,
     dispatches: tuple[ReviewerDispatch, ...],
     results: tuple[ReviewerDispatchResult, ...],
     resume_developer_request: DeveloperContinuation,
@@ -1371,18 +1373,24 @@ def _finish_reviewer_batch(
     """Persist one complete aggregate or interrupt an incomplete batch."""
 
     require_unchanged(
-        worktree_digest(context.digest_worktree, run.worktree_path, run.base_sha),
-        current_digest,
+        worktree_digest(
+            context.digest_worktree,
+            review_round.run.worktree_path,
+            review_round.run.base_sha,
+        ),
+        review_round.current_digest,
     )
     require_unique_batch_message_ids(results)
     decision = aggregate_review_batch(tuple(result.decision for result in results))
     if decision.incomplete_reviewers:
-        interrupted = transition(reviewing, RunState.INTERRUPTED)
+        interrupted = transition(review_round.reviewing, RunState.INTERRUPTED)
         context.store.update(interrupted, expected_state=RunState.REVIEWING)
         raise WorkerError(
             REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
         )
-    run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
+    run_directory = prepare_run_evidence_directory(
+        context.runs_directory, str(review_round.run.id)
+    )
     aggregate_findings: list[dict[str, object]] = []
     for dispatch, result in zip(dispatches, results, strict=True):
         if result.decision.outcome != 'changes_requested':
@@ -1401,17 +1409,19 @@ def _finish_reviewer_batch(
                 }
             )
     artifact_path = run_evidence_path(
-        run_directory, 'artifacts', f'review-batch-{reviewing.iteration:04d}.md'
+        run_directory,
+        'artifacts',
+        f'review-batch-{review_round.reviewing.iteration:04d}.md',
     )
     batch_result = ReviewerBatchResultSchemaV3.model_validate(
         {
             'schema_version': 3,
             'message_id': str(uuid4()),
-            'run_id': str(run.id),
-            'iteration': reviewing.iteration,
+            'run_id': str(review_round.run.id),
+            'iteration': review_round.reviewing.iteration,
             'reviewer_set_id': plan.reviewer_plan.reviewer_set_id,
             'aggregation_policy': 'all_required',
-            'diff_digest': current_digest,
+            'diff_digest': review_round.current_digest,
             'verdict': decision.verdict,
             'reviewers': [
                 {
@@ -1437,26 +1447,28 @@ def _finish_reviewer_batch(
         run_evidence_path(
             run_directory,
             *Path(
-                evidence_path('review_batch_result', ordinal=reviewing.iteration)
+                evidence_path(
+                    'review_batch_result', ordinal=review_round.reviewing.iteration
+                )
             ).parts,
         ),
         batch_result.model_dump(mode='json'),
         'review_batch_result',
     )
     if decision.verdict == 'blocked':
-        failed = transition(reviewing, RunState.FAILED)
+        failed = transition(review_round.reviewing, RunState.FAILED)
         context.store.update(failed, expected_state=RunState.REVIEWING)
         raise WorkerError(
             REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
         )
     decided = transition(
-        reviewing,
+        review_round.reviewing,
         RunState.APPROVED
         if decision.verdict == 'approved'
         else RunState.CHANGES_REQUESTED,
     )
     if decision.verdict == 'changes_requested':
-        if reviewing.iteration >= plan.max_iterations:
+        if review_round.reviewing.iteration >= plan.max_iterations:
             context.store.update(decided, expected_state=RunState.REVIEWING)
             failed = transition(decided, RunState.FAILED)
             context.store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
@@ -1464,11 +1476,13 @@ def _finish_reviewer_batch(
         context.store.update(decided, expected_state=RunState.REVIEWING)
         if not plan.developer_command:
             return decided
-        sequence = batch_sequence + 2
+        sequence = review_round.sequence + 2
         batch_path = run_evidence_path(
             run_directory,
             *Path(
-                evidence_path('review_batch_result', ordinal=reviewing.iteration)
+                evidence_path(
+                    'review_batch_result', ordinal=review_round.reviewing.iteration
+                )
             ).parts,
         )
         remediation_path = manifest_evidence_path(
@@ -1478,18 +1492,18 @@ def _finish_reviewer_batch(
             'schema_version': 1,
             'message_id': str(uuid4()),
             'in_reply_to': batch_result.message_id,
-            'run_id': str(run.id),
+            'run_id': str(review_round.run.id),
             'sequence': sequence,
-            'iteration': reviewing.iteration,
+            'iteration': review_round.reviewing.iteration,
             'message_type': 'remediation_request',
             'sender': 'orchestrator',
             'recipient': 'developer',
             'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
             'scope': {
-                'worktree_path': str(run.worktree_path),
-                'base_sha': run.base_sha,
-                'head_sha': run.head_sha,
-                'diff_digest': current_digest,
+                'worktree_path': str(review_round.run.worktree_path),
+                'base_sha': review_round.run.base_sha,
+                'head_sha': review_round.run.head_sha,
+                'diff_digest': review_round.current_digest,
             },
             'payload': {
                 'objective': plan.objective,
@@ -1508,7 +1522,7 @@ def _finish_reviewer_batch(
             plan=plan,
             run=developing,
             request=remediation,
-            current_digest=current_digest,
+            current_digest=review_round.current_digest,
             allow_unchanged_ready=False,
             attempt=1,
         )
@@ -1521,11 +1535,8 @@ def _finish_reviewer_batch(
 def _run_reviewer_set_iteration(
     *,
     context: WorkerContext,
-    run: Run,
-    reviewing: Run,
+    review_round: ReviewerRound,
     plan: ReviewerSetReviewPlan,
-    current_digest: str,
-    sequence: int,
     prior_review_paths: dict[str, Path] | None = None,
     resume_developer_request: DeveloperContinuation,
 ) -> Run:
@@ -1533,9 +1544,9 @@ def _run_reviewer_set_iteration(
 
     dispatches = build_review_fanout(
         plan.reviewer_plan,
-        run_id=str(run.id),
-        sequence=sequence,
-        iteration=reviewing.iteration,
+        run_id=str(review_round.run.id),
+        sequence=review_round.sequence,
+        iteration=review_round.reviewing.iteration,
         attempt=1,
     )
     with ThreadPoolExecutor(max_workers=len(dispatches)) as executor:
@@ -1543,29 +1554,31 @@ def _run_reviewer_set_iteration(
             executor.map(
                 lambda dispatch: _execute_reviewer_dispatch(
                     context=context,
-                    run=run,
-                    reviewing=reviewing,
-                    objective=plan.objective,
-                    current_digest=current_digest,
-                    dispatch=dispatch,
-                    sequence=sequence,
-                    attempt=1,
-                    prior_review_path=(
-                        prior_review_paths.get(dispatch.reviewer_id)
-                        if prior_review_paths is not None
-                        else None
+                    review_round=ReviewerRound(
+                        run=review_round.run,
+                        reviewing=review_round.reviewing,
+                        current_digest=review_round.current_digest,
+                        sequence=review_round.sequence,
                     ),
+                    objective=plan.objective,
+                    dispatch=dispatch,
+                    attempt=1,
+                    prior_review_path=prior_review_paths.get(dispatch.reviewer_id)
+                    if prior_review_paths is not None
+                    else None,
                 ),
                 dispatches,
             )
         )
     return _finish_reviewer_batch(
         context=context,
-        run=run,
-        reviewing=reviewing,
+        review_round=ReviewerRound(
+            run=review_round.run,
+            reviewing=review_round.reviewing,
+            current_digest=review_round.current_digest,
+            sequence=review_round.sequence,
+        ),
         plan=plan,
-        current_digest=current_digest,
-        batch_sequence=sequence,
         dispatches=dispatches,
         results=results,
         resume_developer_request=resume_developer_request,
@@ -1576,23 +1589,18 @@ def _run_queued_reviewer_set(
     *,
     context: WorkerContext,
     run: Run,
-    objective: str,
-    reviewer_plan: ReviewerExecutionPlan,
-    developer_command: Sequence[str],
-    developer_timeout_seconds: int,
-    max_iterations: int,
-    developer_identity: InvocationIdentity,
+    plan: ReviewerSetReviewPlan,
     resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Run one concurrent required-reviewer batch for a queued immutable diff."""
 
     if run.state is not RunState.QUEUED:
         raise WorkerError(f'run must be queued, found {run.state}')
-    if not objective.strip():
+    if not plan.objective.strip():
         raise WorkerError(EMPTY_OBJECTIVE)
-    if developer_timeout_seconds <= 0:
+    if plan.developer_timeout_seconds <= 0:
         raise WorkerError(INVALID_DEVELOPER_TIMEOUT)
-    if max_iterations <= 0:
+    if plan.max_iterations <= 0:
         raise WorkerError(INVALID_ITERATION_LIMIT)
     resolved_reviewers = tuple(
         replace(
@@ -1601,11 +1609,14 @@ def _run_queued_reviewer_set(
                 reviewer.identity, RuntimeRole.REVIEWER, context.registry
             ),
         )
-        for reviewer in reviewer_plan.reviewers
+        for reviewer in plan.reviewer_plan.reviewers
     )
-    reviewer_plan = replace(reviewer_plan, reviewers=resolved_reviewers)
-    developer_identity = _resolve_resume_identity(
-        developer_identity, RuntimeRole.DEVELOPER, context.registry
+    plan = replace(
+        plan,
+        reviewer_plan=replace(plan.reviewer_plan, reviewers=resolved_reviewers),
+        developer_identity=_resolve_resume_identity(
+            plan.developer_identity, RuntimeRole.DEVELOPER, context.registry
+        ),
     )
     run_directory = prepare_run_evidence_directory(context.runs_directory, str(run.id))
     if run_directory.is_relative_to(run.worktree_path.resolve()):
@@ -1621,14 +1632,6 @@ def _run_queued_reviewer_set(
         updated_at=utc_now(),
     )
     context.store.update(prepared, expected_state=RunState.QUEUED)
-    plan = ReviewerSetReviewPlan(
-        objective,
-        reviewer_plan,
-        developer_command,
-        developer_timeout_seconds,
-        max_iterations,
-        developer_identity,
-    )
     try:
         execution = _execution_record(
             plan,
@@ -1653,11 +1656,10 @@ def _run_queued_reviewer_set(
             )
         return _run_reviewer_set_iteration(
             context=context,
-            run=run,
-            reviewing=reviewing,
+            review_round=ReviewerRound(
+                run=run, reviewing=reviewing, current_digest=current_digest, sequence=1
+            ),
             plan=plan,
-            current_digest=current_digest,
-            sequence=1,
             resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
@@ -1683,12 +1685,7 @@ def run_queued_reviewer_set(
     *,
     context: WorkerContext,
     run: Run,
-    objective: str,
-    reviewer_plan: ReviewerExecutionPlan,
-    developer_command: Sequence[str],
-    developer_timeout_seconds: int,
-    max_iterations: int,
-    developer_identity: InvocationIdentity,
+    plan: ReviewerSetReviewPlan,
     resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Run a reviewer batch and persist every worker failure as durable evidence."""
@@ -1698,12 +1695,7 @@ def run_queued_reviewer_set(
         return _run_queued_reviewer_set(
             context=context,
             run=run,
-            objective=objective,
-            reviewer_plan=reviewer_plan,
-            developer_command=developer_command,
-            developer_timeout_seconds=developer_timeout_seconds,
-            max_iterations=max_iterations,
-            developer_identity=developer_identity,
+            plan=plan,
             resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:

@@ -38,6 +38,8 @@ from agent_orchestra.evidence import (
     reviewer_dispatch_path,
 )
 from agent_orchestra.execution_context import (
+    ReviewerSetReviewPlan,
+    ReviewPlan,
     WorkerContext,
 )
 from agent_orchestra.invocations import (
@@ -1649,12 +1651,14 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
                     registry=args.runtime_registry,
                 ),
                 run=run,
-                objective=args.objective,
-                reviewer_plan=reviewer_plan,
-                developer_command=developer_command,
-                developer_timeout_seconds=args.developer_timeout,
-                max_iterations=args.max_iterations,
-                developer_identity=developer_identity,
+                plan=ReviewerSetReviewPlan(
+                    objective=args.objective,
+                    reviewer_plan=reviewer_plan,
+                    developer_command=developer_command,
+                    developer_timeout_seconds=args.developer_timeout,
+                    max_iterations=args.max_iterations,
+                    developer_identity=developer_identity,
+                ),
             )
         else:
             result = run_queued_review(
@@ -1665,14 +1669,16 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
                     registry=args.runtime_registry,
                 ),
                 run=run,
-                objective=args.objective,
-                reviewer_command=reviewer_command,
-                developer_command=developer_command,
-                timeout_seconds=args.timeout,
-                developer_timeout_seconds=args.developer_timeout,
-                max_iterations=args.max_iterations,
-                reviewer_identity=reviewer_identity,
-                developer_identity=developer_identity,
+                plan=ReviewPlan(
+                    objective=args.objective,
+                    reviewer_command=reviewer_command,
+                    developer_command=developer_command,
+                    timeout_seconds=args.timeout,
+                    developer_timeout_seconds=args.developer_timeout,
+                    max_iterations=args.max_iterations,
+                    reviewer_identity=reviewer_identity,
+                    developer_identity=developer_identity,
+                ),
             )
     except (
         OSError,

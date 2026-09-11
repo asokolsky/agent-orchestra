@@ -26,7 +26,10 @@ from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import (
     WorkerError,
 )
-from agent_orchestra.execution_context import WorkerContext
+from agent_orchestra.execution_context import (
+    ReviewerSetReviewPlan,
+    WorkerContext,
+)
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
@@ -184,13 +187,15 @@ def test_reviewer_set_runs_concurrently_with_disjoint_evidence(
             registry=DEFAULT_RUNTIME_REGISTRY,
         ),
         run=run,
-        objective='Review the change.',
-        reviewer_plan=plan,
-        developer_command=(),
-        developer_timeout_seconds=30,
-        max_iterations=3,
-        developer_identity=InvocationIdentity(
-            vendor='openai', model=None, runtime='codex'
+        plan=ReviewerSetReviewPlan(
+            objective='Review the change.',
+            reviewer_plan=plan,
+            developer_command=(),
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
         ),
     )
 
@@ -511,19 +516,21 @@ def test_reviewer_set_persists_namespaced_aggregate_findings(
             digest_worktree=lambda _path, _base: DIGEST,
         ),
         run=run,
-        objective='Review the change.',
-        reviewer_plan=ReviewerExecutionPlan(
-            'default',
-            (
-                _reviewer('security', 'codex', 'openai'),
-                _reviewer('portability', 'claude-code', 'anthropic'),
+        plan=ReviewerSetReviewPlan(
+            objective='Review the change.',
+            reviewer_plan=ReviewerExecutionPlan(
+                'default',
+                (
+                    _reviewer('security', 'codex', 'openai'),
+                    _reviewer('portability', 'claude-code', 'anthropic'),
+                ),
             ),
-        ),
-        developer_command=(),
-        developer_timeout_seconds=30,
-        max_iterations=3,
-        developer_identity=InvocationIdentity(
-            vendor='openai', model=None, runtime='codex'
+            developer_command=(),
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
         ),
     )
 
@@ -665,19 +672,21 @@ def test_reviewer_set_remediates_rejected_batch_before_next_iteration(
             ),
         ),
         run=run,
-        objective='Review the change.',
-        reviewer_plan=ReviewerExecutionPlan(
-            'default',
-            (
-                _reviewer('security', 'codex', 'openai'),
-                _reviewer('portability', 'claude-code', 'anthropic'),
+        plan=ReviewerSetReviewPlan(
+            objective='Review the change.',
+            reviewer_plan=ReviewerExecutionPlan(
+                'default',
+                (
+                    _reviewer('security', 'codex', 'openai'),
+                    _reviewer('portability', 'claude-code', 'anthropic'),
+                ),
             ),
-        ),
-        developer_command=('developer',),
-        developer_timeout_seconds=30,
-        max_iterations=3,
-        developer_identity=InvocationIdentity(
-            vendor='openai', model=None, runtime='codex'
+            developer_command=('developer',),
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
         ),
     )
 
@@ -844,13 +853,15 @@ def test_reviewer_set_resume_retries_only_recoverable_developer(
         return run_queued_reviewer_set(
             context=context,
             run=run,
-            objective='Review the change.',
-            reviewer_plan=plan,
-            developer_command=('developer',),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=plan,
+                developer_command=('developer',),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1069,19 +1080,21 @@ def test_reviewer_set_mutation_fails_terminally(
                 digest_worktree=lambda _path, _base: next(digests),
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=ReviewerExecutionPlan(
-                'default',
-                (
-                    _reviewer('security', 'codex', 'openai'),
-                    _reviewer('portability', 'claude-code', 'anthropic'),
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=ReviewerExecutionPlan(
+                    'default',
+                    (
+                        _reviewer('security', 'codex', 'openai'),
+                        _reviewer('portability', 'claude-code', 'anthropic'),
+                    ),
                 ),
-            ),
-            developer_command=(),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+                developer_command=(),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1144,19 +1157,21 @@ def test_incomplete_reviewer_set_is_resumable(
                 digest_worktree=lambda _path, _base: DIGEST,
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=ReviewerExecutionPlan(
-                'default',
-                (
-                    _reviewer('security', 'codex', 'openai'),
-                    _reviewer('portability', 'claude-code', 'anthropic'),
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=ReviewerExecutionPlan(
+                    'default',
+                    (
+                        _reviewer('security', 'codex', 'openai'),
+                        _reviewer('portability', 'claude-code', 'anthropic'),
+                    ),
                 ),
-            ),
-            developer_command=(),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+                developer_command=(),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1257,19 +1272,21 @@ def test_reviewer_set_rejects_invalid_member_correlation(
                 digest_worktree=lambda _path, _base: DIGEST,
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=ReviewerExecutionPlan(
-                'default',
-                (
-                    _reviewer('security', 'codex', 'openai'),
-                    _reviewer('portability', 'claude-code', 'anthropic'),
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=ReviewerExecutionPlan(
+                    'default',
+                    (
+                        _reviewer('security', 'codex', 'openai'),
+                        _reviewer('portability', 'claude-code', 'anthropic'),
+                    ),
                 ),
-            ),
-            developer_command=('developer',),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+                developer_command=('developer',),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1342,13 +1359,15 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
                 digest_worktree=lambda _path, _base: DIGEST,
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=plan,
-            developer_command=(),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=plan,
+                developer_command=(),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1600,19 +1619,21 @@ def test_mixed_incomplete_reviewer_set_is_resumable(
                 digest_worktree=lambda _path, _base: DIGEST,
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=ReviewerExecutionPlan(
-                'default',
-                (
-                    _reviewer('security', 'codex', 'openai'),
-                    _reviewer('portability', 'claude-code', 'anthropic'),
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=ReviewerExecutionPlan(
+                    'default',
+                    (
+                        _reviewer('security', 'codex', 'openai'),
+                        _reviewer('portability', 'claude-code', 'anthropic'),
+                    ),
                 ),
-            ),
-            developer_command=('developer',),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+                developer_command=('developer',),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1651,19 +1672,21 @@ def test_unexpected_batch_exception_fails_terminally(
                 digest_worktree=lambda _path, _base: DIGEST,
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=ReviewerExecutionPlan(
-                'default',
-                (
-                    _reviewer('security', 'codex', 'openai'),
-                    _reviewer('portability', 'claude-code', 'anthropic'),
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=ReviewerExecutionPlan(
+                    'default',
+                    (
+                        _reviewer('security', 'codex', 'openai'),
+                        _reviewer('portability', 'claude-code', 'anthropic'),
+                    ),
                 ),
-            ),
-            developer_command=(),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+                developer_command=(),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1701,19 +1724,21 @@ def test_unexpected_adapter_exception_finalizes_partial_evidence(
                 digest_worktree=lambda _path, _base: DIGEST,
             ),
             run=run,
-            objective='Review the change.',
-            reviewer_plan=ReviewerExecutionPlan(
-                'default',
-                (
-                    _reviewer('security', 'codex', 'openai'),
-                    _reviewer('portability', 'claude-code', 'anthropic'),
+            plan=ReviewerSetReviewPlan(
+                objective='Review the change.',
+                reviewer_plan=ReviewerExecutionPlan(
+                    'default',
+                    (
+                        _reviewer('security', 'codex', 'openai'),
+                        _reviewer('portability', 'claude-code', 'anthropic'),
+                    ),
                 ),
-            ),
-            developer_command=(),
-            developer_timeout_seconds=30,
-            max_iterations=3,
-            developer_identity=InvocationIdentity(
-                vendor='openai', model=None, runtime='codex'
+                developer_command=(),
+                developer_timeout_seconds=30,
+                max_iterations=3,
+                developer_identity=InvocationIdentity(
+                    vendor='openai', model=None, runtime='codex'
+                ),
             ),
         )
 
@@ -1739,3 +1764,127 @@ def test_unexpected_adapter_exception_finalizes_partial_evidence(
         verify=True,
     )
     assert audit['result'] != 'incomplete'
+
+
+def test_reviewer_set_resume_validates_completed_developer_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recover a reviewer-set developer whose response outlived its transition."""
+
+    # The developer process completes and its response is persisted, but the
+    # workflow transition out of DEVELOPING fails. Resume then sees a completed
+    # attempt with a usable response, which selects a recovery action that is
+    # neither NONE nor LAUNCH and reaches the reviewer-set validation callback.
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    changed = worktree / 'changed.txt'
+    new_digest = f'sha256:{"c" * 64}'
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Request changes once, then accept the remediation."""
+
+        if request.on_started is not None:
+            request.on_started()
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        if isinstance(request, ReviewerRequest):
+            request.artifact_path.write_text('# Review\n', encoding='utf-8')
+            response = (
+                _changes_requested_response(document, request.artifact_path)
+                if document['iteration'] == 1
+                else _approved_response(document, request.artifact_path)
+            )
+            request.response_path.write_text(json.dumps(response), encoding='utf-8')
+            return AgentResult(
+                succeeded=True, summary='reviewed', stdout='', stderr='', exit_code=0
+            )
+        assert isinstance(request, DeveloperRequest)
+        changed.write_text('fixed\n', encoding='utf-8')
+        aggregate = json.loads(
+            Path(document['payload']['review_result_path']).read_text(encoding='utf-8')
+        )
+        response = {
+            'schema_version': 1,
+            'message_id': str(uuid4()),
+            'in_reply_to': document['message_id'],
+            'run_id': document['run_id'],
+            'sequence': document['sequence'] + 1,
+            'iteration': document['iteration'],
+            'message_type': 'developer_handoff',
+            'sender': 'developer',
+            'recipient': 'orchestrator',
+            'created_at': '2026-09-11T20:00:00Z',
+            'scope': document['scope'],
+            'payload': {
+                'status': 'ready_for_review',
+                'summary': 'Fixed.',
+                'files_changed': ['changed.txt'],
+                'validation': [],
+                'dispositions': [
+                    {
+                        'finding_id': finding['finding_id'],
+                        'disposition': 'addressed',
+                        'rationale': 'Fixed.',
+                    }
+                    for finding in aggregate['findings']
+                ],
+                'remaining_risks': [],
+            },
+        }
+        request.response_path.write_text(json.dumps(response), encoding='utf-8')
+        return AgentResult(
+            succeeded=True, summary='fixed', stdout='', stderr='', exit_code=0
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+    original_update = JobStore.update
+    crash_leaving_developing = True
+
+    def update(self: JobStore, updated: Run, *, expected_state: RunState) -> Run:
+        """Fail the first transition that leaves DEVELOPING."""
+
+        nonlocal crash_leaving_developing
+        if crash_leaving_developing and expected_state is RunState.DEVELOPING:
+            crash_leaving_developing = False
+            message = 'injected developing transition failure'
+            raise OSError(message)
+        return cast(
+            'Run', original_update(self, updated, expected_state=expected_state)
+        )
+
+    monkeypatch.setattr(JobStore, 'update', update)
+    context = WorkerContext(
+        store=store,
+        runs_directory=tmp_path / 'runs',
+        digest_worktree=lambda _path, _base: new_digest if changed.exists() else DIGEST,
+    )
+    reviewer_plan = ReviewerExecutionPlan(
+        'default',
+        (
+            _reviewer('security', 'codex', 'openai'),
+            _reviewer('portability', 'claude-code', 'anthropic'),
+        ),
+    )
+    plan = ReviewerSetReviewPlan(
+        objective='Review the change.',
+        reviewer_plan=reviewer_plan,
+        developer_command=('developer',),
+        developer_timeout_seconds=30,
+        max_iterations=3,
+        developer_identity=InvocationIdentity(
+            vendor='openai', model=None, runtime='codex'
+        ),
+    )
+
+    with pytest.raises(OSError, match='injected developing transition failure'):
+        run_queued_reviewer_set(context=context, run=run, plan=plan)
+
+    recoverable = store.get(run.id)
+    assert recoverable.state is RunState.DEVELOPING
+
+    resumed = resume_review(context=context, run=recoverable)
+
+    assert resumed.state is not RunState.DEVELOPING
