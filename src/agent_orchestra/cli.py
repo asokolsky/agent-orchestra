@@ -106,7 +106,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 21
+CLI_SCHEMA_VERSION = 22
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -677,9 +677,10 @@ def _review_issue(args: argparse.Namespace, store: JobStore) -> int:
         InvocationEvidenceError,
         OSError,
     ) as error:
-        print(f'error: {error}', file=sys.stderr)
+        code, message = _issue_review_error(error)
+        _write_job_error(code, message, job_id=args.job_id)
         return 2
-    print(json.dumps(_issue_job_summary(finished), indent=2))
+    _write_document(_issue_job_summary(finished))
     return 0
 
 
@@ -692,8 +693,11 @@ def _post_issue_feedback(args: argparse.Namespace, store: JobStore) -> int:
     try:
         job = store.get_issue(args.job_id)
         action = publish_issue_feedback(job, store, args.runs_directory)
-    except (RunNotFoundError, IssueReviewError) as error:
-        print(f'error: {error}', file=sys.stderr)
+    except RunNotFoundError as error:
+        _write_job_error('job_not_found', f'job not found: {error}', job_id=args.job_id)
+        return 2
+    except (IssueReviewError, OSError) as error:
+        _write_job_error('issue_feedback_failed', str(error), job_id=args.job_id)
         return 2
     _write_document(
         {
@@ -1133,6 +1137,50 @@ def _write_job_error(
     _write_document(payload, error={'code': code, 'message': message})
 
 
+def _issue_review_error(error: BaseException) -> tuple[str, str]:
+    """Return the stable public code and message for an issue-review failure."""
+
+    message = str(error)
+    code = 'issue_review_failed'
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, RunNotFoundError):
+            code = 'job_not_found'
+            message = f'job not found: {current}'
+            break
+        if isinstance(current, IssueReviewerError):
+            code = (
+                'issue_review_timed_out'
+                if current.timed_out
+                else 'issue_review_interrupted'
+                if current.interrupted
+                else 'issue_reviewer_failed'
+            )
+            break
+        if isinstance(current, SchemaValidationError):
+            code = 'issue_review_result_invalid'
+            break
+        if isinstance(current, InvocationEvidenceError):
+            code = 'invalid_evidence'
+            break
+        current = current.__cause__
+    return code, message
+
+
+def _run_error(error: BaseException) -> tuple[str, str]:
+    """Return the stable public code and message for a run failure."""
+
+    if isinstance(error, RunNotFoundError):
+        return 'job_not_found', f'job not found: {error}'
+    if isinstance(error, RuntimeRegistryError):
+        return error.code, str(error).removeprefix(f'{error.code}: ')
+    if isinstance(error, WorkerError):
+        return error.code or 'worker_error', str(error)
+    if isinstance(error, ReviewerPlanError):
+        return 'reviewer_plan_invalid', str(error)
+    return 'run_failed', str(error)
+
+
 def _persisted_enum_error(error: PersistedEnumError) -> dict[str, str]:
     """Return the stable public error object for an unreadable job row."""
 
@@ -1552,7 +1600,11 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
     """Consume one queued local run through its bounded agent loop."""
 
     if not args.database.is_file():
-        print(f'state database not found: {args.database}', file=sys.stderr)
+        _write_job_error(
+            'state_database_not_found',
+            f'state database not found: {args.database}',
+            job_id=args.job_id,
+        )
         return 2
     if args.reviewer_set and args.reviewer_command:
         print(
@@ -1681,7 +1733,8 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
         RuntimeRegistryError,
         WorkerError,
     ) as error:
-        print(f'error: {error}', file=sys.stderr)
+        code, message = _run_error(error)
+        _write_job_error(code, message, job_id=args.job_id)
         return 2
     _write_document({'job_id': str(result.id), 'state': result.state})
     return 0

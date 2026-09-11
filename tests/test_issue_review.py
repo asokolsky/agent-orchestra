@@ -863,3 +863,132 @@ def test_post_issue_feedback_requires_explicit_authorization(
         == 2
     )
     assert '--authorize is required' in capsys.readouterr().err
+
+
+def test_review_issue_missing_job_is_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep an expected issue-review lookup failure in its JSON contract."""
+
+    database = tmp_path / 'state.db'
+    JobStore(database).initialize()
+
+    assert main(['--database', str(database), 'review-issue', 'missing']) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out) == {
+        'schema_version': 22,
+        'job_id': 'missing',
+        'error': {'code': 'job_not_found', 'message': 'job not found: missing'},
+    }
+
+
+def test_review_issue_preserves_wrapped_timeout_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Classify the reviewer failure wrapped by issue-review orchestration."""
+
+    store, job, runs = setup_job(tmp_path)
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        """Raise the same wrapped timeout shape as run_issue_review."""
+
+        message = 'reviewer timed out'
+        cause = IssueReviewerError(message, timed_out=True)
+        error = IssueReviewError(str(cause))
+        raise error from cause
+
+    monkeypatch.setattr('agent_orchestra.cli.run_issue_review', timeout)
+
+    assert (
+        main(
+            [
+                '--database',
+                str(store.database_path),
+                'review-issue',
+                job.id,
+                '--runs-directory',
+                str(runs),
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out)['error'] == {
+        'code': 'issue_review_timed_out',
+        'message': 'reviewer timed out',
+    }
+
+
+def test_post_issue_feedback_missing_job_is_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep an expected publication lookup failure in its JSON contract."""
+
+    database = tmp_path / 'state.db'
+    JobStore(database).initialize()
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'post-issue-feedback',
+                'missing',
+                '--authorize',
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out)['error'] == {
+        'code': 'job_not_found',
+        'message': 'job not found: missing',
+    }
+
+
+def test_post_issue_feedback_io_failure_is_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keep publication lock and evidence I/O failures in the JSON contract."""
+
+    store, job, runs = setup_job(tmp_path)
+
+    def fail_publication(*_args: object) -> None:
+        """Simulate failure before the provider action can be returned."""
+
+        message = 'lock unavailable'
+        raise OSError(message)
+
+    monkeypatch.setattr('agent_orchestra.cli.publish_issue_feedback', fail_publication)
+
+    assert (
+        main(
+            [
+                '--database',
+                str(store.database_path),
+                'post-issue-feedback',
+                job.id,
+                '--authorize',
+                '--runs-directory',
+                str(runs),
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out)['error'] == {
+        'code': 'issue_feedback_failed',
+        'message': 'lock unavailable',
+    }

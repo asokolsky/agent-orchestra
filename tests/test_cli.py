@@ -25,9 +25,11 @@ from agent_orchestra import (
     worker,
 )
 from agent_orchestra import evidence as evidence_module
+from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.adapter.registry import (
     RuntimeDefinition,
     RuntimeRegistry,
+    RuntimeRegistryError,
     RuntimeRole,
 )
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
@@ -48,10 +50,12 @@ from agent_orchestra.execution_context import (
 )
 from agent_orchestra.invocations import (
     AttemptIdentity,
+    InvocationEvidenceError,
     InvocationEvidenceStore,
     InvocationIdentity,
     InvocationRecord,
 )
+from agent_orchestra.issue_review import IssueReviewError
 from agent_orchestra.manifests import ENGINE_TOO_OLD, ManifestError
 from agent_orchestra.messages import (
     NO_REMEDIATION_CHANGE,
@@ -60,9 +64,10 @@ from agent_orchestra.models import HUMAN_ACTION_STATES, IssueJob, Run, RunState
 from agent_orchestra.queued_review import (
     run_queued_review,
 )
-from agent_orchestra.reviewer_plan import ReviewerExecutionPlan
+from agent_orchestra.reviewer_plan import ReviewerExecutionPlan, ReviewerPlanError
+from agent_orchestra.schemas import SchemaValidationError
 from agent_orchestra.settings import load_settings
-from agent_orchestra.store import JobStore
+from agent_orchestra.store import JobStore, RunNotFoundError
 from agent_orchestra.worker import (
     resume_review,
 )
@@ -77,6 +82,70 @@ class CliRunContext:
     store: JobStore
     run: Run
     runs_directory: Path
+
+
+@pytest.mark.parametrize(
+    ('error', 'expected'),
+    [
+        (RunNotFoundError('missing'), ('job_not_found', 'job not found: missing')),
+        (
+            IssueReviewerError('timed out', timed_out=True),
+            ('issue_review_timed_out', 'timed out'),
+        ),
+        (
+            IssueReviewerError('interrupted', interrupted=True),
+            ('issue_review_interrupted', 'interrupted'),
+        ),
+        (
+            IssueReviewerError('failed'),
+            ('issue_reviewer_failed', 'failed'),
+        ),
+        (
+            SchemaValidationError('invalid result'),
+            ('issue_review_result_invalid', 'invalid result'),
+        ),
+        (
+            InvocationEvidenceError('invalid evidence'),
+            ('invalid_evidence', 'invalid evidence'),
+        ),
+        (
+            IssueReviewError('review failed'),
+            ('issue_review_failed', 'review failed'),
+        ),
+    ],
+)
+def test_issue_review_error_codes(
+    error: BaseException, expected: tuple[str, str]
+) -> None:
+    """Pin every public issue-review classifier result."""
+
+    assert cli._issue_review_error(error) == expected
+
+
+@pytest.mark.parametrize(
+    ('error', 'expected'),
+    [
+        (RunNotFoundError('missing'), ('job_not_found', 'job not found: missing')),
+        (
+            RuntimeRegistryError('runtime_unknown', 'missing'),
+            ('runtime_unknown', 'missing'),
+        ),
+        (
+            WorkerError('specific failure', code='worker_specific'),
+            ('worker_specific', 'specific failure'),
+        ),
+        (WorkerError('worker failure'), ('worker_error', 'worker failure')),
+        (
+            ReviewerPlanError('invalid plan'),
+            ('reviewer_plan_invalid', 'invalid plan'),
+        ),
+        (OSError('run failed'), ('run_failed', 'run failed')),
+    ],
+)
+def test_run_error_codes(error: BaseException, expected: tuple[str, str]) -> None:
+    """Pin every public run classifier result."""
+
+    assert cli._run_error(error) == expected
 
 
 def evidence_directory(context: CliRunContext) -> Path:
@@ -822,7 +891,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     assert {run.worktree_path for run in runs} == {changed_a, changed_b}
     output = json.loads(capsys.readouterr().out)
     assert output == {
-        'schema_version': 21,
+        'schema_version': 22,
         'directory': str(projects),
         'jobs': [
             {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -1036,7 +1105,7 @@ def test_jobs_lists_persisted_job(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 21,\n  "jobs": [\n    {\n')
+    assert output.startswith('{\n  "schema_version": 22,\n  "jobs": [\n    {\n')
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
@@ -1052,7 +1121,7 @@ def test_jobs_lists_persisted_job(
     expected_fields.add('worktree_status')
     assert set(document['jobs'][0]) == expected_fields
     assert document == {
-        'schema_version': 21,
+        'schema_version': 22,
         'jobs': [
             {
                 'job_id': str(run.id),
@@ -1200,7 +1269,7 @@ def test_jobs_rejects_unknown_state_with_stable_error(
 
     assert result == 2
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 21,
+        'schema_version': 22,
         'error': {
             'code': 'invalid_job_state',
             'message': 'unknown durable job state: needs-coffee',
@@ -1439,7 +1508,7 @@ def test_job_selects_one_job_by_id(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 21
+    assert document['schema_version'] == 22
     assert document['job']['job_id'] == str(first.id)
     assert document['job']['current'] == []
 
@@ -1474,7 +1543,7 @@ def test_job_reads_persisted_review_state_without_initializing(
 
     assert result == 0
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 21
+    assert document['schema_version'] == 22
     assert document['job']['state'] == 'reviewing'
     with sqlite3.connect(database) as connection:
         stored_state = connection.execute(
@@ -1495,7 +1564,7 @@ def test_jobs_lists_empty_jobs_as_json(
 
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 21,
+        'schema_version': 22,
         'jobs': [],
         'error': None,
     }
@@ -1686,7 +1755,7 @@ def test_read_only_views_report_unrecognized_job_values(
     for command in commands:
         assert main(['--database', str(database), *command]) == 2
         document = json.loads(capsys.readouterr().out)
-        assert document['schema_version'] == 21
+        assert document['schema_version'] == 22
         assert document['error']['code'] == code
         if command[0] == 'jobs':
             listed_ids = {item['job_id'] for item in document['jobs']}
@@ -1812,7 +1881,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
         'logs/000001-reviewer.stderr.log',
     } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 21,
+        'schema_version': 22,
         'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -2249,7 +2318,7 @@ def test_resume_validation_required_continues_same_run(
         '000008-review-result.json',
     ]
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 21,
+        'schema_version': 22,
         'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -3629,7 +3698,45 @@ def test_run_rejects_state_database_inside_worktree(
 
     assert result == 2
     assert JobStore(database).get(run.id).state.value == 'queued'
-    assert 'state database must be outside' in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out)['error'] == {
+        'code': 'worker_error',
+        'message': 'state database must be outside the worktree',
+    }
+
+
+def test_run_missing_database_is_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Keep an expected run lookup failure in its versioned JSON contract."""
+
+    database = tmp_path / 'missing.db'
+
+    assert (
+        main(
+            [
+                '--database',
+                str(database),
+                'run',
+                'job-1',
+                '--objective',
+                'Review the change.',
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out) == {
+        'schema_version': 22,
+        'job_id': 'job-1',
+        'error': {
+            'code': 'state_database_not_found',
+            'message': f'state database not found: {database}',
+        },
+    }
 
 
 def test_run_rejects_evidence_directory_inside_worktree(
@@ -3652,7 +3759,10 @@ def test_run_rejects_evidence_directory_inside_worktree(
 
     assert result == 2
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.QUEUED
-    assert 'evidence directory must be outside' in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out)['error']['code'] == 'worker_error'
+    assert 'evidence directory must be outside' in captured.out
 
 
 def test_run_handles_digest_failure_before_transition(
@@ -3679,7 +3789,10 @@ def test_run_handles_digest_failure_before_transition(
 
     assert result == 2
     assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.QUEUED
-    assert 'cannot compute worktree digest' in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert json.loads(captured.out)['error']['code'] == 'worker_error'
+    assert 'cannot compute worktree digest' in captured.out
 
 
 def test_run_marks_post_review_digest_failure(
