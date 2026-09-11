@@ -596,10 +596,15 @@ def apply_prune_plan(plan: PrunePlan) -> tuple[dict[str, str], ...]:
 def plan_document(
     plan: PrunePlan, *, applied: bool, outcomes: Iterable[dict[str, str]]
 ) -> dict[str, object]:
-    """Render a versioned prune plan and optional outcomes."""
+    """
+    Render one prune plan payload and its optional outcomes.
+
+    The caller stamps the schema version and error, so this cannot drift from
+    the version every other public document reports, as it did while it carried
+    a literal of its own.
+    """
 
     return {
-        'schema_version': 13,
         'database': str(plan.database),
         'runs_directory': str(plan.runs_directory),
         'older_than_days': plan.older_than_days,
@@ -611,5 +616,4 @@ def plan_document(
         'orphan_count': len(plan.orphans),
         'invalid_paths': list(plan.invalid_paths),
         'outcomes': list(outcomes),
-        'error': None,
     }

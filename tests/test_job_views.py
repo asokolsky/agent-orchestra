@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
+from importlib.metadata import version
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -925,6 +926,7 @@ def test_views_treat_absent_issue_tables_as_empty(
     assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'jobs': [],
         'error': None,
     }

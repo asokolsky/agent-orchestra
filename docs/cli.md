@@ -54,10 +54,24 @@ Example command output for an initialized database with no jobs:
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "jobs": [],
   "error": null
 }
 ```
+
+Every public document opens with these two fields. `schema_version` advances
+only when a field is removed, renamed, or repurposed, so a parser pinned to a
+value keeps working while documents gain fields; **ignore what you do not
+recognize** — both new keys and new enum values — because either can arrive
+without a version change. `agent_orchestra_version` reports the build that
+produced the document and is how you detect such an addition.
+
+Read the version each document declares rather than assuming one per command.
+Most documents carry `schema_version` from the CLI sequence shown here; a
+successful `audit` carries the independent audit sequence documented under
+[`audit`](#audit), while that command's failures use the ordinary envelope. See
+[Design](design.md#what-a-schema-version-promises) for the full rule.
 
 ## Global options
 
@@ -255,6 +269,7 @@ Example output from the first command:
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -278,7 +293,8 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `22`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `22`. Advances only on a breaking change. |
+| `agent_orchestra_version` | String | The build that produced the document. Use it to detect a field added without a version change. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -518,8 +534,8 @@ but deleted content cannot be reconstructed without an independent backup.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 22 JSON views expose
-that hierarchy:
+is one process execution. Four read-only JSON views, carrying the CLI schema
+version, expose that hierarchy:
 
 ```text
 agent-orchestra [--database DATABASE] jobs [--state STATE]... [--attention]
@@ -580,6 +596,7 @@ batch-evidence schema versions remain readable and omit fields they predate.
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -646,8 +663,8 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-21 `job_id`,
-`jobs`, and `attempt_id` fields.
+aliases. Callers must use the four commands above and the current `job_id`,
+`jobs`, and `attempt_id` fields, which schema 8 introduced.
 
 The new views do not reproduce the former log-filter flags. Select a task by
 its stable ID, then filter the structured document with `jq`; for example,
@@ -670,7 +687,7 @@ agent-orchestra [--database DATABASE] audit JOB_ID [--verify]
 
 The command is read-only. It does not initialize or update the database,
 evidence, worktree, issue provider, or remote repo. It reports source-code and
-issue-review jobs from the same schema-15 audit document and never contacts
+issue-review jobs from the same audit document and never contacts
 GitHub or GitLab.
 
 For source-code jobs, audit reports `worktree_missing` or
@@ -685,7 +702,8 @@ appear as `in_progress` until their invocation completes.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Independent audit output contract; currently `15`. |
+| `schema_version` | Integer | Independent audit output contract; currently `15`. Advances only on a breaking change. |
+| `agent_orchestra_version` | String | The build that produced the document. |
 | `job` | Object | Scenario-specific identity, immutable scope, state, and timestamps. |
 | `transitions` | Array | Ordered SQLite state history with the scope digest and optional reason at each transition. |
 | `operations` | Array | Commit authorization, commit, publish authorization, and publication views derived from transitions. |
@@ -785,6 +803,7 @@ Example output:
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -793,7 +812,8 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `22`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `22`. Advances only on a breaking change. |
+| `agent_orchestra_version` | String | The build that produced the document. Use it to detect a field added without a version change. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -841,6 +861,7 @@ Example output when the custom reviewer requests changes:
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -905,6 +926,7 @@ Successful output is versioned JSON:
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -916,6 +938,7 @@ An expected failure also remains JSON on stdout and exits 2:
 ```json
 {
   "schema_version": 22,
+  "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

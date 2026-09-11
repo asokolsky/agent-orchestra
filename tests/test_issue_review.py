@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from dataclasses import replace
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -879,6 +880,7 @@ def test_review_issue_missing_job_is_json(
     assert captured.err == ''
     assert json.loads(captured.out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'job_id': 'missing',
         'error': {'code': 'job_not_found', 'message': 'job not found: missing'},
     }

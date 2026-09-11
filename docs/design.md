@@ -465,14 +465,14 @@ directory at each call site.
 
 ## Job and task output
 
-CLI output schema version 10 uses the public `job` -> `task` -> `attempt`
-hierarchy. The `jobs`, `job`, `tasks`, and `task` commands are separate
+CLI output uses the public `job` -> `task` -> `attempt` hierarchy, introduced in
+schema version 10. The `jobs`, `job`, `tasks`, and `task` commands are separate
 read-only views. `job.current` is always an array and contains only pending or
 running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-21 CLI. This
+column and field names. Those names are not exposed by the CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -492,43 +492,123 @@ it alongside `Run` and `ScenarioType`, which made renaming it a public change;
 those re-exports have since been removed, so a rename is now an internal
 decision, and still not this one.
 `InvocationRecord.run_id` carries an issue job's identifier for an issue review;
-it is retained as stored evidence under the paragraph above, and audit schema 15
-withholds it from published attempt objects. Renaming storage to match the
+it is retained as stored evidence under the paragraph above, and the audit
+document withholds it from published attempt objects, as it has since audit
+schema 15. Renaming storage to match the
 public vocabulary is likewise a separate decision, and is not this one.
 
-Schema version history:
+### What a schema version promises
+
+`schema_version` is an opaque integer, not a count of changes. Three rules
+govern the **public documents** this project publishes to a separate reader.
+Two version sequences carry them: `CLI_SCHEMA_VERSION` for the ordinary CLI
+envelope, and the independent `AUDIT_SCHEMA_VERSION` for the audit document.
+The rules are the same for both; only the sequence differs.
+
+The split is by document, not by command. `audit` emits from both: a successful
+audit is the audit document and reports `AUDIT_SCHEMA_VERSION`, while its
+expected failures are ordinary CLI envelopes and report `CLI_SCHEMA_VERSION`.
+A consumer should therefore read the version each document declares rather than
+infer one from the command it ran.
+
+1. **It advances only on a break.** Removing a field, renaming one, repurposing
+   one, or changing what an existing value means advances the version. Adding a
+   field, or adding a value to an enum, does not.
+2. **A consumer must ignore what it does not recognize** — both a field it has
+   no name for and a value it has no case for. That is what makes rule 1 safe:
+   a document may gain either at any time, so a parser that rejects an unknown
+   key, or that treats an unmatched enum value as invalid input rather than as
+   one it does not handle, is asserting a contract this project does not offer.
+   A consumer that must act on a value it does not recognize should say so and
+   stop, not reject the document as malformed.
+3. **`agent_orchestra_version` identifies the producing build.** It is the
+   feature-detection channel, because a field added under rule 1 arrives without
+   any change to `schema_version`. Every public CLI document carries it beside
+   its schema version.
+
+Every other versioned shape in the project follows the opposite rule, and
+deliberately. That is not a short list, so the test is the reader rather than the
+name: if a document is validated against an exact field set, it follows this
+rule. `MANIFEST_SCHEMA_VERSION`, the invocation record, and the integrity index
+check that by hand; every persisted record derived from `StrictSchema`, which
+sets `extra='forbid'`, gets it from Pydantic — execution records and
+reviewer-batch results among them. Each version names one exact shape, and
+rejecting a document carrying an unexpected key is how a corrupted or
+hand-edited file is caught rather than silently half-read. An added field is
+therefore a shape change there, and advances that namespace's version like any
+other.
+
+Strictness per version is not the same as reading only what this build wrote.
+Persisted evidence outlives the build that produced it, and a reader may accept
+more than one version: `InvocationEvidenceStore` accepts invocation records at
+schema 4 and 5, adapting a schema-4 record as it reads. Compatibility there is
+expressed by naming each version a reader accepts, not by tolerating unknown
+keys within one. Those documents carry no `agent_orchestra_version` because the
+version already identifies the shape, and the reader adapts per version rather
+than feature-detecting.
+
+Applying the public-document rules to those shapes would be a real loss: strictness is
+the property that makes persisted evidence trustworthy.
+
+The version is never renumbered downward. The sequence below simply stops
+advancing for additive changes, exactly as `apiVersion: v1` stays `v1` while the
+resource it names gains fields.
+
+Adding `agent_orchestra_version` was itself an additive change, and so did not
+advance `schema_version` from 22.
+
+Every ordinary CLI envelope reports `CLI_SCHEMA_VERSION` and every audit
+document reports `AUDIT_SCHEMA_VERSION`; neither carries a literal of its own.
+The prune document did, and sat nine versions behind the rest of the CLI until a
+test asserted the property across commands.
+
+Schema version history. Every version through 22 was assigned under the earlier
+policy of advancing for any change to a public document, so the entries below
+are not examples of the rule above; most would not have advanced the version
+under it. They are classified retroactively so the distinction the rule turns on
+is legible in the sequence that exists. The rule governs changes from 22 onward.
+
+Version 7 is the earliest recorded contract and is classified as neither, having
+nothing before it to change. Every entry after it is marked **breaking** where it
+removed, renamed, repurposed, or withdrew something a consumer read, and
+**additive** where it only added:
 
 - Version 7 exposed the former `status` and `logs` documents with `run_id`,
   `runs`, and `invocation_id` fields.
 - Version 8 replaces those commands with `jobs`, `job`, `tasks`, and `task`,
   and exposes `job_id`, `jobs`, and `attempt_id`. Stored SQLite columns and
-  canonical evidence keep their implementation-level field names.
+  canonical evidence keep their implementation-level field names. (**breaking**)
 - Version 9 adds issue-review jobs, the `issue_review` scenario, and recorded
-  provider actions to the job and task views.
+  provider actions to the job and task views. (additive)
 - Version 10 adds deterministic audit documents, ordered transitions, integrity
-  verification, aggregated findings, and the optional verification result.
+  verification, aggregated findings, and the optional verification result. (additive)
 - Version 11 reports unrecognized persisted job enum values through stable
   query errors and retains unrecognized transition values as unverifiable audit
-  findings.
+  findings. (additive)
 - Version 12 adds effective global settings, explicit retention planning and
-  application documents, and the `expired` audit result.
+  application documents, and the `expired` audit result. (additive)
 - Version 13 adds source-job worktree health, explicit cancellation, and
-  cancellation reasons on transition documents.
+  cancellation reasons on transition documents. (additive)
 - Version 14 adds ordered named reviewer-set configuration with stable member
-  identities and registry-derived runtime provenance.
+  identities and registry-derived runtime provenance. (additive)
 - Version 15 adds the stable `reviewer_id` field to source-review task and
   attempt documents. The version advances because the current CLI contract
-  versions additive public fields; issue #61 may revise that policy globally.
-- Version 16 enables configured reviewer-set execution through `run`.
+  versions additive public fields; issue #61 may revise that policy globally. (additive)
+- Version 16 enables configured reviewer-set execution through `run`. (additive)
 - Version 17 exposes validated aggregate reviewer-batch state in job and task
-  views.
-- Version 18 adds the aggregate batch's namespaced `findings` array.
+  views. (additive)
+- Version 18 adds the aggregate batch's namespaced `findings` array. (additive)
 - Version 19 adds the aggregate message identity and evidence-relative Markdown
-  artifact path.
+  artifact path. (additive)
 - Version 20 marks reviewer sets as supporting the full review and remediation
-  workflow in `config show`.
+  workflow in `config show`. (additive)
 - Version 21 adds each correlated canonical reviewer result to its completed
-  reviewer task in the `tasks` and `task` views.
+  reviewer task in the `tasks` and `task` views. (additive)
+- Version 22 moves several commands' expected failures from an `error:`
+  line on stderr to a versioned document on stdout. It is recorded as
+  **breaking** because the stderr line those commands used to write is gone,
+  even though a consumer reading stdout only gains a document where it
+  previously got nothing.
 
 The independent audit document schema is version 15. It advances from 14
 because attempt objects no longer carry `run_id`, `invocation_id`, or the
@@ -908,10 +988,10 @@ result as `messages/000002-review-result.json`:
       {
         "finding_id": "F-001",
         "severity": "medium",
-        "title": "CLI schema version was not advanced",
+        "title": "CLI schema version was not advanced for a renamed field",
         "path": "src/agent_orchestra/cli.py",
         "line": 37,
-        "explanation": "A required output field was added without changing the strict CLI schema version.",
+        "explanation": "An output field was renamed without changing the CLI schema version, so a consumer pinned to the current version silently loses it. Adding a field would not require a change; removing or renaming one does.",
         "acceptance_criterion": "Advance the CLI schema version and update every affected test and documented example."
       }
     ],
