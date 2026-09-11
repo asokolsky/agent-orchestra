@@ -17,8 +17,10 @@ from agent_orchestra.adapter.codex import (
     CodexDeveloperAdapter,
     _developer_environment,
 )
+from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
+    RuntimeMetadata,
     read_runtime_metadata,
 )
 
@@ -484,7 +486,10 @@ def test_claude_developer_reports_models_before_nonzero_exit(
     with pytest.raises(RuntimeError, match='failed with code 9'):
         run_claude_code_developer(request, tmp_path / 'run/response.json')
 
-    assert read_runtime_metadata(metadata) == (('claude-sonnet-4-6',), 'reported')
+    assert read_runtime_metadata(metadata) == RuntimeMetadata(
+        effective_models=('claude-sonnet-4-6',),
+        effective_model_status=EffectiveModelStatus.REPORTED,
+    )
 
 
 def test_codex_developer_rejects_nonpositive_timeout(

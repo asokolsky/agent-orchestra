@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
+    RuntimeMetadata,
     read_runtime_metadata,
 )
 
@@ -73,6 +74,7 @@ class AgentResult:
     exit_code: int
     effective_models: tuple[str, ...] = ()
     effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
+    timed_out: bool = False
 
 
 class AgentAdapter(Protocol):
@@ -89,17 +91,15 @@ class CommandAgentAdapter:
     command: tuple[str, ...]
 
     @staticmethod
-    def _consume_runtime_metadata(
-        path: Path | None,
-    ) -> tuple[tuple[str, ...], EffectiveModelStatus]:
+    def _consume_runtime_metadata(path: Path | None) -> RuntimeMetadata:
         """Read and remove runtime provenance, treating invalid data as unavailable."""
 
         if path is None:
-            return (), EffectiveModelStatus.UNAVAILABLE
+            return RuntimeMetadata()
         try:
             return read_runtime_metadata(path)
         except OSError:
-            return (), EffectiveModelStatus.UNAVAILABLE
+            return RuntimeMetadata()
         finally:
             with suppress(OSError):
                 path.unlink(missing_ok=True)
@@ -174,23 +174,21 @@ class CommandAgentAdapter:
                 stderr = None
                 exit_code = redirected_process.returncode
         except BaseException as error:
-            effective_models, effective_model_status = self._consume_runtime_metadata(
-                request.runtime_metadata_path
-            )
+            metadata = self._consume_runtime_metadata(request.runtime_metadata_path)
             error.__dict__.update(
-                effective_models=effective_models,
-                effective_model_status=effective_model_status,
+                effective_models=metadata.effective_models,
+                effective_model_status=metadata.effective_model_status,
+                timed_out=getattr(error, 'timed_out', False) or metadata.timed_out,
             )
             raise
-        effective_models, effective_model_status = self._consume_runtime_metadata(
-            request.runtime_metadata_path
-        )
+        metadata = self._consume_runtime_metadata(request.runtime_metadata_path)
         return AgentResult(
             succeeded=exit_code == 0,
             summary='',
             stdout=stdout,
             stderr=stderr,
             exit_code=exit_code,
-            effective_models=effective_models,
-            effective_model_status=effective_model_status,
+            effective_models=metadata.effective_models,
+            effective_model_status=metadata.effective_model_status,
+            timed_out=metadata.timed_out,
         )

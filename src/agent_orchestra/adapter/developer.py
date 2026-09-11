@@ -8,13 +8,14 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from agent_orchestra.adapter.errors import AdapterError
 from agent_orchestra.schemas import SchemaValidationError, validate_developer_result
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-class DeveloperAdapterError(RuntimeError):
+class DeveloperAdapterError(AdapterError):
     """Raised when a developer adapter cannot produce a canonical handoff."""
 
 

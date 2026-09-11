@@ -14,8 +14,10 @@ from agent_orchestra.adapter.claude_code import (
     ClaudeCodeReviewerAdapter,
     ClaudeCodeReviewerError,
 )
+from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
+    RuntimeMetadata,
     read_runtime_metadata,
 )
 
@@ -200,7 +202,10 @@ def test_claude_code_reviewer_reports_models_before_nonzero_exit(
     with pytest.raises(ClaudeCodeReviewerError, match='failed with code 9'):
         run_claude_code_reviewer(request, tmp_path / 'run/result.json')
 
-    assert read_runtime_metadata(metadata) == (('claude-sonnet-4-6',), 'reported')
+    assert read_runtime_metadata(metadata) == RuntimeMetadata(
+        effective_models=('claude-sonnet-4-6',),
+        effective_model_status=EffectiveModelStatus.REPORTED,
+    )
 
 
 def test_claude_code_reviewer_reports_models_before_schema_validation(
@@ -235,7 +240,10 @@ def test_claude_code_reviewer_reports_models_before_schema_validation(
     with pytest.raises(ClaudeCodeReviewerError):
         run_claude_code_reviewer(request, tmp_path / 'run/result.json')
 
-    assert read_runtime_metadata(metadata) == (('claude-sonnet-4-6',), 'reported')
+    assert read_runtime_metadata(metadata) == RuntimeMetadata(
+        effective_models=('claude-sonnet-4-6',),
+        effective_model_status=EffectiveModelStatus.REPORTED,
+    )
 
 
 def test_claude_code_reviewer_parses_structured_output_with_invalid_utf8(

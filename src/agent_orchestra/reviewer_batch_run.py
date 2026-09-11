@@ -68,6 +68,7 @@ from agent_orchestra.invocations import (
     InvocationRecord,
     ProcessOutcome,
     RecoveryAction,
+    failure_conclusion,
     latest_task_attempt,
     next_attempt,
     prepare_run_evidence_directory,
@@ -1145,7 +1146,7 @@ def _execute_reviewer_dispatch(
             )
         )
     except subprocess.TimeoutExpired as error:
-        models, model_status = exception_runtime_metadata(error)
+        metadata = exception_runtime_metadata(error)
         record_invocation(
             AttemptIdentity(
                 run_id=str(run.id),
@@ -1163,8 +1164,8 @@ def _execute_reviewer_dispatch(
                 stderr=error.stderr,
                 exit_code=None,
                 timed_out=True,
-                effective_models=models,
-                effective_model_status=model_status,
+                effective_models=metadata.effective_models,
+                effective_model_status=metadata.effective_model_status,
             ),
             run_directory=run_directory,
         )
@@ -1265,12 +1266,15 @@ def _execute_reviewer_dispatch(
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 exit_code=completed.exit_code,
+                timed_out=completed.timed_out,
                 finished_at=finished_at,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
             ),
             run_directory=run_directory,
-            lifecycle=AttemptLifecycle(conclusion=AttemptConclusion.FAILED),
+            lifecycle=AttemptLifecycle(
+                conclusion=failure_conclusion(completed.timed_out)
+            ),
         )
         archive_unaccepted_response(
             response_path,
@@ -1329,6 +1333,7 @@ def _execute_reviewer_dispatch(
             stdout=completed.stdout,
             stderr=completed.stderr,
             exit_code=completed.exit_code,
+            timed_out=completed.timed_out,
             finished_at=finished_at,
             effective_models=completed.effective_models,
             effective_model_status=completed.effective_model_status,

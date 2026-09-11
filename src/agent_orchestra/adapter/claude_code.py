@@ -27,6 +27,7 @@ from agent_orchestra.adapter.developer import (
     read_request,
     write_handoff,
 )
+from agent_orchestra.adapter.errors import AdapterError
 from agent_orchestra.adapter.issue_reviewer import (
     IssueReviewerError,
     issue_review_prompt,
@@ -54,7 +55,7 @@ from agent_orchestra.schemas import (
 from agent_orchestra.skill_install import skill_destination
 
 
-class ClaudeCodeReviewerError(RuntimeError):
+class ClaudeCodeReviewerError(AdapterError):
     """Raised when Claude Code cannot produce a valid structured review."""
 
 
@@ -241,7 +242,7 @@ def _execute_claude_code_reviewer(
         raise ClaudeCodeReviewerError(MISSING_REQUEST_PATHS) from error
     _require_safe_artifact_path(request_path, artifact_path)
     if timeout_seconds <= 0:
-        raise ClaudeCodeReviewerError(CLAUDE_CODE_TIMEOUT)
+        raise ClaudeCodeReviewerError(CLAUDE_CODE_TIMEOUT, timed_out=True)
     executable = shutil.which('claude')
     if executable is None:
         raise ClaudeCodeReviewerError(CLAUDE_CODE_NOT_FOUND)
@@ -287,7 +288,9 @@ def _execute_claude_code_reviewer(
                 timeout=max(1, timeout_seconds - 5),
             )
         except subprocess.TimeoutExpired as error:
-            raise ClaudeCodeReviewerError(CLAUDE_CODE_TIMEOUT) from error
+            raise ClaudeCodeReviewerError(
+                CLAUDE_CODE_TIMEOUT, timed_out=True
+            ) from error
     output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
@@ -447,7 +450,9 @@ def _execute_claude_code_developer(
             timeout=max(1, timeout_seconds - 5),
         )
     except subprocess.TimeoutExpired as error:
-        raise DeveloperAdapterError(CLAUDE_CODE_DEVELOPER_TIMEOUT) from error
+        raise DeveloperAdapterError(
+            CLAUDE_CODE_DEVELOPER_TIMEOUT, timed_out=True
+        ) from error
     output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
@@ -509,6 +514,11 @@ def main(argv: list[str] | None = None) -> int:
             )
     except (ClaudeCodeReviewerError, DeveloperAdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
+        if isinstance(error, AdapterError) and error.timed_out:
+            # The orchestrator sees only a non-zero exit, so report the reason
+            # through the sidecar. Nothing has written it yet on this path: the
+            # adapter records models only after its child returns normally.
+            write_runtime_metadata((), timed_out=True)
         return 2
     return 0
 

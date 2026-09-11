@@ -55,9 +55,10 @@ def test_command_adapter_preserves_metadata_across_exceptional_exit(
         path.write_text(
             json.dumps(
                 {
-                    'schema_version': 1,
+                    'schema_version': 2,
                     'effective_models': ['reported-model'],
                     'status': 'reported',
+                    'timed_out': False,
                 }
             )
         )
@@ -81,6 +82,64 @@ def test_command_adapter_preserves_metadata_across_exceptional_exit(
 
     assert raised.value.__dict__['effective_models'] == ('reported-model',)
     assert raised.value.__dict__['effective_model_status'] == 'reported'
+    assert not metadata_path.exists()
+
+
+def test_command_adapter_reports_adapter_detected_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carry an adapter's own expired bound out of its non-zero exit."""
+
+    metadata_path = tmp_path / 'runtime.json'
+
+    class TimedOutProcess:
+        """Stand in for an adapter that reported a timeout and exited two."""
+
+        returncode = 2
+
+        def __init__(self, _command: list[str], **kwargs: Any) -> None:
+            """Record the adapter's timeout the way the real adapter does."""
+
+            path = Path(kwargs['env'][RUNTIME_METADATA_ENV])
+            path.write_text(
+                json.dumps(
+                    {
+                        'schema_version': 2,
+                        'effective_models': [],
+                        'status': 'unavailable',
+                        'timed_out': True,
+                    }
+                )
+            )
+
+        def communicate(self, **_: Any) -> tuple[str, str]:
+            """Return the adapter's diagnostic without blocking."""
+
+            return '', 'error: codex review timed out'
+
+        def kill(self) -> None:
+            """Accept process termination."""
+
+    monkeypatch.setattr('agent_orchestra.agents.subprocess.Popen', TimedOutProcess)
+    request = DeveloperRequest(
+        objective='Test timeout reporting.',
+        worktree_path=tmp_path,
+        iteration=1,
+        allowed_actions=(),
+        timeout_seconds=30,
+        request_path=tmp_path / 'request.json',
+        response_path=tmp_path / 'response.json',
+        runtime_metadata_path=metadata_path,
+    )
+
+    result = CommandAgentAdapter(('agent',)).execute(request)
+
+    # The orchestrator never saw TimeoutExpired here; its own bound was 30s and
+    # the adapter exited normally with code 2. Only the sidecar distinguishes
+    # this from a crash.
+    assert result.exit_code == 2
+    assert result.succeeded is False
+    assert result.timed_out is True
     assert not metadata_path.exists()
 
 
