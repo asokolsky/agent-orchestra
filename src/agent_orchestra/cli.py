@@ -1106,6 +1106,29 @@ def _attach_reviewer_results(
             task['review_result'] = result
 
 
+def _emit_document(document: Mapping[str, object]) -> None:
+    """Write one public document with the producing build beside its version."""
+
+    # Every public document passes through here, whichever schema it declares,
+    # so the producing build is reported without each builder remembering to add
+    # it. schema_version says what shape the document is;
+    # agent_orchestra_version says which build produced it, which is what a
+    # consumer needs to detect a feature added without a shape change.
+    remainder = {
+        key: value for key, value in document.items() if key != 'schema_version'
+    }
+    print(
+        json.dumps(
+            {
+                'schema_version': document['schema_version'],
+                'agent_orchestra_version': _distribution_version(),
+                **remainder,
+            },
+            indent=2,
+        )
+    )
+
+
 def _write_document(
     payload: Mapping[str, object] | None = None, *, error: object = None
 ) -> None:
@@ -1114,11 +1137,8 @@ def _write_document(
     # Every public document is the schema version, the command's own payload in
     # its declared order, then error. Building it here is what keeps a new
     # command from omitting either bracket of that contract.
-    print(
-        json.dumps(
-            {'schema_version': CLI_SCHEMA_VERSION, **(payload or {}), 'error': error},
-            indent=2,
-        )
+    _emit_document(
+        {'schema_version': CLI_SCHEMA_VERSION, **(payload or {}), 'error': error}
     )
 
 
@@ -1594,7 +1614,7 @@ def _audit(args: argparse.Namespace, store: JobStore) -> int:
     except (EvidencePathError, OSError) as error:
         _write_job_error('invalid_evidence', str(error), job_id=args.job_id)
         return 2
-    print(json.dumps(document, indent=2))
+    _emit_document(document)
     return 0
 
 
@@ -1939,9 +1959,7 @@ def _prune(args: argparse.Namespace, store: JobStore, settings: Settings) -> int
     except (OSError, RetentionError) as error:
         _write_document(error={'code': 'prune_unsafe', 'message': str(error)})
         return 2
-    print(
-        json.dumps(plan_document(plan, applied=args.apply, outcomes=outcomes), indent=2)
-    )
+    _write_document(plan_document(plan, applied=args.apply, outcomes=outcomes))
     return 2 if any(item['status'] == 'failed' for item in outcomes) else 0
 
 

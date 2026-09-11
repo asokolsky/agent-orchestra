@@ -33,7 +33,7 @@ from agent_orchestra.adapter.registry import (
     RuntimeRole,
 )
 from agent_orchestra.agents import AgentRequest, AgentResult, CommandAgentAdapter
-from agent_orchestra.audit import _canonical_evidence_type
+from agent_orchestra.audit import AUDIT_SCHEMA_VERSION, _canonical_evidence_type
 from agent_orchestra.cli import (
     DEFAULT_DATABASE,
     _working_tree_digest,
@@ -168,6 +168,7 @@ def test_cli_rejects_incompatible_manifest_with_stable_error(
     assert main(['--help']) == 2
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': cli.CLI_SCHEMA_VERSION,
+        'agent_orchestra_version': version('agent-orchestra'),
         'error': {
             'code': 'manifest_engine_too_old',
             'message': 'manifest_engine_too_old: codex',
@@ -896,6 +897,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     output = json.loads(capsys.readouterr().out)
     assert output == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'directory': str(projects),
         'jobs': [
             {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},
@@ -1109,7 +1111,11 @@ def test_jobs_lists_persisted_job(
 
     assert result == 0
     output = capsys.readouterr().out
-    assert output.startswith('{\n  "schema_version": 22,\n  "jobs": [\n    {\n')
+    assert output.startswith(
+        '{\n  "schema_version": 22,\n'
+        f'  "agent_orchestra_version": "{version("agent-orchestra")}",\n'
+        '  "jobs": [\n    {\n'
+    )
     assert output.endswith('\n}\n')
     document = json.loads(output)
     expected_fields = {
@@ -1126,6 +1132,7 @@ def test_jobs_lists_persisted_job(
     assert set(document['jobs'][0]) == expected_fields
     assert document == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'jobs': [
             {
                 'job_id': str(run.id),
@@ -1274,6 +1281,7 @@ def test_jobs_rejects_unknown_state_with_stable_error(
     assert result == 2
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'error': {
             'code': 'invalid_job_state',
             'message': 'unknown durable job state: needs-coffee',
@@ -1569,6 +1577,7 @@ def test_jobs_lists_empty_jobs_as_json(
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'jobs': [],
         'error': None,
     }
@@ -1886,6 +1895,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1906,6 +1916,12 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     )
     audit = json.loads(capsys.readouterr().out)
     assert audit['result'] == 'verified', audit['findings']
+    # The audit document is published on the same channel but carries its own
+    # version sequence, so it reports AUDIT_SCHEMA_VERSION beside the build
+    # rather than CLI_SCHEMA_VERSION.
+    assert audit['schema_version'] == AUDIT_SCHEMA_VERSION
+    assert audit['schema_version'] != cli.CLI_SCHEMA_VERSION
+    assert audit['agent_orchestra_version'] == version('agent-orchestra')
 
 
 def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
@@ -2336,6 +2352,7 @@ def test_resume_validation_required_continues_same_run(
     ]
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -3782,6 +3799,7 @@ def test_run_missing_database_is_json(
     assert captured.err == ''
     assert json.loads(captured.out) == {
         'schema_version': 22,
+        'agent_orchestra_version': version('agent-orchestra'),
         'job_id': 'job-1',
         'error': {
             'code': 'state_database_not_found',
@@ -3947,3 +3965,33 @@ def test_skills_install_rejects_duplicate_home_override(
 
     assert result == 2
     assert 'skill home specified twice for codex' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    'command',
+    [
+        ['jobs'],
+        ['prune'],
+        ['config', 'show'],
+    ],
+)
+def test_command_documents_report_the_cli_schema_version_and_the_build(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: list[str]
+) -> None:
+    """Report CLI_SCHEMA_VERSION and the producing build from each command."""
+
+    # The prune document carried a literal of its own and sat nine versions
+    # behind the rest of the CLI without any test noticing. This asserts the
+    # property that was missing rather than the one document that broke it, so
+    # a new command cannot reintroduce the drift. The audit document is out of
+    # scope here: it carries the independent AUDIT_SCHEMA_VERSION, and
+    # tests/test_audit.py owns its contract.
+    database = tmp_path / 'state.db'
+    JobStore(database).initialize()
+    runs = ['--runs-directory', str(tmp_path / 'runs')] if command != ['jobs'] else []
+
+    assert main(['--database', str(database), *command, *runs]) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['schema_version'] == cli.CLI_SCHEMA_VERSION
+    assert document['agent_orchestra_version'] == version('agent-orchestra')
