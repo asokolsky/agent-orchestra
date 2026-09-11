@@ -1888,3 +1888,84 @@ def test_reviewer_set_resume_validates_completed_developer_response(
     resumed = resume_review(context=context, run=recoverable)
 
     assert resumed.state is not RunState.DEVELOPING
+
+
+def test_reviewer_set_without_a_developer_stops_at_changes_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End a reviewer batch that cannot remediate at its verdict, not at failure."""
+
+    # max_iterations=1 with no developer command previously raised
+    # ITERATION_LIMIT and left the job failed, because the budget check preempted
+    # the review-only return. The batch path also has to persist the
+    # REVIEWING-to-CHANGES_REQUESTED update that moved with that reorder.
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Return a rejecting review from every configured reviewer."""
+
+        if request.on_started is not None:
+            request.on_started()
+        assert isinstance(request, ReviewerRequest)
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        request.artifact_path.write_text('# Review\n', encoding='utf-8')
+        request.response_path.write_text(
+            json.dumps(_changes_requested_response(document, request.artifact_path)),
+            encoding='utf-8',
+        )
+        return AgentResult(
+            succeeded=True, summary='reviewed', stdout='', stderr='', exit_code=0
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+    result = run_queued_reviewer_set(
+        context=WorkerContext(
+            store=store,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+            registry=DEFAULT_RUNTIME_REGISTRY,
+        ),
+        run=run,
+        plan=ReviewerSetReviewPlan(
+            objective='Review the change.',
+            reviewer_plan=ReviewerExecutionPlan(
+                'default',
+                (
+                    _reviewer('security', 'codex', 'openai'),
+                    _reviewer('portability', 'claude-code', 'anthropic'),
+                ),
+            ),
+            developer_command=(),
+            developer_timeout_seconds=30,
+            max_iterations=1,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
+        ),
+    )
+
+    assert result.state is RunState.CHANGES_REQUESTED
+    # The durable record must agree, since the store update for this transition
+    # moved when the checks were reordered.
+    assert store.get(run.id).state is RunState.CHANGES_REQUESTED
+
+    # Resuming that durable outcome exercises _resume_reviewer_set's own limit
+    # check, which is a separate reordered site: without it, recovery rewrites
+    # the recorded verdict into a failure.
+    resumed = resume_review(
+        context=WorkerContext(
+            store=store,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: DIGEST,
+            registry=DEFAULT_RUNTIME_REGISTRY,
+        ),
+        run=store.get(run.id),
+    )
+
+    assert resumed.state is RunState.CHANGES_REQUESTED
+    assert store.get(run.id).state is RunState.CHANGES_REQUESTED

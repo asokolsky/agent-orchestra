@@ -568,9 +568,18 @@ def write_fake_codex(path: Path, *, mode: str) -> None:
 
     terminal_statement = {
         'approved': '',
+        'changes_requested': '',
         'nonzero': 'raise SystemExit(9)',
         'timeout': 'time.sleep(20)',
     }[mode]
+    verdict = 'changes_requested' if mode == 'changes_requested' else 'approved'
+    findings = (
+        '[{"finding_id": "F1", "severity": "low", "title": "Fix this",'
+        ' "path": "a.py", "line": 1, "explanation": "Because.",'
+        ' "acceptance_criterion": "Fixed."}]'
+        if mode == 'changes_requested'
+        else '[]'
+    )
     path.parent.mkdir(parents=True)
     path.write_text(
         f'''#!/usr/bin/env python3
@@ -586,9 +595,9 @@ print("child stderr", file=sys.stderr, flush=True)
 {terminal_statement}
 result_path = Path(sys.argv[sys.argv.index("--output-last-message") + 1])
 result_path.write_text(json.dumps({{
-    "verdict": "approved",
+    "verdict": "{verdict}",
     "summary": "Ready.",
-    "findings": [],
+    "findings": {findings},
     "validation": [],
     "verification_gaps": [],
 }}))
@@ -2223,6 +2232,61 @@ def test_run_records_requested_changes(
     assert (
         enqueued_run.store.get(enqueued_run.run.id).state is RunState.CHANGES_REQUESTED
     )
+
+
+@pytest.mark.parametrize('iterations', ['1', '3'])
+def test_review_only_run_stops_at_its_verdict(
+    tmp_path: Path, enqueued_run: CliRunContext, iterations: str
+) -> None:
+    """End a run that cannot remediate at its review verdict, not at failure."""
+
+    # A run with no developer command cannot spend the remediation budget, so
+    # exhausting it must not turn a completed review into a failed job. This
+    # failed only at --max-iterations 1, where the budget check preempted the
+    # review-only return, which is how it escaped the suite.
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'changes_requested')
+
+    result = main(
+        run_arguments(enqueued_run, '--max-iterations', iterations, reviewer=reviewer)
+    )
+
+    assert result == 0
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state is RunState.CHANGES_REQUESTED
+    )
+
+
+def test_no_remediation_reviews_once_without_a_developer(
+    tmp_path: Path, enqueued_run: CliRunContext, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review once through a built-in adapter and stop at the verdict."""
+
+    reviewer = tmp_path / 'bin/codex'
+    write_fake_codex(reviewer, mode='changes_requested')
+    monkey_path = f'{reviewer.parent}{os.pathsep}{os.environ.get("PATH", "")}'
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('PATH', monkey_path)
+        codex_home = tmp_path / 'codex-home'
+        skill = codex_home / 'skills/agent-orchestra-reviewer'
+        skill.mkdir(parents=True)
+        (skill / 'SKILL.md').write_text('review instructions\n')
+        patch.setenv('CODEX_HOME', str(codex_home))
+        result = main(
+            run_arguments(
+                enqueued_run,
+                '--no-remediation',
+                '--max-iterations',
+                '1',
+                '--reviewer-model',
+                'test-model',
+            )
+        )
+
+    assert result == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['state'] == 'changes_requested'
+    assert document['error'] is None
 
 
 @pytest.mark.parametrize(
@@ -3995,3 +4059,90 @@ def test_command_documents_report_the_cli_schema_version_and_the_build(
     document = json.loads(capsys.readouterr().out)
     assert document['schema_version'] == cli.CLI_SCHEMA_VERSION
     assert document['agent_orchestra_version'] == version('agent-orchestra')
+
+
+def test_resume_does_not_fail_a_review_only_run_at_its_limit(
+    tmp_path: Path, enqueued_run: CliRunContext, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Leave a completed review-only run at its verdict when resume is attempted."""
+
+    # A review-only run has already reached its outcome. Resume previously
+    # checked the iteration budget first and rewrote that durable
+    # changes_requested into failed, destroying the review's result.
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'changes_requested')
+    assert (
+        main(run_arguments(enqueued_run, '--max-iterations', '1', reviewer=reviewer))
+        == 0
+    )
+    capsys.readouterr()
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state is RunState.CHANGES_REQUESTED
+    )
+
+    result = main(
+        [
+            '--database',
+            str(enqueued_run.database),
+            'resume',
+            str(enqueued_run.run.id),
+            '--runs-directory',
+            str(enqueued_run.runs_directory),
+        ]
+    )
+
+    assert result == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'job_not_resumable'
+    assert (
+        enqueued_run.store.get(enqueued_run.run.id).state is RunState.CHANGES_REQUESTED
+    )
+
+
+def test_resume_revalidates_a_review_only_run_at_its_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recover a review-only reviewer response without failing on the budget."""
+
+    # This reaches _resume_reviewer_validation, the one reordered site the other
+    # tests do not exercise: the reviewer persisted a changes_requested response
+    # but the workflow transition out of REVIEWING never landed. Resume must
+    # apply that verdict, not fail the job on a budget it could never spend.
+    context = create_worker_run(tmp_path)
+    reviewer = tmp_path / 'reviewer.py'
+    write_reviewer(reviewer, 'changes_requested')
+    original_update = JobStore.update
+    crash_leaving_reviewing = True
+
+    def update(self: JobStore, updated: Run, *, expected_state: RunState) -> None:
+        """Fail the first transition that leaves REVIEWING."""
+
+        nonlocal crash_leaving_reviewing
+        if crash_leaving_reviewing and expected_state is RunState.REVIEWING:
+            crash_leaving_reviewing = False
+            message = 'simulated reviewing transition failure'
+            raise OSError(message)
+        return original_update(self, updated, expected_state=expected_state)
+
+    worker_context = WorkerContext(
+        store=context.store,
+        runs_directory=context.runs_directory,
+        digest_worktree=_working_tree_digest,
+    )
+    plan = ReviewPlan(
+        objective='Review the change.',
+        reviewer_command=(sys.executable, str(reviewer)),
+        developer_command=(),
+        timeout_seconds=30,
+        max_iterations=1,
+    )
+    monkeypatch.setattr(JobStore, 'update', update)
+    with pytest.raises(OSError, match='simulated reviewing transition failure'):
+        run_queued_review(context=worker_context, run=context.run, plan=plan)
+
+    recovered = resume_review(
+        context=worker_context, run=context.store.get(context.run.id)
+    )
+
+    assert recovered.state is RunState.CHANGES_REQUESTED
+    assert context.store.get(context.run.id).state is RunState.CHANGES_REQUESTED

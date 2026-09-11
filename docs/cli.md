@@ -761,7 +761,8 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--objective OBJECTIVE` | Required | Review objective and acceptance context sent to the agents. Blank objectives are rejected. |
 | `--timeout SECONDS` | `1800` | Positive timeout for each reviewer invocation. |
 | `--developer-timeout SECONDS` | `1800` | Positive timeout for each developer remediation invocation. |
-| `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. |
+| `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. Bounds remediation rounds, so it has no effect when no developer can be dispatched. |
+| `--no-remediation` | off | Review once and stop, without dispatching a developer. Rejected when a developer option selects anything other than its default, since no developer can run. |
 | `--developer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for development remediation. |
 | `--developer-model MODEL` | Runtime default | Optional model passed to the developer adapter. |
 | `--reviewer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for review. |
@@ -794,6 +795,19 @@ agent-orchestra run "$JOB_ID" \
   --reviewer-model gpt-5.6 \
   --max-iterations 4
 ```
+
+Review without remediating, to read the verdict and address it yourself:
+
+```shell
+agent-orchestra run 20260903T194500Z-a7f3c921 \
+  --objective 'Review the change.' \
+  --no-remediation
+```
+
+A `changes_requested` verdict is the run's outcome here rather than the start of
+a remediation round: the job rests in `changes_requested`, `error` is `null`, and
+the command exits 0. An `approved` verdict still reaches
+`awaiting_commit_authorization`.
 
 When orchestration completes without a command-level failure, `run` writes one
 versioned JSON document to stdout:

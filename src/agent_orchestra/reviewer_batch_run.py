@@ -620,12 +620,16 @@ def _resume_reviewer_set(  # noqa: PLR0911
     if run.state is RunState.CHANGES_REQUESTED:
         if _developer_disagreement_is_pending(run_directory, run):
             return run
+        # A run with no developer command cannot remediate, so the
+        # remediation budget cannot buy it another round. Exhausting a
+        # budget that could never be spent is not a failure: the review
+        # completed, and its verdict is the run's outcome.
+        if not plan.developer_command:
+            return run
         if run.iteration >= plan.max_iterations:
             failed = transition(run, RunState.FAILED)
             context.store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
             raise WorkerError(ITERATION_LIMIT)
-        if not plan.developer_command:
-            return run
         current_digest = worktree_digest(
             context.digest_worktree, run.worktree_path, run.base_sha
         )
@@ -1468,14 +1472,19 @@ def _finish_reviewer_batch(
         else RunState.CHANGES_REQUESTED,
     )
     if decision.verdict == 'changes_requested':
+        # A run with no developer command cannot remediate, so the
+        # remediation budget cannot buy it another round. Exhausting a
+        # budget that could never be spent is not a failure: the review
+        # completed, and its verdict is the run's outcome.
+        if not plan.developer_command:
+            context.store.update(decided, expected_state=RunState.REVIEWING)
+            return decided
         if review_round.reviewing.iteration >= plan.max_iterations:
             context.store.update(decided, expected_state=RunState.REVIEWING)
             failed = transition(decided, RunState.FAILED)
             context.store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
             raise WorkerError(ITERATION_LIMIT)
         context.store.update(decided, expected_state=RunState.REVIEWING)
-        if not plan.developer_command:
-            return decided
         sequence = review_round.sequence + 2
         batch_path = run_evidence_path(
             run_directory,

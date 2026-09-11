@@ -331,12 +331,15 @@ def _resume_reviewer_validation(
         awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
         store.update(awaiting, expected_state=RunState.APPROVED)
         return awaiting
+    # Same ordering as the run path: a recovered run with no developer command
+    # cannot remediate, so its exhausted budget must not turn the durable
+    # changes_requested outcome into a failure on resume.
+    if not resumed.record.developer.command:
+        return decided
     if run.iteration >= resumed.record.max_review_iterations:
         failed = transition(decided, RunState.FAILED)
         store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
         raise WorkerError(ITERATION_LIMIT)
-    if not resumed.record.developer.command:
-        return decided
     next_sequence = sequence + 2
     review_artifact_path = Path(request['payload']['artifact_path'])
     remediation_path = manifest_evidence_path(
@@ -633,6 +636,14 @@ def _resume_intermediate_state(
         message = 'resume scope changed before remediation'
         raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
     last_path, last_message = chain[-1]
+    # A review-only run has already reached its outcome, so it is not resumable
+    # rather than budget-exhausted. Testing the developer command first keeps
+    # resume from rewriting that durable changes_requested into a failure.
+    if not resumed.record.developer.command:
+        raise WorkerError(
+            f'job is not resumable from {run.state}',
+            code=RUN_NOT_RESUMABLE_CODE,
+        )
     if (
         last_message['message_type'] == 'review_result'
         and last_message['payload']['verdict'] == 'changes_requested'
@@ -641,11 +652,6 @@ def _resume_intermediate_state(
         failed = transition(run, RunState.FAILED)
         store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
         raise WorkerError(ITERATION_LIMIT)
-    if not resumed.record.developer.command:
-        raise WorkerError(
-            f'job is not resumable from {run.state}',
-            code=RUN_NOT_RESUMABLE_CODE,
-        )
     if last_message['message_type'] == 'remediation_request':
         request = last_message
     elif (
