@@ -1816,6 +1816,22 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
         'state': 'awaiting_commit_authorization',
         'error': None,
     }
+    assert (
+        main(
+            [
+                '--database',
+                str(enqueued_run.database),
+                'audit',
+                str(enqueued_run.run.id),
+                '--runs-directory',
+                str(enqueued_run.runs_directory),
+                '--verify',
+            ]
+        )
+        == 0
+    )
+    audit = json.loads(capsys.readouterr().out)
+    assert audit['result'] == 'verified', audit['findings']
 
 
 def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
