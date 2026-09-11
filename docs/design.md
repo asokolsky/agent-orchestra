@@ -1016,7 +1016,10 @@ ordered member outcomes and canonical result paths, aggregate verdict, and its
 ordered rationale groups. A timed-out, failed, or invalid member leaves the
 batch `interrupted` without a premature aggregate. A complete blocked batch and
 any mutation-invalidated batch transition to terminal `failed`; resumed work
-remains bound to the same immutable diff digest.
+remains bound to the same immutable diff digest. If an activated reviewer-set
+resume fails during a later remediation iteration, the run returns to
+`interrupted` so the durable partial work can be resumed again. The equivalent
+failure during the initial review iteration is terminal `failed`.
 
 A retry keeps the original request message and writes a new invocation record
 with the same `task_id`, a new `invocation_id`, and an incremented `attempt`. A
