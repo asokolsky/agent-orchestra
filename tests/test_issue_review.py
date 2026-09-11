@@ -879,7 +879,7 @@ def test_review_issue_missing_job_is_json(
     captured = capsys.readouterr()
     assert captured.err == ''
     assert json.loads(captured.out) == {
-        'schema_version': 22,
+        'schema_version': 23,
         'agent_orchestra_version': version('agent-orchestra'),
         'job_id': 'missing',
         'error': {'code': 'job_not_found', 'message': 'job not found: missing'},

@@ -108,7 +108,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 22
+CLI_SCHEMA_VERSION = 23
 DEFAULT_DEVELOPER_TIMEOUT = 1800
 
 
