@@ -1453,7 +1453,7 @@ def test_reviewer_batch_sequence_comes_from_canonical_requests(tmp_path: Path) -
 def test_mixed_incomplete_reviewer_set_is_resumable(
     mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Let incomplete required reviews outrank an actionable peer finding."""
+    """Keep remediation gated when an actionable peer review is incomplete."""
 
     worktree = tmp_path / 'worktree'
     worktree.mkdir()
@@ -1514,7 +1514,7 @@ def test_mixed_incomplete_reviewer_set_is_resumable(
                     _reviewer('portability', 'claude-code', 'anthropic'),
                 ),
             ),
-            developer_command=(),
+            developer_command=('developer',),
             developer_timeout_seconds=30,
             max_iterations=3,
             developer_identity=InvocationIdentity(
