@@ -53,7 +53,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "jobs": [],
   "error": null
@@ -268,7 +268,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
@@ -293,7 +293,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `22`. Advances only on a breaking change. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `23`. Advances only on a breaking change. |
 | `agent_orchestra_version` | String | The build that produced the document. Use it to detect a field added without a version change. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
@@ -595,7 +595,7 @@ batch-evidence schema versions remain readable and omit fields they predate.
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
@@ -761,7 +761,8 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--objective OBJECTIVE` | Required | Review objective and acceptance context sent to the agents. Blank objectives are rejected. |
 | `--timeout SECONDS` | `1800` | Positive timeout for each reviewer invocation. |
 | `--developer-timeout SECONDS` | `1800` | Positive timeout for each developer remediation invocation. |
-| `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. |
+| `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. Bounds remediation rounds, so it has no effect when no developer can be dispatched. |
+| `--no-remediation` | off | Review once and stop, without dispatching a developer. Rejected when a developer option selects anything other than its default, since no developer can run. |
 | `--developer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for development remediation. |
 | `--developer-model MODEL` | Runtime default | Optional model passed to the developer adapter. |
 | `--reviewer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for review. |
@@ -795,6 +796,19 @@ agent-orchestra run "$JOB_ID" \
   --max-iterations 4
 ```
 
+Review without remediating, to read the verdict and address it yourself:
+
+```shell
+agent-orchestra run 20260903T194500Z-a7f3c921 \
+  --objective 'Review the change.' \
+  --no-remediation
+```
+
+A `changes_requested` verdict is the run's outcome here rather than the start of
+a remediation round: the job rests in `changes_requested`, `error` is `null`, and
+the command exits 0. An `approved` verdict still reaches
+`awaiting_commit_authorization`.
+
 When orchestration completes without a command-level failure, `run` writes one
 versioned JSON document to stdout:
 
@@ -802,7 +816,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
@@ -812,7 +826,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `22`. Advances only on a breaking change. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `23`. Advances only on a breaking change. |
 | `agent_orchestra_version` | String | The build that produced the document. Use it to detect a field added without a version change. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
@@ -860,7 +874,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
@@ -925,7 +939,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
@@ -937,7 +951,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 22,
+  "schema_version": 23,
   "agent_orchestra_version": "0.1.0",
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,

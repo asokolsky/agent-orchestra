@@ -108,7 +108,10 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 22
+CLI_SCHEMA_VERSION = 23
+DEFAULT_DEVELOPER_TIMEOUT = 1800
+
+
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -388,8 +391,13 @@ def _add_execution_commands(
     run.add_argument('job_id')
     run.add_argument('--objective', required=True)
     run.add_argument('--timeout', type=int, default=1800)
-    run.add_argument('--developer-timeout', type=int, default=1800)
+    run.add_argument('--developer-timeout', type=int, default=DEFAULT_DEVELOPER_TIMEOUT)
     run.add_argument('--max-iterations', type=int, default=3)
+    run.add_argument(
+        '--no-remediation',
+        action='store_true',
+        help='review once and stop, without dispatching a developer',
+    )
     run.add_argument(
         '--developer-agent',
         type=_runtime_argument(runtimes, RuntimeRole.DEVELOPER),
@@ -1644,19 +1652,39 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
             file=sys.stderr,
         )
         return 2
-    if args.reviewer_command and (
+    # Selection is judged by value, not by whether the option was typed: the
+    # parser applies these defaults itself, and recording provision instead
+    # collides with the contract that it does. Passing a default explicitly is
+    # therefore indistinguishable from omitting it, and is allowed, since it
+    # selects nothing that a review-only run would have to ignore.
+    developer_selected = (
+        args.developer_model
+        or args.developer_agent
+        != args.runtime_registry.default(RuntimeRole.DEVELOPER).identifier
+        or args.developer_timeout != DEFAULT_DEVELOPER_TIMEOUT
+    )
+    # The custom-command conflict has always covered the agent and model only.
+    # Widening it to the timeout here would reject combinations that work today.
+    developer_runtime_selected = (
+        args.developer_model
+        or args.developer_agent
+        != args.runtime_registry.default(RuntimeRole.DEVELOPER).identifier
+    )
+    conflict: str | None = None
+    if args.no_remediation and developer_selected:
+        conflict = 'developer options cannot be combined with --no-remediation'
+    elif args.reviewer_command and (
         args.reviewer_model
         or args.reviewer_agent
         != args.runtime_registry.default(RuntimeRole.REVIEWER).identifier
-        or args.developer_model
-        or args.developer_agent
-        != args.runtime_registry.default(RuntimeRole.DEVELOPER).identifier
+        or developer_runtime_selected
     ):
-        print(
-            'error: built-in reviewer options cannot be combined with a custom '
-            'reviewer command',
-            file=sys.stderr,
+        conflict = (
+            'built-in reviewer options cannot be combined with a custom '
+            'reviewer command'
         )
+    if conflict is not None:
+        print(f'error: {conflict}', file=sys.stderr)
         return 2
     try:
         run = store.get(args.job_id)
@@ -1699,7 +1727,10 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
         developer_runtime = args.runtime_registry.require(
             args.developer_agent, RuntimeRole.DEVELOPER
         )
-        if not args.reviewer_command:
+        # An empty developer command is already how the worker returns a run at
+        # its review verdict instead of remediating, so --no-remediation reuses
+        # that path rather than introducing a second one.
+        if not args.reviewer_command and not args.no_remediation:
             developer_command = [
                 sys.executable,
                 '-m',

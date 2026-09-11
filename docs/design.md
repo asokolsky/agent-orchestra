@@ -555,7 +555,7 @@ advancing for additive changes, exactly as `apiVersion: v1` stays `v1` while the
 resource it names gains fields.
 
 Adding `agent_orchestra_version` was itself an additive change, and so did not
-advance `schema_version` from 22.
+advance `schema_version`, which stood at 22 when it landed.
 
 Every ordinary CLI envelope reports `CLI_SCHEMA_VERSION` and every audit
 document reports `AUDIT_SCHEMA_VERSION`; neither carries a literal of its own.
@@ -609,6 +609,11 @@ removed, renamed, repurposed, or withdrew something a consumer read, and
   **breaking** because the stderr line those commands used to write is gone,
   even though a consumer reading stdout only gains a document where it
   previously got nothing.
+- Version 23 ends a run that cannot remediate at its review verdict. A run with
+  no developer command previously failed once its iteration budget was
+  exhausted, reporting `failed` and exit 2; it now reports the review's own
+  `changes_requested` and exit 0. **Breaking**: a caller that detected this
+  situation through the state or the exit code sees neither value any more.
 
 The independent audit document schema is version 15. It advances from 14
 because attempt objects no longer carry `run_id`, `invocation_id`, or the

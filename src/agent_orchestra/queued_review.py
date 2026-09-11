@@ -578,12 +578,16 @@ def _run_queued_review(
             awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
             store.update(awaiting, expected_state=RunState.APPROVED)
             return awaiting
+        # A run with no developer command cannot remediate, so the
+        # remediation budget cannot buy it another round. Exhausting a
+        # budget that could never be spent is not a failure: the review
+        # completed, and its verdict is the run's outcome.
+        if not developer_command:
+            return decided
         if reviewing.iteration >= max_iterations:
             failed = transition(decided, RunState.FAILED)
             store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
             raise WorkerError(ITERATION_LIMIT)
-        if not developer_command:
-            return decided
 
         sequence += 2
         remediation_path = manifest_evidence_path(
