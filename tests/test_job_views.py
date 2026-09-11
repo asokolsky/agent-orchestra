@@ -486,6 +486,20 @@ def test_job_current_lists_every_live_reviewer_during_fanout(
             reviewer_task_id(str(run.id), 1, 'security'),
             reviewer_task_id(str(run.id), 1, 'portability'),
         }
+        assert main(arguments(database, 'tasks', str(run.id), runs_directory)) == 0
+        live_tasks = json.loads(capsys.readouterr().out)['tasks']
+        assert {
+            (
+                task['reviewer_id'],
+                task['attempts'][0]['runtime'],
+                task['attempts'][0]['agent_vendor'],
+                task['status'],
+            )
+            for task in live_tasks
+        } == {
+            ('security', 'codex', 'openai', 'running'),
+            ('portability', 'claude-code', 'anthropic', 'running'),
+        }
     finally:
         release_reviewers.set()
         worker.join(timeout=10)
