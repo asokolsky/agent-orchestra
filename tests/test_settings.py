@@ -53,7 +53,7 @@ def test_config_show_reports_file_values_and_cli_precedence(
     )
 
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 21
+    assert document['schema_version'] == 22
     assert document['settings']['storage.database']['source'] == 'command_line'
     assert document['settings']['storage.runs_directory']['source'] == 'command_line'
     assert document['settings']['retention.job_evidence_days'] == {

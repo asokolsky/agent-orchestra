@@ -53,7 +53,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "jobs": [],
   "error": null
 }
@@ -96,6 +96,31 @@ agent-orchestra 0.1.0
 `--version` and valid `--help` requests write plain text to stdout and exit 0.
 Argument syntax errors write argparse usage and a diagnostic to stderr and exit
 2 before a command runs.
+
+## Output and failure channels
+
+Each command has one output contract, selected by its successful result:
+
+- A command whose success is a versioned JSON document also writes expected
+  command failures as a versioned JSON document to stdout. Its `error` field is
+  an object with a documented stable `code`.
+- A command whose success is plain text writes expected failures as
+  `error: MESSAGE` to stderr and writes nothing to stdout. These commands do not
+  have a versioned document in which to carry an error object.
+
+This rule follows output shape, not whether a command reads or mutates state.
+It lets an author choose the failure channel by choosing the command's success
+contract, and lets a caller use one parser for every outcome of a JSON command.
+The version, help, `init`, `enqueue-local`, `enqueue-issue`, and `skills install`
+commands are plain-text commands. `enqueue-locals`, `review-issue`,
+`post-issue-feedback`, `jobs`, `job`, `tasks`, `task`, `audit`, `cancel`, `run`,
+`resume`, `prune`, and `config show` are JSON commands.
+
+Argument parsing and usage errors are the deliberate exception. They occur
+before a command's output contract begins, so argparse writes them to stderr.
+The explicit `post-issue-feedback --authorize` gate and incompatible `run`
+option combinations are treated as usage errors for the same reason. Exit
+status remains 2 for every expected failure regardless of channel.
 
 ## `init`
 
@@ -187,7 +212,8 @@ Success writes the job ID to stdout and exits 0. The identifier is plain text,
 not JSON. The command exits 2 when the path is not a usable Git worktree, the
 revision cannot be resolved, files cannot be read, or there are no local
 changes. Those expected failures write `error: MESSAGE` to stderr and nothing
-to stdout. The command does not start an agent or modify the target worktree.
+to stdout because `enqueue-local` has a plain-text success contract. The command
+does not start an agent or modify the target worktree.
 Use [`resume`](#resume) for `interrupted`, `validation_required`, or
 conditionally recoverable `reviewing`, `developing`, `approved`, and
 `changes_requested` jobs. The
@@ -228,7 +254,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -252,7 +278,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `21`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `22`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -358,6 +384,13 @@ agent-orchestra review-issue "$JOB_ID" -- /absolute/path/to/reviewer
 The command receives request and result paths as its final two arguments and
 must write the strict issue-review result JSON.
 
+Success and expected command failures are versioned JSON documents on stdout.
+Failures exit 2 and set `error` to an object with one of these stable codes:
+`job_not_found`, `issue_review_timed_out`, `issue_review_interrupted`,
+`issue_reviewer_failed`, `issue_review_result_invalid`, `invalid_evidence`, or
+`issue_review_failed`. A non-positive `--timeout` is an argument-value error and
+remains plain text on stderr.
+
 ## `post-issue-feedback`
 
 Publish accepted feedback as a GitHub comment or GitLab note:
@@ -372,6 +405,11 @@ re-fetches the issue and requires the reviewed digest and provider update time
 to remain unchanged. Repeated calls return the recorded provider message
 identity without creating another comment or note; interrupted persistence is
 recovered by finding the hidden idempotency marker on the provider.
+
+Success and expected publication failures are versioned JSON documents on
+stdout. Failures exit 2 and use the stable code `job_not_found` or
+`issue_feedback_failed`. Omitting `--authorize` is a usage error that remains
+plain text on stderr and performs no provider write.
 
 ## Global settings
 
@@ -480,7 +518,7 @@ but deleted content cannot be reconstructed without an independent backup.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 21 JSON views expose
+is one process execution. Four read-only, schema-version 22 JSON views expose
 that hierarchy:
 
 ```text
@@ -541,7 +579,7 @@ batch-evidence schema versions remain readable and omit fields they predate.
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -746,7 +784,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -755,7 +793,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `21`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `22`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -768,9 +806,13 @@ this JSON; retrieve them with [`task`](#job-and-task-views). Built-in adapters t
 the underlying Codex or Claude process output into those files as it arrives,
 including output produced before a timeout or nonzero exit.
 
-Command-level execution and protocol failures exit 2, currently write
-`error: MESSAGE` as plain text to stderr, and do not write a JSON document.
-When possible, the same failure is also persisted as durable job evidence.
+Command-level execution and protocol failures exit 2 and remain versioned JSON
+on stdout. Their stable codes are `state_database_not_found`, `job_not_found`,
+`reviewer_plan_invalid`, `run_failed`, the code carried by a runtime-registry or
+worker failure, or `worker_error` when a worker failure has no more specific
+code. Incompatible option combinations are usage errors and remain plain text
+on stderr. When possible, the same operational failure is also persisted as
+durable job evidence.
 
 The built-in runtime combinations are independent: Codex/Codex,
 Codex/Claude Code, Claude Code/Codex, and Claude Code/Claude Code are all
@@ -798,7 +840,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -862,7 +904,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -873,7 +915,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 21,
+  "schema_version": 22,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {
