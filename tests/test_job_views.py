@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -355,6 +356,157 @@ def test_four_views_use_public_vocabulary_and_current_array(
         'legacy',
         'streams',
     ]
+
+
+def test_job_current_lists_every_live_reviewer_during_fanout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose all native reviewer-set tasks while their attempts are running."""
+
+    database = tmp_path / 'state.db'
+    store = JobStore(database)
+    store.initialize()
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+    runs_directory = tmp_path / 'runs'
+    both_running = Event()
+    release_reviewers = Event()
+    started: list[str] = []
+    started_lock = Lock()
+
+    def pause_approval(
+        _adapter: CommandAgentAdapter, request: AgentRequest
+    ) -> AgentResult:
+        """Pause each reviewer after durable activation until the CLI is queried."""
+
+        assert isinstance(request, ReviewerRequest)
+        if request.on_started is not None:
+            request.on_started()
+        with started_lock:
+            started.append(request.request_path.name)
+            if len(started) == 2:
+                both_running.set()
+        assert release_reviewers.wait(timeout=5)
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        request.artifact_path.write_text('# Review\n', encoding='utf-8')
+        response = {
+            'schema_version': 1,
+            'message_id': str(uuid4()),
+            'in_reply_to': document['message_id'],
+            'run_id': document['run_id'],
+            'sequence': document['sequence'] + 1,
+            'iteration': document['iteration'],
+            'message_type': 'review_result',
+            'sender': 'reviewer',
+            'recipient': 'orchestrator',
+            'created_at': '2026-09-11T12:00:00Z',
+            'scope': document['scope'],
+            'payload': {
+                'verdict': 'approved',
+                'summary': 'approved',
+                'findings': [],
+                'validation': [],
+                'verification_gaps': [],
+                'artifact_path': str(request.artifact_path),
+            },
+        }
+        request.response_path.write_text(json.dumps(response), encoding='utf-8')
+        return AgentResult(
+            succeeded=True,
+            summary='approved',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', pause_approval)
+    plan = ReviewerExecutionPlan(
+        'default',
+        tuple(
+            ReviewerExecution(
+                reviewer_id=reviewer_id,
+                command=('reviewer', reviewer_id),
+                identity=InvocationIdentity(
+                    vendor=vendor,
+                    model=None,
+                    runtime=runtime,
+                ),
+                timeout_seconds=30,
+            )
+            for reviewer_id, runtime, vendor in (
+                ('security', 'codex', 'openai'),
+                ('portability', 'claude-code', 'anthropic'),
+            )
+        ),
+    )
+    completed: list[Run] = []
+    failures: list[BaseException] = []
+
+    def run_batch() -> None:
+        """Run the reviewer batch in parallel with the public CLI query."""
+
+        try:
+            completed.append(
+                run_queued_reviewer_set(
+                    context=WorkerContext(
+                        store=store,
+                        runs_directory=runs_directory,
+                        digest_worktree=lambda _path, _base: DIGEST,
+                        registry=DEFAULT_RUNTIME_REGISTRY,
+                    ),
+                    run=run,
+                    objective='Review the change.',
+                    reviewer_plan=plan,
+                    developer_command=(),
+                    developer_timeout_seconds=30,
+                    max_iterations=3,
+                    developer_identity=InvocationIdentity(
+                        vendor='openai', model=None, runtime='codex'
+                    ),
+                )
+            )
+        except BaseException as error:  # pragma: no cover - asserted below
+            failures.append(error)
+
+    worker = Thread(target=run_batch)
+    worker.start()
+    try:
+        assert both_running.wait(timeout=5)
+        assert main(arguments(database, 'job', str(run.id), runs_directory)) == 0
+        current = json.loads(capsys.readouterr().out)['job']['current']
+        assert {(task['reviewer_id'], task['status']) for task in current} == {
+            ('security', 'running'),
+            ('portability', 'running'),
+        }
+        assert {task['task_id'] for task in current} == {
+            reviewer_task_id(str(run.id), 1, 'security'),
+            reviewer_task_id(str(run.id), 1, 'portability'),
+        }
+        assert main(arguments(database, 'tasks', str(run.id), runs_directory)) == 0
+        live_tasks = json.loads(capsys.readouterr().out)['tasks']
+        assert {
+            (
+                task['reviewer_id'],
+                task['attempts'][0]['runtime'],
+                task['attempts'][0]['agent_vendor'],
+                task['status'],
+            )
+            for task in live_tasks
+        } == {
+            ('security', 'codex', 'openai', 'running'),
+            ('portability', 'claude-code', 'anthropic', 'running'),
+        }
+    finally:
+        release_reviewers.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert len(completed) == 1
 
 
 def test_reviewer_batch_is_visible_from_job_and_reviewer_task(
