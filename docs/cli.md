@@ -419,8 +419,12 @@ batch launches developer remediation, then sends the amended immutable diff
 through the full reviewer set again. A timed-out, failed, or invalid member
 leaves the batch interrupted; `resume` preserves accepted peer responses and
 retries only incomplete reviewers with incremented attempts. A complete blocked
-batch and a worktree mutation fail terminally. Reviewer-set width is the
-configured member count, with one
+batch and a worktree mutation fail terminally. An incomplete or blocked batch
+writes `failure.json` with the stable code `reviewer_batch_incomplete`, whether
+the resulting state is resumable or terminal. If an activated reviewer-set step
+fails unexpectedly, the initial review iteration is terminal `failed`; a later
+remediation iteration returns to `interrupted` so its durable partial work can
+be resumed. Reviewer-set width is the configured member count, with one
 concurrent agent process per member and no separate concurrency cap; operators
 should size sets for available local resources. The canonical aggregate decision
 is stored under `review-batches/`, has a human-readable aggregate artifact under
