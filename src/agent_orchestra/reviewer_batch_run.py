@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from agent_orchestra.adapter.registry import RuntimeRegistry, RuntimeRole
 from agent_orchestra.agents import CommandAgentAdapter, ReviewerRequest
 from agent_orchestra.evidence import (
@@ -31,7 +33,9 @@ from agent_orchestra.evidence import (
     RUN_NOT_RESUMABLE_CODE,
     WorkerError,
     archive_unaccepted_response,
+    contained_job_reference,
     finalize_temporary_path,
+    manifest_evidence_path,
     read_json_object,
     record_finalized_path,
     require_unchanged,
@@ -46,6 +50,7 @@ from agent_orchestra.execution_context import (
     EVIDENCE_INSIDE_WORKTREE,
     INVALID_DEVELOPER_TIMEOUT,
     INVALID_ITERATION_LIMIT,
+    ITERATION_LIMIT,
     ReviewerSetReviewPlan,
     WorkerContext,
     _execution_record,
@@ -62,16 +67,23 @@ from agent_orchestra.invocations import (
     InvocationIdentity,
     InvocationRecord,
     ProcessOutcome,
+    RecoveryAction,
+    latest_task_attempt,
+    next_attempt,
     prepare_run_evidence_directory,
     record_invocation,
+    recovery_action,
     timestamp,
 )
 from agent_orchestra.manifests import canonical_message_evidence, evidence_path
 from agent_orchestra.messages import (
     NO_CHANGES,
+    is_developer_disagreement,
     require_unique_batch_message_ids,
     require_unique_message_id,
     reviewer_id_from_message_path,
+    validate_developer_handoff,
+    validate_remediation_request,
     validate_review_request,
     validate_review_response,
 )
@@ -81,6 +93,7 @@ from agent_orchestra.models import (
     same_diff_digest,
     utc_now,
 )
+from agent_orchestra.queued_review import DEVELOPER_DISAGREEMENT
 from agent_orchestra.reports import render_reviewer_batch
 from agent_orchestra.review_batch import (
     ReviewerDecision,
@@ -88,22 +101,146 @@ from agent_orchestra.review_batch import (
     aggregate_review_batch,
 )
 from agent_orchestra.review_fanout import ReviewerDispatch, build_review_fanout
-from agent_orchestra.reviewer_paths import ReviewerIdentityError, reviewer_task_id
+from agent_orchestra.reviewer_paths import (
+    ReviewerIdentityError,
+    reviewer_evidence_paths,
+    reviewer_task_id,
+)
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.runtime_metadata import (
     exception_runtime_metadata,
     runtime_metadata_path,
 )
 from agent_orchestra.schemas import (
+    DeveloperHandoffMessageSchema,
     ReviewerBatchResultSchemaV3,
     ReviewerSetExecutionRecordSchema,
+    ReviewResultMessageSchema,
 )
 from agent_orchestra.workflow import transition
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
+
+    DeveloperContinuation = Callable[..., Run]
 
 REVIEWER_BATCH_INCOMPLETE = 'reviewer batch did not complete'
+
+
+def _write_developer_disagreement(
+    run_directory: Path, run: Run, handoff_path: Path
+) -> None:
+    """Persist the stable human-decision marker for a developer disagreement."""
+
+    write_json_atomic(
+        run_evidence_path(run_directory, 'decision-required.json'),
+        {
+            'schema_version': 1,
+            'run_id': str(run.id),
+            'state': str(RunState.CHANGES_REQUESTED),
+            'reason': {
+                'code': 'developer_disagreement',
+                'message': DEVELOPER_DISAGREEMENT,
+            },
+            'developer_handoff_path': str(handoff_path),
+            'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+        },
+        'decision_required',
+    )
+
+
+def _developer_disagreement_is_pending(run_directory: Path, run: Run) -> bool:
+    """Return whether durable evidence requires a human disagreement decision."""
+
+    invalid = 'developer disagreement evidence is miscorrelated'
+    marker_path = run_evidence_path(run_directory, 'decision-required.json')
+    if not marker_path.is_file():
+        return False
+    marker = read_json_object(marker_path)
+    handoff_value = marker.get('developer_handoff_path')
+    handoff_path = Path(handoff_value) if isinstance(handoff_value, str) else Path()
+    reason = marker.get('reason')
+    try:
+        contained_job_reference(run_directory, handoff_path, invalid)
+    except WorkerError as error:
+        raise WorkerError(invalid) from error
+    if (
+        marker.get('run_id') != str(run.id)
+        or marker.get('state') != str(RunState.CHANGES_REQUESTED)
+        or not isinstance(reason, dict)
+        or reason.get('code') != 'developer_disagreement'
+        or not handoff_path.is_file()
+    ):
+        raise WorkerError(invalid)
+    handoff_document = read_json_object(handoff_path)
+    try:
+        handoff = DeveloperHandoffMessageSchema.model_validate(handoff_document)
+    except ValidationError as error:
+        raise WorkerError(invalid) from error
+    expected_handoff_path = manifest_evidence_path(
+        run_directory, 'developer_handoff', handoff.sequence
+    )
+    request_path = manifest_evidence_path(
+        run_directory, 'remediation_request', handoff.sequence - 1
+    )
+    request = read_json_object(request_path)
+    validate_remediation_request(request, run_directory=run_directory)
+    try:
+        batch = ReviewerBatchResultSchemaV3.model_validate(
+            read_json_object(Path(request['payload']['review_result_path']))
+        )
+        handoff = validate_developer_handoff(
+            handoff_document,
+            request=request,
+            finding_ids=tuple(item.finding_id for item in batch.findings),
+        )
+    except ValidationError as error:
+        raise WorkerError(invalid) from error
+    expected_scope = {
+        'worktree_path': str(run.worktree_path),
+        'base_sha': run.base_sha,
+        'head_sha': run.head_sha,
+        'diff_digest': run.diff_digest,
+    }
+    if (
+        handoff_path.resolve() != expected_handoff_path.resolve()
+        or handoff.run_id != str(run.id)
+        or handoff.iteration != run.iteration
+        or handoff.scope.model_dump(mode='json') != expected_scope
+        or handoff.in_reply_to != request.get('message_id')
+        or request.get('run_id') != str(run.id)
+        or request.get('iteration') != run.iteration
+        or request.get('in_reply_to') != batch.message_id
+        or batch.run_id != str(run.id)
+        or batch.iteration != run.iteration
+        or batch.diff_digest != run.diff_digest
+        or not is_developer_disagreement(handoff)
+    ):
+        raise WorkerError(invalid)
+    return True
+
+
+def _reviewer_set_plan_from_execution(
+    execution: ReviewerSetExecutionRecordSchema, registry: RuntimeRegistry
+) -> ReviewerSetReviewPlan:
+    """Rebuild one complete reviewer-set workflow plan from durable evidence."""
+
+    return ReviewerSetReviewPlan(
+        execution.objective,
+        _reviewer_plan_from_execution(execution, registry),
+        tuple(execution.developer.command),
+        execution.developer.timeout_seconds,
+        execution.max_review_iterations,
+        _resolve_resume_identity(
+            _identity_from_record(
+                execution.developer.identity.vendor,
+                execution.developer.identity.model,
+                execution.developer.identity.runtime,
+            ),
+            RuntimeRole.DEVELOPER,
+            registry,
+        ),
+    )
 
 
 def _latest_reviewer_attempt(
@@ -193,6 +330,7 @@ def _reviewer_batch_sequence(
 
     expected_ids = {reviewer.reviewer_id for reviewer in reviewer_plan.reviewers}
     sequences: dict[str, int] = {}
+    prior_sequences: list[int] = []
     message_directory = run_evidence_path(run_directory, 'messages')
     try:
         entries = tuple(message_directory.iterdir())
@@ -204,6 +342,8 @@ def _reviewer_batch_sequence(
             path.relative_to(run_directory).as_posix()
         )
         if identity is None or identity[0] != 'review_request':
+            if identity is not None:
+                prior_sequences.append(identity[1])
             continue
         sequence = identity[1]
         reviewer_id = reviewer_id_from_message_path(
@@ -213,15 +353,49 @@ def _reviewer_batch_sequence(
             continue
         request = read_json_object(path)
         if request.get('iteration') != run.iteration:
+            prior_sequences.append(sequence)
             continue
         if reviewer_id not in expected_ids or reviewer_id in sequences:
             message = 'reviewer-set request evidence does not match its execution plan'
             raise WorkerError(message)
         sequences[reviewer_id] = sequence
-    if set(sequences) != expected_ids or len(set(sequences.values())) != 1:
+    if not set(sequences).issubset(expected_ids) or len(set(sequences.values())) > 1:
         message = 'reviewer-set request evidence has no single durable sequence'
         raise WorkerError(message)
-    return next(iter(sequences.values()))
+    if run.iteration == 1 and set(sequences) != expected_ids:
+        message = 'reviewer-set request evidence has no single durable sequence'
+        raise WorkerError(message)
+    if sequences:
+        return next(iter(sequences.values()))
+    return max(prior_sequences, default=0) + 1
+
+
+def _prior_reviewer_result_path(
+    run_directory: Path, *, run: Run, reviewer_id: str
+) -> Path | None:
+    """Return the preceding iteration's canonical result for one reviewer."""
+
+    if run.iteration == 1:
+        return None
+    candidates: list[Path] = []
+    for path in run_evidence_path(run_directory, 'messages').iterdir():
+        identity = canonical_message_evidence(
+            path.relative_to(run_directory).as_posix()
+        )
+        if identity is None or identity[0] != 'review_result':
+            continue
+        path_reviewer = reviewer_id_from_message_path(
+            path, sequence=identity[1], message_type='review_result'
+        )
+        if path_reviewer != reviewer_id:
+            continue
+        document = read_json_object(path)
+        if document.get('iteration') == run.iteration - 1:
+            candidates.append(path)
+    if len(candidates) != 1:
+        message = 'reviewer-set prior result evidence is incomplete'
+        raise WorkerError(message)
+    return candidates[0]
 
 
 def _completed_reviewer_result(
@@ -231,6 +405,7 @@ def _completed_reviewer_result(
     run: Run,
     objective: str,
     current_digest: str,
+    expected_prior_review_path: Path | None,
 ) -> tuple[ReviewerDispatchResult, dict[str, Any]] | None:
     """Return one validated canonical peer result, if it already exists."""
 
@@ -253,6 +428,7 @@ def _completed_reviewer_result(
         sequence=int(request['sequence']),
         dispatch=dispatch,
         artifact_path=artifact_path,
+        expected_prior_review_path=expected_prior_review_path,
     )
     verdict = validate_review_response(
         result, request=request, artifact_path=artifact_path
@@ -278,6 +454,7 @@ def _validate_reviewer_set_request_scope(
     sequence: int,
     dispatch: ReviewerDispatch,
     artifact_path: Path,
+    expected_prior_review_path: Path | None,
 ) -> None:
     """Bind one persisted reviewer request to its durable run and plan member."""
 
@@ -300,19 +477,390 @@ def _validate_reviewer_set_request_scope(
         payload['objective'] != objective
         or payload['timeout_seconds'] != dispatch.timeout_seconds
         or payload['artifact_path'] != str(artifact_path)
+        or payload['prior_review_path']
+        != (
+            str(expected_prior_review_path)
+            if expected_prior_review_path is not None
+            else None
+        )
     ):
         message = 'reviewer-set request does not match its execution plan'
         raise WorkerError(message)
 
 
-def _resume_reviewer_set(
+def _validate_reviewer_set_remediation(
+    *,
+    run: Run,
+    run_directory: Path,
+    execution: ReviewerSetExecutionRecordSchema,
+    sequence: int,
+    request_path: Path,
+    request: dict[str, Any],
+) -> ReviewerBatchResultSchemaV3:
+    """Bind reviewer-set remediation authority to canonical durable evidence."""
+
+    validate_remediation_request(request, run_directory=run_directory)
+    batch_path = Path(request['payload']['review_result_path']).resolve()
+    expected_batch_path = run_evidence_path(
+        run_directory,
+        *Path(evidence_path('review_batch_result', ordinal=run.iteration)).parts,
+    )
+    batch = ReviewerBatchResultSchemaV3.model_validate(read_json_object(batch_path))
+    result_sequences: set[int] = set()
+    expected_findings: list[dict[str, object]] = []
+    for reviewer in batch.reviewers:
+        if reviewer.result_path is None:
+            continue
+        identity = canonical_message_evidence(reviewer.result_path)
+        if identity is None or identity[0] != 'review_result':
+            message = 'reviewer-set remediation batch member is miscorrelated'
+            raise WorkerError(message)
+        result_sequences.add(identity[1])
+        result_path = run_evidence_path(
+            run_directory, *Path(reviewer.result_path).parts
+        )
+        result_document = read_json_object(result_path)
+        result = ReviewResultMessageSchema.model_validate(result_document)
+        expected_paths = reviewer_evidence_paths(
+            sequence=identity[1] - 1,
+            iteration=batch.iteration,
+            reviewer_id=reviewer.reviewer_id,
+            attempt=1,
+        )
+        reviewer_request = read_json_object(
+            run_evidence_path(run_directory, *Path(expected_paths.request).parts)
+        )
+        reviewer_artifact_path = run_evidence_path(
+            run_directory, *Path(expected_paths.artifact).parts
+        )
+        validate_review_request(reviewer_request, run_directory=run_directory)
+        validate_review_response(
+            result_document,
+            request=reviewer_request,
+            artifact_path=reviewer_artifact_path,
+        )
+        if (
+            reviewer.result_path != expected_paths.result
+            or result.run_id != batch.run_id
+            or result.iteration != batch.iteration
+            or result.scope.diff_digest != batch.diff_digest
+            or result.payload.verdict != reviewer.outcome
+        ):
+            message = 'reviewer-set remediation batch member is miscorrelated'
+            raise WorkerError(message)
+        if reviewer.outcome == 'changes_requested':
+            for finding in result.payload.findings:
+                source = finding.model_dump(mode='json')
+                source_id = finding.finding_id
+                expected_findings.append(
+                    {
+                        **source,
+                        'finding_id': f'{reviewer.reviewer_id}:{source_id}',
+                        'reviewer_id': reviewer.reviewer_id,
+                        'source_finding_id': source_id,
+                    }
+                )
+    expected_scope = {
+        'worktree_path': str(run.worktree_path),
+        'base_sha': run.base_sha,
+        'head_sha': run.head_sha,
+        'diff_digest': batch.diff_digest,
+    }
+    first_sequence = (
+        next(iter(result_sequences)) + 1 if len(result_sequences) == 1 else 0
+    )
+    canonical_request = manifest_evidence_path(
+        run_directory, 'remediation_request', sequence
+    )
+    artifact_path = run_evidence_path(run_directory, *Path(batch.artifact_path).parts)
+    if (
+        request_path.resolve() != canonical_request.resolve()
+        or request.get('run_id') != str(run.id)
+        or request.get('iteration') != run.iteration
+        or request.get('sequence') != sequence
+        or request.get('scope') != expected_scope
+        or request['payload']['objective'] != execution.objective
+        or request['payload']['timeout_seconds'] != execution.developer.timeout_seconds
+        or batch_path != expected_batch_path.resolve()
+        or request['payload']['review_artifact_path'] != str(artifact_path)
+        or batch.message_id != request['in_reply_to']
+        or batch.run_id != str(run.id)
+        or batch.iteration != run.iteration
+        or (
+            run.state is not RunState.VALIDATION_REQUIRED
+            and batch.diff_digest != run.diff_digest
+        )
+        or batch.reviewer_set_id != execution.reviewer_plan.reviewer_set_id
+        or [item.reviewer_id for item in batch.reviewers]
+        != [item.reviewer_id for item in execution.reviewer_plan.reviewers]
+        or batch.model_dump(mode='json')['findings'] != expected_findings
+        or batch.verdict != 'changes_requested'
+        or sequence < first_sequence
+        or (sequence - first_sequence) % 2 != 0
+    ):
+        message = 'reviewer-set remediation request is miscorrelated'
+        raise WorkerError(message)
+    return batch
+
+
+def _resume_reviewer_set(  # noqa: PLR0911
     *,
     context: WorkerContext,
     run: Run,
     run_directory: Path,
     execution: ReviewerSetExecutionRecordSchema,
+    resume_developer_request: DeveloperContinuation,
+    resume_developer_validation: DeveloperContinuation,
 ) -> Run:
     """Resume only incomplete members of one immutable reviewer batch."""
+
+    plan = _reviewer_set_plan_from_execution(execution, context.registry)
+    if run.state is RunState.CHANGES_REQUESTED:
+        if _developer_disagreement_is_pending(run_directory, run):
+            return run
+        if run.iteration >= plan.max_iterations:
+            failed = transition(run, RunState.FAILED)
+            context.store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
+            raise WorkerError(ITERATION_LIMIT)
+        if not plan.developer_command:
+            return run
+        current_digest = worktree_digest(
+            context.digest_worktree, run.worktree_path, run.base_sha
+        )
+        if current_digest is None or not same_diff_digest(
+            current_digest, run.diff_digest
+        ):
+            message = 'resume scope changed before reviewer-set remediation'
+            raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
+        batch_path = run_evidence_path(
+            run_directory,
+            *Path(evidence_path('review_batch_result', ordinal=run.iteration)).parts,
+        )
+        batch = ReviewerBatchResultSchemaV3.model_validate(read_json_object(batch_path))
+        result_sequences = {
+            identity[1]
+            for reviewer in batch.reviewers
+            if reviewer.result_path is not None
+            and (identity := canonical_message_evidence(reviewer.result_path))
+            is not None
+            and identity[0] == 'review_result'
+        }
+        if len(result_sequences) != 1:
+            message = 'reviewer-set remediation request is miscorrelated'
+            raise WorkerError(message)
+        sequence = next(iter(result_sequences)) + 1
+        request_path = manifest_evidence_path(
+            run_directory, 'remediation_request', sequence
+        )
+        if request_path.is_file():
+            request = read_json_object(request_path)
+        else:
+            artifact_path = run_evidence_path(
+                run_directory, *Path(batch.artifact_path).parts
+            )
+            request = {
+                'schema_version': 1,
+                'message_id': str(uuid4()),
+                'in_reply_to': batch.message_id,
+                'run_id': str(run.id),
+                'sequence': sequence,
+                'iteration': run.iteration,
+                'message_type': 'remediation_request',
+                'sender': 'orchestrator',
+                'recipient': 'developer',
+                'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+                'scope': {
+                    'worktree_path': str(run.worktree_path),
+                    'base_sha': run.base_sha,
+                    'head_sha': run.head_sha,
+                    'diff_digest': current_digest,
+                },
+                'payload': {
+                    'objective': plan.objective,
+                    'allowed_actions': [],
+                    'timeout_seconds': plan.developer_timeout_seconds,
+                    'review_result_path': str(batch_path),
+                    'review_artifact_path': str(artifact_path),
+                },
+            }
+            validate_remediation_request(request, run_directory=run_directory)
+            write_json_atomic(request_path, request, 'remediation_request')
+        _validate_reviewer_set_remediation(
+            run=run,
+            run_directory=run_directory,
+            execution=execution,
+            sequence=sequence,
+            request_path=request_path,
+            request=request,
+        )
+        return resume_developer_request(
+            context=context,
+            plan=plan,
+            run=transition(run, RunState.DEVELOPING),
+            request=request,
+            current_digest=current_digest,
+            allow_unchanged_ready=False,
+            attempt=1,
+            resume_expected_state=RunState.CHANGES_REQUESTED,
+        )
+
+    developer_requests = [
+        (identity[1], path, read_json_object(path))
+        for path in run_evidence_path(run_directory, 'messages').glob(
+            '*-remediation-request.json'
+        )
+        if (
+            identity := canonical_message_evidence(
+                path.relative_to(run_directory).as_posix()
+            )
+        )
+        is not None
+        and identity[0] == 'remediation_request'
+    ]
+    interrupted_developer = run.state is RunState.INTERRUPTED and (
+        context.store.interrupted_origin(str(run.id)) is RunState.DEVELOPING
+    )
+    if interrupted_developer:
+        if not developer_requests:
+            message = 'interrupted reviewer-set developer request is missing'
+            raise WorkerError(message)
+        sequence, request_path, request = max(
+            developer_requests, key=lambda item: item[0]
+        )
+        _validate_reviewer_set_remediation(
+            run=run,
+            run_directory=run_directory,
+            execution=execution,
+            sequence=sequence,
+            request_path=request_path,
+            request=request,
+        )
+        current_digest = worktree_digest(
+            context.digest_worktree, run.worktree_path, run.base_sha
+        )
+        if current_digest is None:
+            raise WorkerError(NO_CHANGES)
+        return resume_developer_request(
+            context=context,
+            plan=plan,
+            run=replace(run, state=RunState.DEVELOPING, updated_at=utc_now()),
+            request=request,
+            current_digest=current_digest,
+            allow_unchanged_ready=False,
+            attempt=next_attempt(
+                run_directory, sequence, str(request['recipient']), run.state
+            ),
+            resume_expected_state=RunState.INTERRUPTED,
+        )
+
+    if run.state is RunState.DEVELOPING:
+        if not developer_requests:
+            message = 'active reviewer-set developer request is missing'
+            raise WorkerError(message)
+        sequence, request_path, request = max(
+            developer_requests, key=lambda item: item[0]
+        )
+        _validate_reviewer_set_remediation(
+            run=run,
+            run_directory=run_directory,
+            execution=execution,
+            sequence=sequence,
+            request_path=request_path,
+            request=request,
+        )
+        latest = latest_task_attempt(run_directory, sequence, RuntimeRole.DEVELOPER)
+        temporary = run_evidence_path(run_directory, '.developer-handoff.json')
+        canonical = manifest_evidence_path(
+            run_directory, 'developer_handoff', sequence + 1
+        )
+        action = recovery_action(
+            latest,
+            response_artifact_present=temporary.is_file() or canonical.is_file(),
+            workflow_state=run.state,
+        )
+        if action is RecoveryAction.LAUNCH:
+            return resume_developer_request(
+                context=context,
+                plan=plan,
+                run=run,
+                request=request,
+                current_digest=run.diff_digest or '',
+                allow_unchanged_ready=False,
+                attempt=1,
+            )
+        if action is RecoveryAction.FAIL_ACTIVATION_UNCERTAIN or latest is None:
+            message = 'cannot resume task with uncertain active attempt'
+            raise WorkerError(message, code=RESUME_ACTIVATION_UNCERTAIN_CODE)
+        if action is RecoveryAction.NONE:
+            return run
+        return resume_developer_validation(
+            context=context,
+            run=run,
+            request=request,
+            record=latest,
+            action=action,
+            execution=execution,
+            reviewer_identity=None,
+            developer_identity=plan.developer_identity,
+        )
+
+    if run.state is RunState.VALIDATION_REQUIRED:
+        if not developer_requests:
+            message = 'reviewer-set validation recovery request is missing'
+            raise WorkerError(message)
+        sequence, request_path, request = max(
+            developer_requests, key=lambda item: item[0]
+        )
+        batch = _validate_reviewer_set_remediation(
+            run=run,
+            run_directory=run_directory,
+            execution=execution,
+            sequence=sequence,
+            request_path=request_path,
+            request=request,
+        )
+        handoff_path = manifest_evidence_path(
+            run_directory, 'developer_handoff', sequence + 1
+        )
+        handoff = read_json_object(handoff_path)
+        parsed = validate_developer_handoff(
+            handoff,
+            request=request,
+            finding_ids=tuple(item.finding_id for item in batch.findings),
+        )
+        if parsed.payload.status not in {'blocked', 'failed'}:
+            message = 'reviewer-set validation handoff is not recoverable'
+            raise WorkerError(message)
+        measured_digest = worktree_digest(
+            context.digest_worktree, run.worktree_path, run.base_sha
+        )
+        if measured_digest is None or not same_diff_digest(
+            measured_digest, run.diff_digest
+        ):
+            message = 'resume scope changed since validation became required'
+            raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
+        next_sequence = sequence + 2
+        recovery_path = manifest_evidence_path(
+            run_directory, 'remediation_request', next_sequence
+        )
+        recovery_request = {
+            **request,
+            'message_id': str(uuid4()),
+            'sequence': next_sequence,
+            'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+        }
+        validate_remediation_request(recovery_request, run_directory=run_directory)
+        write_json_atomic(recovery_path, recovery_request, 'remediation_request')
+        return resume_developer_request(
+            context=context,
+            plan=plan,
+            run=transition(run, RunState.DEVELOPING),
+            request=recovery_request,
+            current_digest=measured_digest,
+            allow_unchanged_ready=True,
+            attempt=1,
+            resume_expected_state=RunState.VALIDATION_REQUIRED,
+        )
 
     interrupted_review = run.state is RunState.INTERRUPTED and (
         context.store.interrupted_origin(str(run.id)) is RunState.REVIEWING
@@ -329,7 +877,7 @@ def _resume_reviewer_set(
     if current_digest is None or not same_diff_digest(current_digest, run.diff_digest):
         message = 'resume scope changed since the interrupted reviewer batch'
         raise WorkerError(message, code=RESUME_SCOPE_CHANGED_CODE)
-    reviewer_plan = _reviewer_plan_from_execution(execution, context.registry)
+    reviewer_plan = plan.reviewer_plan
     sequence = _reviewer_batch_sequence(
         run_directory, run=run, reviewer_plan=reviewer_plan
     )
@@ -342,39 +890,49 @@ def _resume_reviewer_set(
         attempt=1,
     )
     results_by_id: dict[str, ReviewerDispatchResult] = {}
-    retry_requests: dict[str, dict[str, Any]] = {}
+    retry_requests: dict[str, dict[str, Any] | None] = {}
+    prior_review_paths: dict[str, Path | None] = {}
     retry_attempts: dict[str, int] = {}
     retry_dispatches: list[ReviewerDispatch] = []
     activated = False
     try:
         for base_dispatch in base_dispatches:
+            prior_review_path = _prior_reviewer_result_path(
+                run_directory, run=run, reviewer_id=base_dispatch.reviewer_id
+            )
             completed = _completed_reviewer_result(
                 run_directory,
                 base_dispatch,
                 run=run,
                 objective=execution.objective,
                 current_digest=current_digest,
+                expected_prior_review_path=prior_review_path,
             )
             if completed is not None:
                 result, _ = completed
                 results_by_id[base_dispatch.reviewer_id] = result
                 continue
-            request = read_json_object(
-                reviewer_dispatch_path(run_directory, base_dispatch.paths.request)
+            request_path = reviewer_dispatch_path(
+                run_directory, base_dispatch.paths.request
+            )
+            current_request = (
+                read_json_object(request_path) if request_path.is_file() else None
             )
             artifact_path = reviewer_dispatch_path(
                 run_directory, base_dispatch.paths.artifact
             )
-            validate_review_request(request, run_directory=run_directory)
-            _validate_reviewer_set_request_scope(
-                request,
-                run=run,
-                objective=execution.objective,
-                current_digest=current_digest,
-                sequence=sequence,
-                dispatch=base_dispatch,
-                artifact_path=artifact_path,
-            )
+            if current_request is not None:
+                validate_review_request(current_request, run_directory=run_directory)
+                _validate_reviewer_set_request_scope(
+                    current_request,
+                    run=run,
+                    objective=execution.objective,
+                    current_digest=current_digest,
+                    sequence=sequence,
+                    dispatch=base_dispatch,
+                    artifact_path=artifact_path,
+                    expected_prior_review_path=prior_review_path,
+                )
             latest = _latest_reviewer_attempt(
                 run_directory, sequence, base_dispatch.reviewer_id
             )
@@ -400,7 +958,8 @@ def _resume_reviewer_set(
                 if item.reviewer_id == base_dispatch.reviewer_id
             )
             retry_dispatches.append(retry_dispatch)
-            retry_requests[retry_dispatch.reviewer_id] = request
+            retry_requests[retry_dispatch.reviewer_id] = current_request
+            prior_review_paths[retry_dispatch.reviewer_id] = prior_review_path
             retry_attempts[retry_dispatch.reviewer_id] = attempt
         if interrupted_review:
             context.store.update(reviewing, expected_state=RunState.INTERRUPTED)
@@ -419,6 +978,7 @@ def _resume_reviewer_set(
                             sequence=sequence,
                             attempt=retry_attempts[dispatch.reviewer_id],
                             retry_request=retry_requests[dispatch.reviewer_id],
+                            prior_review_path=prior_review_paths[dispatch.reviewer_id],
                         ),
                         retry_dispatches,
                     )
@@ -436,10 +996,12 @@ def _resume_reviewer_set(
             context=context,
             run=run,
             reviewing=reviewing,
-            reviewer_plan=reviewer_plan,
+            plan=_reviewer_set_plan_from_execution(execution, context.registry),
             current_digest=current_digest,
+            batch_sequence=sequence,
             dispatches=base_dispatches,
             results=results,
+            resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
         if not activated:
@@ -452,8 +1014,11 @@ def _resume_reviewer_set(
     except BaseException:
         if not activated:
             raise
-        failed = transition(reviewing, RunState.FAILED)
-        context.store.update(failed, expected_state=RunState.REVIEWING)
+        terminal = transition(
+            reviewing,
+            RunState.INTERRUPTED if reviewing.iteration > 1 else RunState.FAILED,
+        )
+        context.store.update(terminal, expected_state=RunState.REVIEWING)
         raise
 
 
@@ -468,6 +1033,7 @@ def _execute_reviewer_dispatch(
     sequence: int,
     attempt: int,
     retry_request: dict[str, Any] | None = None,
+    prior_review_path: Path | None = None,
 ) -> ReviewerDispatchResult:
     """Execute and validate one reviewer without changing workflow state."""
 
@@ -506,7 +1072,9 @@ def _execute_reviewer_dispatch(
             'allowed_actions': [],
             'timeout_seconds': dispatch.timeout_seconds,
             'artifact_path': str(artifact_path),
-            'prior_review_path': None,
+            'prior_review_path': (
+                str(prior_review_path) if prior_review_path is not None else None
+            ),
         },
     }
     validate_review_request(request, run_directory=run_directory)
@@ -788,10 +1356,12 @@ def _finish_reviewer_batch(
     context: WorkerContext,
     run: Run,
     reviewing: Run,
-    reviewer_plan: ReviewerExecutionPlan,
+    plan: ReviewerSetReviewPlan,
     current_digest: str,
+    batch_sequence: int,
     dispatches: tuple[ReviewerDispatch, ...],
     results: tuple[ReviewerDispatchResult, ...],
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Persist one complete aggregate or interrupt an incomplete batch."""
 
@@ -834,7 +1404,7 @@ def _finish_reviewer_batch(
             'message_id': str(uuid4()),
             'run_id': str(run.id),
             'iteration': reviewing.iteration,
-            'reviewer_set_id': reviewer_plan.reviewer_set_id,
+            'reviewer_set_id': plan.reviewer_plan.reviewer_set_id,
             'aggregation_policy': 'all_required',
             'diff_digest': current_digest,
             'verdict': decision.verdict,
@@ -880,12 +1450,121 @@ def _finish_reviewer_batch(
         if decision.verdict == 'approved'
         else RunState.CHANGES_REQUESTED,
     )
-    context.store.update(decided, expected_state=RunState.REVIEWING)
     if decision.verdict == 'changes_requested':
-        return decided
+        if reviewing.iteration >= plan.max_iterations:
+            context.store.update(decided, expected_state=RunState.REVIEWING)
+            failed = transition(decided, RunState.FAILED)
+            context.store.update(failed, expected_state=RunState.CHANGES_REQUESTED)
+            raise WorkerError(ITERATION_LIMIT)
+        context.store.update(decided, expected_state=RunState.REVIEWING)
+        if not plan.developer_command:
+            return decided
+        sequence = batch_sequence + 2
+        batch_path = run_evidence_path(
+            run_directory,
+            *Path(
+                evidence_path('review_batch_result', ordinal=reviewing.iteration)
+            ).parts,
+        )
+        remediation_path = manifest_evidence_path(
+            run_directory, 'remediation_request', sequence
+        )
+        remediation: dict[str, Any] = {
+            'schema_version': 1,
+            'message_id': str(uuid4()),
+            'in_reply_to': batch_result.message_id,
+            'run_id': str(run.id),
+            'sequence': sequence,
+            'iteration': reviewing.iteration,
+            'message_type': 'remediation_request',
+            'sender': 'orchestrator',
+            'recipient': 'developer',
+            'created_at': datetime.now(UTC).isoformat().replace('+00:00', 'Z'),
+            'scope': {
+                'worktree_path': str(run.worktree_path),
+                'base_sha': run.base_sha,
+                'head_sha': run.head_sha,
+                'diff_digest': current_digest,
+            },
+            'payload': {
+                'objective': plan.objective,
+                'allowed_actions': [],
+                'timeout_seconds': plan.developer_timeout_seconds,
+                'review_result_path': str(batch_path),
+                'review_artifact_path': str(artifact_path),
+            },
+        }
+        validate_remediation_request(remediation, run_directory=run_directory)
+        write_json_atomic(remediation_path, remediation, 'remediation_request')
+        developing = transition(decided, RunState.DEVELOPING)
+        context.store.update(developing, expected_state=RunState.CHANGES_REQUESTED)
+        return resume_developer_request(
+            context=context,
+            plan=plan,
+            run=developing,
+            request=remediation,
+            current_digest=current_digest,
+            allow_unchanged_ready=False,
+            attempt=1,
+        )
+    context.store.update(decided, expected_state=RunState.REVIEWING)
     awaiting = transition(decided, RunState.AWAITING_COMMIT_AUTHORIZATION)
     context.store.update(awaiting, expected_state=RunState.APPROVED)
     return awaiting
+
+
+def _run_reviewer_set_iteration(
+    *,
+    context: WorkerContext,
+    run: Run,
+    reviewing: Run,
+    plan: ReviewerSetReviewPlan,
+    current_digest: str,
+    sequence: int,
+    prior_review_paths: dict[str, Path] | None = None,
+    resume_developer_request: DeveloperContinuation,
+) -> Run:
+    """Execute one complete concurrent reviewer-set iteration."""
+
+    dispatches = build_review_fanout(
+        plan.reviewer_plan,
+        run_id=str(run.id),
+        sequence=sequence,
+        iteration=reviewing.iteration,
+        attempt=1,
+    )
+    with ThreadPoolExecutor(max_workers=len(dispatches)) as executor:
+        results = tuple(
+            executor.map(
+                lambda dispatch: _execute_reviewer_dispatch(
+                    context=context,
+                    run=run,
+                    reviewing=reviewing,
+                    objective=plan.objective,
+                    current_digest=current_digest,
+                    dispatch=dispatch,
+                    sequence=sequence,
+                    attempt=1,
+                    prior_review_path=(
+                        prior_review_paths.get(dispatch.reviewer_id)
+                        if prior_review_paths is not None
+                        else None
+                    ),
+                ),
+                dispatches,
+            )
+        )
+    return _finish_reviewer_batch(
+        context=context,
+        run=run,
+        reviewing=reviewing,
+        plan=plan,
+        current_digest=current_digest,
+        batch_sequence=sequence,
+        dispatches=dispatches,
+        results=results,
+        resume_developer_request=resume_developer_request,
+    )
 
 
 def _run_queued_reviewer_set(
@@ -898,6 +1577,7 @@ def _run_queued_reviewer_set(
     developer_timeout_seconds: int,
     max_iterations: int,
     developer_identity: InvocationIdentity,
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Run one concurrent required-reviewer batch for a queued immutable diff."""
 
@@ -966,47 +1646,31 @@ def _run_queued_reviewer_set(
             run_evidence_path(run_directory, directory).mkdir(
                 parents=True, exist_ok=True
             )
-        dispatches = build_review_fanout(
-            reviewer_plan,
-            run_id=str(run.id),
-            sequence=1,
-            iteration=reviewing.iteration,
-            attempt=1,
-        )
-        with ThreadPoolExecutor(max_workers=len(dispatches)) as executor:
-            results = tuple(
-                executor.map(
-                    lambda dispatch: _execute_reviewer_dispatch(
-                        context=context,
-                        run=run,
-                        reviewing=reviewing,
-                        objective=objective,
-                        current_digest=current_digest,
-                        dispatch=dispatch,
-                        sequence=1,
-                        attempt=1,
-                    ),
-                    dispatches,
-                )
-            )
-        return _finish_reviewer_batch(
+        return _run_reviewer_set_iteration(
             context=context,
             run=run,
             reviewing=reviewing,
-            reviewer_plan=reviewer_plan,
+            plan=plan,
             current_digest=current_digest,
-            dispatches=dispatches,
-            results=results,
+            sequence=1,
+            resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
         if error.code == REVIEWER_BATCH_INCOMPLETE_CODE:
             raise
-        failed = transition(reviewing, RunState.FAILED)
-        context.store.update(failed, expected_state=RunState.REVIEWING)
+        durable = context.store.get(str(run.id))
+        if durable.state is RunState.REVIEWING:
+            failed = transition(durable, RunState.FAILED)
+            context.store.update(failed, expected_state=RunState.REVIEWING)
         raise
     except BaseException:
-        failed = transition(reviewing, RunState.FAILED)
-        context.store.update(failed, expected_state=RunState.REVIEWING)
+        durable = context.store.get(str(run.id))
+        if durable.state is RunState.REVIEWING:
+            terminal = transition(
+                durable,
+                RunState.INTERRUPTED if durable.iteration > 1 else RunState.FAILED,
+            )
+            context.store.update(terminal, expected_state=RunState.REVIEWING)
         raise
 
 
@@ -1020,6 +1684,7 @@ def run_queued_reviewer_set(
     developer_timeout_seconds: int,
     max_iterations: int,
     developer_identity: InvocationIdentity,
+    resume_developer_request: DeveloperContinuation,
 ) -> Run:
     """Run a reviewer batch and persist every worker failure as durable evidence."""
 
@@ -1034,6 +1699,7 @@ def run_queued_reviewer_set(
             developer_timeout_seconds=developer_timeout_seconds,
             max_iterations=max_iterations,
             developer_identity=developer_identity,
+            resume_developer_request=resume_developer_request,
         )
     except WorkerError as error:
         if not run_directory.is_relative_to(run.worktree_path.resolve()):

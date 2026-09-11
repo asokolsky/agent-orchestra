@@ -31,10 +31,10 @@ from agent_orchestra.invocations import (
     transition_attempt,
 )
 from agent_orchestra.models import Run
-from agent_orchestra.reviewer_batch_run import run_queued_reviewer_set
 from agent_orchestra.reviewer_paths import reviewer_invocation_stem, reviewer_task_id
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
+from agent_orchestra.worker import run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from pathlib import Path

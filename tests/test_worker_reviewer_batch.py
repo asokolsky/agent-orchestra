@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 from threading import Barrier
 from typing import TYPE_CHECKING, Any, Never, cast
 from uuid import uuid4
@@ -18,6 +19,7 @@ from agent_orchestra.agents import (
     AgentRequest,
     AgentResult,
     CommandAgentAdapter,
+    DeveloperRequest,
     ReviewerRequest,
 )
 from agent_orchestra.audit import build_audit_document
@@ -27,16 +29,21 @@ from agent_orchestra.evidence import (
 from agent_orchestra.execution_context import WorkerContext
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.models import Run, RunState
-from agent_orchestra.reviewer_batch_run import run_queued_reviewer_set
 from agent_orchestra.reviewer_plan import ReviewerExecution, ReviewerExecutionPlan
 from agent_orchestra.store import JobStore
-from agent_orchestra.worker import resume_review
+from agent_orchestra.worker import resume_review, run_queued_reviewer_set
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
 DIGEST = f'sha256:{"a" * 64}'
+
+
+def test_reviewer_batch_module_does_not_depend_on_worker() -> None:
+    """Keep reviewer-batch execution below the worker orchestration facade."""
+
+    source = Path(reviewer_batch_run.__file__).read_text(encoding='utf-8')
+    assert 'agent_orchestra.worker' not in source
 
 
 def _reviewer(reviewer_id: str, runtime: str, vendor: str) -> ReviewerExecution:
@@ -561,6 +568,466 @@ def test_reviewer_set_persists_namespaced_aggregate_findings(
     )
 
 
+def test_reviewer_set_remediates_rejected_batch_before_next_iteration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give one complete rejected batch to the developer, then review its edit."""
+
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    changed = worktree / 'changed.txt'
+    new_digest = f'sha256:{"b" * 64}'
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+    developer_calls = 0
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Reject the first batch, remediate it once, and approve the next batch."""
+
+        nonlocal developer_calls
+        if request.on_started is not None:
+            request.on_started()
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        if isinstance(request, ReviewerRequest):
+            if document['iteration'] == 1:
+                assert document['payload']['prior_review_path'] is None
+            else:
+                prior_path = Path(document['payload']['prior_review_path'])
+                assert prior_path.name == (
+                    f'000002-{request.artifact_path.stem.removeprefix("review-0002-")}'
+                    '-review-result.json'
+                )
+                assert prior_path.is_file()
+            request.artifact_path.write_text('# Review\n', encoding='utf-8')
+            response = (
+                _changes_requested_response(document, request.artifact_path)
+                if document['iteration'] == 1
+                else _approved_response(document, request.artifact_path)
+            )
+        else:
+            assert isinstance(request, DeveloperRequest)
+            developer_calls += 1
+            aggregate_path = Path(document['payload']['review_result_path'])
+            aggregate = json.loads(aggregate_path.read_text(encoding='utf-8'))
+            assert aggregate['message_id'] == document['in_reply_to']
+            finding_ids = [item['finding_id'] for item in aggregate['findings']]
+            assert finding_ids == [
+                'security:finding-1',
+                'portability:finding-1',
+            ]
+            changed.write_text('fixed\n', encoding='utf-8')
+            response = {
+                'schema_version': 1,
+                'message_id': str(uuid4()),
+                'in_reply_to': document['message_id'],
+                'run_id': document['run_id'],
+                'sequence': document['sequence'] + 1,
+                'iteration': document['iteration'],
+                'message_type': 'developer_handoff',
+                'sender': 'developer',
+                'recipient': 'orchestrator',
+                'created_at': '2026-09-10T20:00:00Z',
+                'scope': document['scope'],
+                'payload': {
+                    'status': 'ready_for_review',
+                    'summary': 'Fixed both findings.',
+                    'files_changed': ['changed.txt'],
+                    'validation': [],
+                    'dispositions': [
+                        {
+                            'finding_id': finding_id,
+                            'disposition': 'addressed',
+                            'rationale': 'Fixed.',
+                        }
+                        for finding_id in finding_ids
+                    ],
+                    'remaining_risks': [],
+                },
+            }
+        request.response_path.write_text(json.dumps(response), encoding='utf-8')
+        return AgentResult(
+            succeeded=True,
+            summary='complete',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+    result = run_queued_reviewer_set(
+        context=WorkerContext(
+            store=store,
+            runs_directory=tmp_path / 'runs',
+            digest_worktree=lambda _path, _base: (
+                new_digest if changed.exists() else DIGEST
+            ),
+        ),
+        run=run,
+        objective='Review the change.',
+        reviewer_plan=ReviewerExecutionPlan(
+            'default',
+            (
+                _reviewer('security', 'codex', 'openai'),
+                _reviewer('portability', 'claude-code', 'anthropic'),
+            ),
+        ),
+        developer_command=('developer',),
+        developer_timeout_seconds=30,
+        max_iterations=3,
+        developer_identity=InvocationIdentity(
+            vendor='openai', model=None, runtime='codex'
+        ),
+    )
+
+    assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    assert result.iteration == 2
+    assert result.diff_digest == new_digest
+    assert developer_calls == 1
+    run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
+    assert (run_directory / 'review-batches/000001.json').is_file()
+    assert (run_directory / 'review-batches/000002.json').is_file()
+    assert (run_directory / 'messages/000003-remediation-request.json').is_file()
+    for reviewer_id in ('security', 'portability'):
+        assert (
+            run_directory / f'messages/000005-{reviewer_id}-review-request.json'
+        ).is_file()
+    audit = build_audit_document(
+        result,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert audit['result'] == 'verified', audit['findings']
+
+
+@pytest.mark.parametrize(
+    'first_outcome', ['timeout', 'blocked', 'crash_window', 'disagreement']
+)
+def test_reviewer_set_resume_retries_only_recoverable_developer(
+    first_outcome: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume the aggregate remediation without redispatching completed reviewers."""
+
+    worktree = tmp_path / 'worktree'
+    worktree.mkdir()
+    changed = worktree / 'changed.txt'
+    new_digest = f'sha256:{"b" * 64}'
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    run = Run.create_local(worktree, worktree, 'HEAD', 'HEAD', DIGEST)
+    store.add(run)
+    reviewer_calls = 0
+    developer_calls = 0
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Interrupt the first developer attempt and complete its retry."""
+
+        nonlocal developer_calls, reviewer_calls
+        if request.on_started is not None:
+            request.on_started()
+        document = json.loads(request.request_path.read_text(encoding='utf-8'))
+        if isinstance(request, ReviewerRequest):
+            reviewer_calls += 1
+            request.artifact_path.write_text('# Review\n', encoding='utf-8')
+            response = (
+                _changes_requested_response(document, request.artifact_path)
+                if document['iteration'] == 1
+                else _approved_response(document, request.artifact_path)
+            )
+            request.response_path.write_text(json.dumps(response), encoding='utf-8')
+            return AgentResult(
+                succeeded=True,
+                summary='reviewed',
+                stdout='',
+                stderr='',
+                exit_code=0,
+            )
+        assert isinstance(request, DeveloperRequest)
+        developer_calls += 1
+        if developer_calls == 1 and first_outcome == 'timeout':
+            command = 'developer'
+            raise subprocess.TimeoutExpired(command, 30)
+        aggregate = json.loads(
+            Path(document['payload']['review_result_path']).read_text(encoding='utf-8')
+        )
+        blocked = developer_calls == 1 and first_outcome == 'blocked'
+        disagreement = developer_calls == 1 and first_outcome == 'disagreement'
+        if not blocked and not disagreement:
+            changed.write_text('fixed\n', encoding='utf-8')
+        response = {
+            'schema_version': 1,
+            'message_id': str(uuid4()),
+            'in_reply_to': document['message_id'],
+            'run_id': document['run_id'],
+            'sequence': document['sequence'] + 1,
+            'iteration': document['iteration'],
+            'message_type': 'developer_handoff',
+            'sender': 'developer',
+            'recipient': 'orchestrator',
+            'created_at': '2026-09-10T20:00:00Z',
+            'scope': document['scope'],
+            'payload': {
+                'status': 'blocked' if blocked else 'ready_for_review',
+                'summary': 'Blocked.' if blocked else 'Fixed.',
+                'files_changed': [] if blocked else ['changed.txt'],
+                'validation': [],
+                'dispositions': [
+                    {
+                        'finding_id': finding['finding_id'],
+                        'disposition': (
+                            'blocked'
+                            if blocked
+                            else 'rejected'
+                            if disagreement
+                            else 'addressed'
+                        ),
+                        'rationale': (
+                            'Needs retry.'
+                            if blocked
+                            else 'Not applicable.'
+                            if disagreement
+                            else 'Fixed.'
+                        ),
+                    }
+                    for finding in aggregate['findings']
+                ],
+                'remaining_risks': [],
+            },
+        }
+        request.response_path.write_text(json.dumps(response), encoding='utf-8')
+        return AgentResult(
+            succeeded=True,
+            summary='fixed',
+            stdout='',
+            stderr='',
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+    original_write_json_atomic = cast('Any', reviewer_batch_run).write_json_atomic
+    fail_next_review_write = first_outcome == 'crash_window'
+
+    def write_json(path: Path, document: dict[str, Any], evidence_type: str) -> None:
+        """Inject a single crash while persisting the next reviewer batch."""
+
+        nonlocal fail_next_review_write
+        if (
+            evidence_type == 'review_request'
+            and document.get('iteration') == 2
+            and fail_next_review_write
+        ):
+            fail_next_review_write = False
+            message = 'injected next-review write failure'
+            raise OSError(message)
+        original_write_json_atomic(path, document, cast('Any', evidence_type))
+
+    monkeypatch.setattr(reviewer_batch_run, 'write_json_atomic', write_json)
+    context = WorkerContext(
+        store=store,
+        runs_directory=tmp_path / 'runs',
+        digest_worktree=lambda _path, _base: new_digest if changed.exists() else DIGEST,
+    )
+    plan = ReviewerExecutionPlan(
+        'default',
+        (
+            _reviewer('security', 'codex', 'openai'),
+            _reviewer('portability', 'claude-code', 'anthropic'),
+        ),
+    )
+
+    def start() -> Run:
+        """Start the reviewer-set workflow under the selected recovery outcome."""
+
+        return run_queued_reviewer_set(
+            context=context,
+            run=run,
+            objective='Review the change.',
+            reviewer_plan=plan,
+            developer_command=('developer',),
+            developer_timeout_seconds=30,
+            max_iterations=3,
+            developer_identity=InvocationIdentity(
+                vendor='openai', model=None, runtime='codex'
+            ),
+        )
+
+    if first_outcome == 'timeout':
+        with pytest.raises(WorkerError, match='developer timed out'):
+            start()
+        recoverable = store.get(run.id)
+        assert recoverable.state is RunState.INTERRUPTED
+    elif first_outcome == 'crash_window':
+        with pytest.raises(OSError, match='injected next-review write failure'):
+            start()
+        recoverable = store.get(run.id)
+        assert recoverable.state is RunState.INTERRUPTED
+        interrupted_audit = build_audit_document(
+            recoverable,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert interrupted_audit['result'] == 'incomplete'
+        assert not any(
+            item.get('code') == 'message_correlation_failure'
+            and item.get('path') == 'messages'
+            for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+        )
+        persisted_request_path = next(
+            path
+            for path in (next((tmp_path / 'runs').rglob('messages'))).glob(
+                '*-review-request.json'
+            )
+            if json.loads(path.read_text(encoding='utf-8'))['iteration'] == 2
+        )
+        persisted_request = json.loads(
+            persisted_request_path.read_text(encoding='utf-8')
+        )
+        prior_review_path = persisted_request['payload']['prior_review_path']
+        persisted_request['payload']['prior_review_path'] = str(
+            next((tmp_path / 'runs').rglob('execution.json'))
+        )
+        persisted_request_path.write_text(
+            json.dumps(persisted_request), encoding='utf-8'
+        )
+        with pytest.raises(
+            WorkerError, match='reviewer-set request does not match its execution plan'
+        ):
+            resume_review(context=context, run=recoverable)
+        persisted_request['payload']['prior_review_path'] = prior_review_path
+        persisted_request_path.write_text(
+            json.dumps(persisted_request), encoding='utf-8'
+        )
+    else:
+        recoverable = start()
+        assert recoverable.state is (
+            RunState.CHANGES_REQUESTED
+            if first_outcome == 'disagreement'
+            else RunState.VALIDATION_REQUIRED
+        )
+    assert reviewer_calls == (3 if first_outcome == 'crash_window' else 2)
+    if first_outcome == 'timeout':
+        interrupted_audit = build_audit_document(
+            recoverable,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert interrupted_audit['result'] == 'incomplete'
+        assert not any(
+            item.get('code') == 'message_correlation_failure'
+            for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+        )
+        request_path = next((tmp_path / 'runs').rglob('*-remediation-request.json'))
+        request = json.loads(request_path.read_text(encoding='utf-8'))
+        original_values = {
+            'in_reply_to': request['in_reply_to'],
+            'review_result_path': request['payload']['review_result_path'],
+            'review_artifact_path': request['payload']['review_artifact_path'],
+        }
+        execution_path = next((tmp_path / 'runs').rglob('execution.json'))
+        for field, invalid_value in (
+            ('in_reply_to', str(uuid4())),
+            ('review_result_path', str(execution_path)),
+            ('review_artifact_path', str(execution_path)),
+        ):
+            target = request if field == 'in_reply_to' else request['payload']
+            target[field] = invalid_value
+            request_path.write_text(json.dumps(request), encoding='utf-8')
+            invalid_audit = build_audit_document(
+                recoverable,
+                store.list_transitions(str(run.id)),
+                (),
+                tmp_path / 'runs',
+                verify=True,
+            )
+            assert any(
+                item.get('code') == 'message_correlation_failure'
+                and item.get('path')
+                == request_path.relative_to(request_path.parents[1]).as_posix()
+                for item in cast('list[dict[str, object]]', invalid_audit['findings'])
+            )
+            target[field] = original_values[field]
+        request_path.write_text(json.dumps(request), encoding='utf-8')
+    if first_outcome == 'disagreement':
+        marker_path = next((tmp_path / 'runs').rglob('decision-required.json'))
+        marker = json.loads(marker_path.read_text(encoding='utf-8'))
+        handoff_path = Path(marker['developer_handoff_path'])
+        outside_path = tmp_path / 'outside-handoff.json'
+        outside_path.write_text(
+            handoff_path.read_text(encoding='utf-8'), encoding='utf-8'
+        )
+        marker['developer_handoff_path'] = str(outside_path)
+        marker_path.write_text(json.dumps(marker), encoding='utf-8')
+        with pytest.raises(
+            WorkerError, match='developer disagreement evidence is miscorrelated'
+        ):
+            resume_review(context=context, run=recoverable)
+        marker['developer_handoff_path'] = str(handoff_path)
+        marker_path.write_text(json.dumps(marker), encoding='utf-8')
+        handoff = json.loads(handoff_path.read_text(encoding='utf-8'))
+        dispositions = handoff['payload']['dispositions']
+        handoff['payload']['dispositions'] = dispositions[:-1]
+        handoff_path.write_text(json.dumps(handoff), encoding='utf-8')
+        with pytest.raises(WorkerError, match='disposition for every finding'):
+            resume_review(context=context, run=recoverable)
+        handoff['payload']['dispositions'] = dispositions
+        handoff_path.write_text(json.dumps(handoff), encoding='utf-8')
+        assert resume_review(context=context, run=recoverable) == recoverable
+        assert developer_calls == 1
+        assert reviewer_calls == 2
+        return
+    if first_outcome == 'timeout':
+        request = json.loads(request_path.read_text(encoding='utf-8'))
+        request['payload']['objective'] = 'Tampered objective.'
+        request_path.write_text(json.dumps(request), encoding='utf-8')
+        with pytest.raises(WorkerError, match='miscorrelated'):
+            resume_review(context=context, run=recoverable)
+        request['payload']['objective'] = 'Review the change.'
+        request_path.write_text(json.dumps(request), encoding='utf-8')
+        batch_path = Path(request['payload']['review_result_path'])
+        batch = json.loads(batch_path.read_text(encoding='utf-8'))
+        batch['reviewers'][0]['result_path'], batch['reviewers'][1]['result_path'] = (
+            batch['reviewers'][1]['result_path'],
+            batch['reviewers'][0]['result_path'],
+        )
+        batch_path.write_text(json.dumps(batch), encoding='utf-8')
+        with pytest.raises(WorkerError, match='invalid in_reply_to'):
+            resume_review(context=context, run=recoverable)
+        batch['reviewers'][0]['result_path'], batch['reviewers'][1]['result_path'] = (
+            batch['reviewers'][1]['result_path'],
+            batch['reviewers'][0]['result_path'],
+        )
+        batch['diff_digest'] = new_digest
+        request['scope']['diff_digest'] = new_digest
+        batch_path.write_text(json.dumps(batch), encoding='utf-8')
+        request_path.write_text(json.dumps(request), encoding='utf-8')
+        with pytest.raises(WorkerError, match='miscorrelated'):
+            resume_review(context=context, run=recoverable)
+        batch['diff_digest'] = DIGEST
+        request['scope']['diff_digest'] = DIGEST
+        batch_path.write_text(json.dumps(batch), encoding='utf-8')
+        request_path.write_text(json.dumps(request), encoding='utf-8')
+    result = resume_review(context=context, run=recoverable)
+    assert result.state is RunState.AWAITING_COMMIT_AUTHORIZATION
+    assert reviewer_calls == 4
+    assert developer_calls == (1 if first_outcome == 'crash_window' else 2)
+    if first_outcome == 'blocked':
+        audit = build_audit_document(
+            result,
+            store.list_transitions(str(run.id)),
+            (),
+            tmp_path / 'runs',
+            verify=True,
+        )
+        assert audit['result'] == 'verified', audit['findings']
+
+
 def test_reviewer_set_mutation_fails_terminally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -795,6 +1262,19 @@ def test_resume_reviewer_set_retries_only_incomplete_member(
     assert interrupted.state is RunState.INTERRUPTED
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     assert not (run_directory / 'review-batches/000001.json').exists()
+    interrupted_audit = build_audit_document(
+        interrupted,
+        store.list_transitions(str(run.id)),
+        (),
+        tmp_path / 'runs',
+        verify=True,
+    )
+    assert interrupted_audit['result'] == 'incomplete'
+    assert not any(
+        item.get('code') == 'message_correlation_failure'
+        and item.get('path') == 'messages'
+        for item in cast('list[dict[str, object]]', interrupted_audit['findings'])
+    )
 
     premature_aggregate = run_directory / 'review-batches/000001.json'
     premature_aggregate.parent.mkdir(parents=True, exist_ok=True)
