@@ -55,6 +55,11 @@ You have a change in a worktree. You want an agent to review it, and you want
 the review to be evidence rather than a chat log: bound to an exact diff, stored
 on disk, and inspectable afterwards.
 
+A [worktree](https://git-scm.com/docs/git-worktree) is the directory holding a
+repository's checked-out files. An ordinary clone is one, and that is all this
+guide needs; Git can attach further worktrees to the same repository with
+`git worktree add` when you want several branches checked out at once.
+
 Agent-orchestra runs that review as a **job**. It records the diff digest before
 the reviewer starts, runs the reviewer with only the capabilities its role
 allows, validates the response against a schema, and writes every request,
