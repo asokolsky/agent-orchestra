@@ -494,7 +494,7 @@ def write_fake_codex(path: Path, *, mode: str) -> None:
     terminal_statement = {
         'approved': '',
         'nonzero': 'raise SystemExit(9)',
-        'timeout': 'time.sleep(5)',
+        'timeout': 'time.sleep(20)',
     }[mode]
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -3507,9 +3507,9 @@ def test_concurrent_active_resumes_launch_one_process(
 @pytest.mark.parametrize(
     'case',
     [
-        ('approved', '30', 0, False),
-        ('nonzero', '30', 2, False),
-        ('timeout', '1', 2, True),
+        ('approved', '30', 0, 'succeeded', None),
+        ('nonzero', '30', 2, 'failed', 'codex exec failed with code 9'),
+        ('timeout', '8', 2, 'failed', 'codex review timed out'),
     ],
 )
 def test_builtin_run_exposes_child_output_through_task_view(
@@ -3517,11 +3517,19 @@ def test_builtin_run_exposes_child_output_through_task_view(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     enqueued_run: CliRunContext,
-    case: tuple[str, str, int, bool],
+    case: tuple[str, str, int, str, str | None],
 ) -> None:
     """Retain built-in child streams across success, error, and timeout."""
 
-    mode, timeout, expected_result, timed_out = case
+    # The timeout case exercises the adapter's own bound on the child, not the
+    # orchestrator's bound on the adapter. The adapter allows the child
+    # timeout_seconds - 5, so --timeout 8 kills the child three seconds in while
+    # the orchestrator is still waiting, and the child's twenty-second sleep
+    # keeps it alive well past that deadline. Both margins have to stay wide:
+    # equal deadlines make which bound fires a race, which is what made this
+    # test flaky under CI load. test_run_marks_reviewer_timeout covers the
+    # orchestrator killing an adapter that overruns, where nothing competes.
+    mode, timeout, expected_result, conclusion, diagnostic = case
     fake_codex = tmp_path / 'bin/codex'
     write_fake_codex(fake_codex, mode=mode)
     current_path = os.environ.get('PATH', '')
@@ -3559,11 +3567,18 @@ def test_builtin_run_exposes_child_output_through_task_view(
     document = json.loads(capsys.readouterr().out)
     attempt = document['task']['attempts'][0]
     assert 'child stdout\n' in attempt['streams']['stdout']['content']
-    assert 'child stderr\n' in attempt['streams']['stderr']['content']
+    stderr = attempt['streams']['stderr']['content']
+    assert 'child stderr\n' in stderr
     assert attempt['requested_model'] == 'test-model'
     assert attempt['effective_models'] == []
     assert attempt['effective_model_status'] == 'unavailable'
-    assert attempt['timed_out'] is timed_out
+    if diagnostic is not None:
+        assert diagnostic in stderr, (
+            f'expected the adapter to report {diagnostic!r}; '
+            f'the child ended for another reason. stderr: {stderr!r}'
+        )
+    assert attempt['conclusion'] == conclusion
+    assert attempt['timed_out'] is (conclusion == 'timed_out')
 
 
 def test_run_rejects_state_database_inside_worktree(
