@@ -208,8 +208,8 @@ def create_reviewed_batch_job(
                 'verdict': 'approved',
                 'summary': 'approved',
                 'findings': [],
-                'validation': [],
-                'verification_gaps': [],
+                'validation': ['mise run tests'],
+                'verification_gaps': ['External service was unavailable.'],
                 'artifact_path': str(request.artifact_path),
             },
         }
@@ -307,7 +307,7 @@ def test_four_views_use_public_vocabulary_and_current_array(
 
     assert main(arguments(database, 'jobs', None, root)) == 0
     jobs = json.loads(capsys.readouterr().out)
-    assert jobs['schema_version'] == 20
+    assert jobs['schema_version'] == 21
     assert jobs['jobs'][0]['job_id'] == str(job.id)
     assert 'id' not in jobs['jobs'][0]
 
@@ -427,10 +427,85 @@ def test_real_reviewer_batch_is_visible_from_all_batch_views(
     assert main(arguments(database, 'tasks', str(job.id), root)) == 0
     tasks_document = json.loads(capsys.readouterr().out)
     assert tasks_document['review_batches'] == job_document['review_batches']
+    security_task = next(
+        task for task in tasks_document['tasks'] if task['reviewer_id'] == 'security'
+    )
+    assert security_task['review_result'] == {
+        'message_id': security_task['review_result']['message_id'],
+        'path': 'messages/000002-security-review-result.json',
+        'verdict': 'approved',
+        'summary': 'approved',
+        'findings': [],
+        'validation': ['mise run tests'],
+        'verification_gaps': ['External service was unavailable.'],
+        'artifact_path': 'artifacts/review-0001-security.md',
+    }
+    assert security_task['attempts'][0]['agent_vendor'] == 'openai'
+    assert security_task['attempts'][0]['runtime'] == 'codex'
+    assert security_task['attempts'][0]['streams']['stdout']['available'] is True
 
     assert main(arguments(database, 'task', task_id, root)) == 0
     task_document = json.loads(capsys.readouterr().out)['task']
     assert task_document['review_batch'] == job_document['review_batches'][0]
+    assert task_document['review_result'] == security_task['review_result']
+
+
+@pytest.mark.parametrize(
+    'relative_path',
+    [
+        'messages/000001-security-review-request.json',
+        'messages/000002-security-review-result.json',
+    ],
+)
+def test_batch_views_reject_modified_reviewer_evidence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+) -> None:
+    """Reject public reviewer details whose canonical message was modified."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    job_directory = resolve_evidence_path(root, str(job.id))
+    message_path = job_directory / relative_path
+    message = json.loads(message_path.read_text(encoding='utf-8'))
+    message['created_at'] = '2026-09-10T12:01:00Z'
+    message_path.write_text(json.dumps(message), encoding='utf-8')
+    task_id = reviewer_task_id(str(job.id), 1, 'security')
+
+    for command, identifier in (
+        ('tasks', str(job.id)),
+        ('task', task_id),
+    ):
+        assert main(arguments(database, command, identifier, root)) == 2
+        document = json.loads(capsys.readouterr().out)
+        assert document['error']['code'] == 'invalid_evidence'
+        assert 'evidence_modified' in document['error']['message']
+
+
+def test_direct_task_ignores_unrelated_modified_reviewer_evidence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validate only the evidence belonging to the selected direct task."""
+
+    database, job, root = create_reviewed_batch_job(tmp_path, monkeypatch)
+    job_directory = resolve_evidence_path(root, str(job.id))
+    result_path = job_directory / 'messages/000002-security-review-result.json'
+    result = json.loads(result_path.read_text(encoding='utf-8'))
+    result['payload']['summary'] = 'modified'
+    result_path.write_text(json.dumps(result), encoding='utf-8')
+
+    portability_task = reviewer_task_id(str(job.id), 1, 'portability')
+    assert main(arguments(database, 'task', portability_task, root)) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document['task']['reviewer_id'] == 'portability'
+
+    missing_task = f'{job.id}:missing'
+    assert main(arguments(database, 'task', missing_task, root)) == 2
+    error = json.loads(capsys.readouterr().out)
+    assert error['error']['code'] == 'task_not_found'
 
 
 def test_batch_view_preserves_null_finding_locations(
@@ -675,7 +750,7 @@ def test_views_treat_absent_issue_tables_as_empty(
 
     assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
-        'schema_version': 20,
+        'schema_version': 21,
         'jobs': [],
         'error': None,
     }

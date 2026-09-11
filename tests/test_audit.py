@@ -976,6 +976,6 @@ def test_audit_reports_missing_job_as_versioned_error(
     assert main(_arguments(database, tmp_path / 'runs', 'missing', verify=True)) == 2
 
     document = json.loads(capsys.readouterr().out)
-    assert document['schema_version'] == 20
+    assert document['schema_version'] == 21
     assert document['job_id'] == 'missing'
     assert document['error']['code'] == 'job_not_found'
