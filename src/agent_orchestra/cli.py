@@ -101,7 +101,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATABASE = Path.home() / '.local/state/agent-orchestra/state.db'
 DEFAULT_RUNS_DIRECTORY = Path.home() / '.local/state/agent-orchestra/runs'
-CLI_SCHEMA_VERSION = 19
+CLI_SCHEMA_VERSION = 20
 HASH_CHUNK_SIZE = 1024 * 1024
 STATE_DATABASE_INSIDE_WORKTREE = 'state database must be outside the worktree'
 
@@ -1691,7 +1691,7 @@ def _config_show(
                             for reviewer_set in settings.reviewer_sets
                         ],
                         'source': 'file' if settings.reviewer_sets else 'built_in',
-                        'status': 'review_only',
+                        'status': 'full_workflow',
                     },
                 },
                 'error': None,

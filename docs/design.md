@@ -440,7 +440,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-17 CLI. This
+column and field names. Those names are not exposed by the schema-20 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -484,6 +484,14 @@ Schema version history:
 - Version 15 adds the stable `reviewer_id` field to source-review task and
   attempt documents. The version advances because the current CLI contract
   versions additive public fields; issue #61 may revise that policy globally.
+- Version 16 enables configured reviewer-set execution through `run`.
+- Version 17 exposes validated aggregate reviewer-batch state in job and task
+  views.
+- Version 18 adds the aggregate batch's namespaced `findings` array.
+- Version 19 adds the aggregate message identity and evidence-relative Markdown
+  artifact path.
+- Version 20 marks reviewer sets as supporting the full review and remediation
+  workflow in `config show`.
 
 The independent audit document schema is version 15. It advances from 14
 because attempt objects no longer carry `run_id`, `invocation_id`, or the
