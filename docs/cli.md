@@ -53,7 +53,7 @@ Example command output for an initialized database with no jobs:
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "jobs": [],
   "error": null
 }
@@ -228,7 +228,7 @@ Example output from the first command:
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "directory": "/Users/example/PersonalProjects",
   "jobs": [
     {
@@ -252,7 +252,7 @@ Example output from the first command:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `20`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `21`. |
 | `directory` | String | Resolved absolute directory that was requested. |
 | `jobs` | Array | Successfully enqueued changed repos. |
 | `jobs[].job_id` | String | New opaque job ID. |
@@ -480,7 +480,7 @@ but deleted content cannot be reconstructed without an independent backup.
 
 The public hierarchy is `job` -> `task` -> `attempt`. A job is one complete
 objective and workflow, a task is one durable role assignment, and an attempt
-is one process execution. Four read-only, schema-version 20 JSON views expose
+is one process execution. Four read-only, schema-version 21 JSON views expose
 that hierarchy:
 
 ```text
@@ -529,6 +529,10 @@ history. `task` derives the parent job from the globally unique task ID and
 returns every attempt, including contained stdout and stderr paths and content.
 A source reviewer task includes its iteration's aggregate decision as
 `review_batch` once that batch is complete.
+The `tasks` and direct `task` views also include that reviewer's correlated
+canonical `review_result`, with its verdict, summary, findings, validation,
+verification gaps, and evidence-relative result and artifact paths. Attempt
+objects alongside it provide runtime and model provenance plus stdout and stderr.
 New reviewer batches include a unique aggregate `message_id`, a relocatable
 evidence-relative `artifact_path`, and an aggregate `findings` array. Every
 finding keeps its reviewer identity and source identifier, while its public
@@ -537,7 +541,7 @@ batch-evidence schema versions remain readable and omit fields they predate.
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "job": {
     "job_id": "20260907T090000Z-a7f3c921",
     "state": "reviewing",
@@ -586,6 +590,7 @@ the root before use and rejects job-directory and attempt-evidence escapes.
 | `role` | String | `developer` or `reviewer` for source-code jobs; `issue_reviewer` for issue-readiness jobs. |
 | `reviewer_id` | String | Stable configured reviewer identity on schema-5 source-review tasks and attempts; absent from earlier records and non-reviewer work. |
 | `review_batch` | Object | Aggregate decision for this reviewer task's iteration, when complete; present only in the direct `task` view. |
+| `review_result` | Object | Correlated canonical result for this reviewer, including evidence-relative `path` and `artifact_path`; present in `tasks` and the direct `task` view when complete. |
 | `status` | String | Task or attempt lifecycle status. |
 | `attempt_id` | String | Public identifier for one process execution. |
 | `attempt` | Integer | One-based attempt ordinal. |
@@ -603,7 +608,7 @@ echo the derived `job_id` when the task identifier contains one.
 
 This is an intentional breaking migration. The former `status` and `logs`
 commands and schema-7 identifier and collection fields have no
-aliases. Callers must use the four commands above and the schema-20 `job_id`,
+aliases. Callers must use the four commands above and the schema-21 `job_id`,
 `jobs`, and `attempt_id` fields.
 
 The new views do not reproduce the former log-filter flags. Select a task by
@@ -741,7 +746,7 @@ Example output:
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -750,7 +755,7 @@ Example output:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | Integer | Version of this CLI output contract; currently `20`. |
+| `schema_version` | Integer | Version of this CLI output contract; currently `21`. |
 | `job_id` | String | Permanent opaque job ID. |
 | `state` | String | Resulting durable [lifecycle state](design.md#lifecycle). |
 | `error` | Object or null | Command-level failure, otherwise `null`. |
@@ -793,7 +798,7 @@ Example output when the custom reviewer requests changes:
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "changes_requested",
   "error": null
@@ -857,7 +862,7 @@ Successful output is versioned JSON:
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": "awaiting_commit_authorization",
   "error": null
@@ -868,7 +873,7 @@ An expected failure also remains JSON on stdout and exits 2:
 
 ```json
 {
-  "schema_version": 20,
+  "schema_version": 21,
   "job_id": "20260903T194500Z-a7f3c921",
   "state": null,
   "error": {

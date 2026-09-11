@@ -440,7 +440,7 @@ running tasks. Completed work remains in `tasks` history. Attempt output uses
 `attempt_id` and embeds separately captured stdout and stderr streams.
 
 The SQLite tables and canonical evidence retain their implementation-level
-column and field names. Those names are not exposed by the schema-20 CLI. This
+column and field names. Those names are not exposed by the schema-21 CLI. This
 keeps storage mechanics separate from the public vocabulary without adding
 compatibility aliases to the command surface.
 
@@ -492,6 +492,8 @@ Schema version history:
   artifact path.
 - Version 20 marks reviewer sets as supporting the full review and remediation
   workflow in `config show`.
+- Version 21 adds each correlated canonical reviewer result to its completed
+  reviewer task in the `tasks` and `task` views.
 
 The independent audit document schema is version 15. It advances from 14
 because attempt objects no longer carry `run_id`, `invocation_id`, or the
