@@ -1208,3 +1208,93 @@ def test_a_batch_citing_one_result_twice_is_unusable(tmp_path: Path) -> None:
     result = report(tmp_path, [job])
     assert result['reviews']['changes_requested'] == 0
     assert result['findings']['raised'] == 0
+
+
+@pytest.mark.parametrize('directory', ['messages', 'review-batches'])
+def test_a_symlinked_evidence_directory_is_not_followed(
+    tmp_path: Path, directory: str
+) -> None:
+    """
+    Refuse an evidence subdirectory that points outside the evidence root.
+
+    Following one would count whatever JSON it addressed as this job's history,
+    so a fabricated approval placed anywhere readable would enter the report.
+    """
+
+    job, job_directory = make_job(tmp_path, f'symlinked-{directory}')
+    outside = tmp_path / f'outside-{directory}'
+    outside.mkdir()
+    (outside / '000002-review-result.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'message_id': 'fabricated',
+                'run_id': job_directory.name,
+                'sequence': 2,
+                'iteration': 1,
+                'message_type': 'review_result',
+                'created_at': stamp(START + timedelta(hours=1)),
+                'payload': {'verdict': 'approved', 'findings': []},
+            }
+        ),
+        encoding='utf-8',
+    )
+    target = job_directory / directory
+    if target.exists():
+        target.rmdir()
+    target.symlink_to(outside, target_is_directory=True)
+
+    result = report(tmp_path, [job])
+    assert result['reviews']['approved'] == 0
+    assert result['jobs_total'] == 0
+
+
+@pytest.mark.parametrize('members', [None, []])
+def test_an_aggregate_declaring_no_members_is_unusable(
+    tmp_path: Path, members: list[object] | None
+) -> None:
+    """
+    Refuse an aggregate with no reviewers rather than counting it as a verdict.
+
+    An empty citation list satisfies every completeness check by vacuity, so a
+    malformed document would otherwise be reported as a real blocked review.
+    """
+
+    job, directory = make_job(tmp_path, f'no-members-{members is None}')
+    batches = directory / 'review-batches'
+    batches.mkdir()
+    (batches / '000001.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'run_id': directory.name,
+                'iteration': 1,
+                'verdict': 'blocked',
+                **({} if members is None else {'reviewers': members}),
+            }
+        ),
+        encoding='utf-8',
+    )
+    transitions = {
+        str(job.id): (
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.FAILED,
+                scope_digest=DIGEST,
+                occurred_at=START + timedelta(hours=1),
+            ),
+        )
+    }
+    result = report(tmp_path, [job], transitions=transitions)
+    assert result['reviews']['blocked'] == 0
+    assert result['unavailable']['count'] == 1
+
+
+def test_an_overlong_since_value_is_an_invalid_argument() -> None:
+    """Reject a digit string past the interpreter's conversion limit."""
+
+    with pytest.raises(StatsError) as caught:
+        parse_since('9' * 5000 + 'd')
+    assert caught.value.code == 'invalid_since'

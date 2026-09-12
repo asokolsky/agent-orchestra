@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from agent_orchestra.evidence import resolve_evidence_path
+from agent_orchestra.evidence import EvidencePathError, resolve_evidence_path
 from agent_orchestra.manifests import (
     canonical_evidence_type,
     evidence_ordinal,
@@ -84,12 +84,16 @@ def parse_since(value: str) -> timedelta:
     match = SINCE_PATTERN.fullmatch(value.strip())
     if match is None:
         raise StatsError(INVALID_SINCE, code=INVALID_SINCE_CODE)
-    count = int(match.group(1))
-    if count < 1:
-        raise StatsError(INVALID_SINCE, code=INVALID_SINCE_CODE)
     try:
+        # int() itself raises past the interpreter's digit-string limit, so the
+        # conversion belongs inside the guard along with the multiplication.
+        count = int(match.group(1))
+        if count < 1:
+            raise StatsError(INVALID_SINCE, code=INVALID_SINCE_CODE)
         return count * SINCE_UNITS[match.group(2)]
-    except OverflowError as error:
+    except (OverflowError, ValueError) as error:
+        if isinstance(error, StatsError):
+            raise
         # A width no datetime can express is a bad argument, and the caller is
         # owed the documented JSON error rather than a traceback.
         raise StatsError(INVALID_SINCE, code=INVALID_SINCE_CODE) from error
@@ -201,8 +205,31 @@ def _read_document(path: Path) -> dict[str, Any] | None:
     return document if isinstance(document, dict) else None
 
 
+def _contained_children(
+    evidence_root: Path, job_id: str, directory: str
+) -> list[Path] | None:
+    """
+    Return one evidence subdirectory's entries, or None when it is unsafe.
+
+    Every path is rebuilt through the evidence containment API rather than
+    walked from the job directory. A symlinked `messages` or `review-batches`
+    would otherwise be followed out of the evidence root, and whatever JSON it
+    pointed at would be counted as this job's history.
+    """
+
+    try:
+        resolved = resolve_evidence_path(evidence_root, job_id, directory)
+        names = sorted(entry.name for entry in resolved.iterdir())
+        return [
+            resolve_evidence_path(evidence_root, job_id, directory, name)
+            for name in names
+        ]
+    except EvidencePathError, OSError, ValueError:
+        return None
+
+
 def _message_documents(
-    job_directory: Path,
+    evidence_root: Path, job_id: str
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], bool]:
     """
     Return every canonical message in one job, with whether all were read.
@@ -214,10 +241,8 @@ def _message_documents(
     another.
     """
 
-    messages = job_directory / 'messages'
-    try:
-        entries = sorted(messages.iterdir())
-    except OSError:
+    entries = _contained_children(evidence_root, job_id, 'messages')
+    if entries is None:
         return [], False
     documents: list[tuple[str, str, dict[str, Any]]] = []
     complete = True
@@ -241,7 +266,7 @@ def _message_documents(
 
 
 def _batch_documents(
-    job_directory: Path,
+    evidence_root: Path, job_id: str
 ) -> tuple[dict[int, dict[str, Any]], bool]:
     """
     Return each iteration's aggregate decision, keyed by iteration.
@@ -252,10 +277,11 @@ def _batch_documents(
     cannot stand in for it, because a member is never a review on its own.
     """
 
-    batches = job_directory / 'review-batches'
-    try:
-        entries = sorted(batches.iterdir())
-    except OSError:
+    entries = _contained_children(evidence_root, job_id, 'review-batches')
+    if entries is None:
+        # No readable batch directory is the ordinary shape of a job that was
+        # never reviewed by a set. An unsafe one is not, but refusing to read
+        # it is the same conservative outcome either way.
         return {}, True
     documents: dict[int, dict[str, Any]] = {}
     complete = True
@@ -282,7 +308,7 @@ def _iteration_of(document: Mapping[str, Any]) -> int | None:
     return iteration if isinstance(iteration, int) else None
 
 
-def read_job_events(job_directory: Path) -> JobEvents:
+def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
     """
     Read one source-code job's review verdicts and finding dispositions.
 
@@ -303,8 +329,8 @@ def read_job_events(job_directory: Path) -> JobEvents:
     document lowers this job's readability instead of interrupting the scan.
     """
 
-    messages, messages_complete = _message_documents(job_directory)
-    batches, batches_complete = _batch_documents(job_directory)
+    messages, messages_complete = _message_documents(evidence_root, job_id)
+    batches, batches_complete = _batch_documents(evidence_root, job_id)
     readable = messages_complete and batches_complete
 
     members: dict[int, dict[str, tuple[datetime, int | None]]] = {}
@@ -312,7 +338,6 @@ def read_job_events(job_directory: Path) -> JobEvents:
     reviews: list[ReviewEvent] = []
     dispositions: list[DispositionEvent] = []
     undated: list[UndatedReview] = []
-    job_id = job_directory.name
 
     for message_type, relative, document in messages:
         occurred_at = _parse_timestamp(document.get('created_at'))
@@ -387,6 +412,9 @@ def read_job_events(job_directory: Path) -> JobEvents:
         # Only the members this aggregate actually cites may date it. Any other
         # result of the same iteration is not part of this decision.
         cited = _cited_result_paths(document)
+        if cited is None:
+            readable = False
+            continue
         present = {
             relative: value
             for relative, value in members.get(iteration, {}).items()
@@ -475,7 +503,7 @@ def _handoff_relative(document: Mapping[str, Any]) -> str | None:
     return evidence_path('developer_handoff', ordinal=sequence)
 
 
-def _cited_result_paths(document: Mapping[str, Any]) -> list[str]:
+def _cited_result_paths(document: Mapping[str, Any]) -> list[str] | None:
     """
     Return every member result path one aggregate decision references.
 
@@ -492,8 +520,11 @@ def _cited_result_paths(document: Mapping[str, Any]) -> list[str]:
     """
 
     members = document.get('reviewers')
-    if not isinstance(members, list):
-        return []
+    if not isinstance(members, list) or not members:
+        # An aggregate is a decision over members. One that declares none is
+        # malformed, and returning an empty citation list would let it pass the
+        # completeness checks and be counted as a real verdict.
+        return None
     return [
         member['result_path']
         for member in members
@@ -587,15 +618,7 @@ def build_stats_document(
             if reviewed:
                 report_unavailable(job_id, run.error.code)
             continue
-        try:
-            job_directory = resolve_evidence_path(evidence_root, job_id)
-        except OSError, ValueError:
-            job_directory = None
-        events = (
-            read_job_events(job_directory)
-            if job_directory is not None and job_directory.is_dir()
-            else JobEvents((), (), readable=False)
-        )
+        events = read_job_events(evidence_root, job_id)
         # An aggregate no member result can date is placed by the transition
         # that left review, which is the only other durable record of when the
         # verdict happened.
