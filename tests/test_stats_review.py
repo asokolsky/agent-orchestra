@@ -626,6 +626,9 @@ def test_usable_dispositions_keep_a_job_off_the_unavailable_list(
     result = report(tmp_path, [job], transitions=transitions)
     assert result['findings']['addressed'] == 1
     assert result['unavailable']['count'] == 0
+    # The review evidence is unreadable, so durable state places the job.
+    assert result['jobs'] == {'approved': 0, 'changes_requested': 1, 'blocked': 0}
+    assert result['jobs_total'] == 1
 
 
 def test_an_undecodable_job_row_is_reported_not_dropped(tmp_path: Path) -> None:
@@ -1543,3 +1546,37 @@ def test_an_aggregate_completing_after_the_window_is_excluded(
     result = report(tmp_path, [job], transitions=transitions)
     assert result['reviews']['approved'] == 0
     assert result['jobs_total'] == 0
+
+
+def test_a_disposition_without_a_readable_standing_is_reported(
+    tmp_path: Path,
+) -> None:
+    """
+    Report a job that worked in the window but whose verdict cannot be read.
+
+    Both documents are canonical when written, and only the earlier review
+    later becomes unreadable. Counting the disposition while leaving the job
+    out of every total would describe work on a job the document does not
+    admit exists.
+    """
+
+    job, directory = make_job(tmp_path, 'standing-unreadable')
+    write_handoff(
+        directory,
+        sequence=4,
+        dispositions=['addressed'],
+        at=START + timedelta(hours=2),
+    )
+    (directory / 'messages' / '000002-review-result.json').write_text(
+        '{ broken', encoding='utf-8'
+    )
+
+    # No transitions either, so neither evidence nor durable state can place it.
+    result = report(tmp_path, [job])
+    assert result['findings']['addressed'] == 1
+    assert result['unavailable']['count'] == 1
+    assert result['jobs_total'] == 1
+    assert (
+        sum(result['jobs'].values()) + result['unavailable']['count']
+        == (result['jobs_total'])
+    )

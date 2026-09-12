@@ -791,7 +791,7 @@ starts, and the resolved interval is reported back:
 | `reviews` | Object | Verdict events in the window, one per review round. |
 | `findings.raised` | Integer | Findings belonging to those in-window review events. |
 | `findings.addressed` / `rejected` / `blocked` | Integer | Developer disposition events recorded in the window. |
-| `unavailable` | Object | Jobs with in-window review activity whose evidence yielded no usable history, with a count per stable error code. |
+| `unavailable` | Object | Jobs with in-window activity that could not be placed: neither their evidence nor durable state yielded a verdict to classify them by. Counted per stable error code. |
 
 `jobs` values plus `unavailable.count` equal `jobs_total`. `reviews` values do
 not, and are not meant to: a job reviewed three times contributes one job and
@@ -821,8 +821,10 @@ different protocols, so counting them together would report a number that means
 neither.
 
 Unreadable evidence is reported, never dropped. A job whose evidence is
-partially readable contributes every usable event and is not listed; only a job
-yielding no usable history is. A partial report is a success: `error` stays
+partially readable contributes every usable event, and when its own verdict is
+no longer readable the durable transition that left review still places it.
+Only a job that neither can place is listed under `unavailable`, so every job
+with in-window activity is counted exactly once. A partial report is a success: `error` stays
 `null` and the exit status is 0, because unreadable evidence after
 [`prune`](#prune) is an expected state rather than a command failure.
 

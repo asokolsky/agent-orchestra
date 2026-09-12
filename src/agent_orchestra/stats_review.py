@@ -581,6 +581,38 @@ def _review_exits(
     return dict(enumerate(exits, start=1))
 
 
+EXIT_VERDICTS = {
+    RunState.APPROVED: 'approved',
+    RunState.CHANGES_REQUESTED: 'changes_requested',
+    RunState.FAILED: 'blocked',
+}
+
+
+def _standing_from_transitions(
+    transitions: Iterable[JobTransition], end: datetime
+) -> str | None:
+    """
+    Return the verdict durable state last recorded before the window ends.
+
+    A job can do in-window work whose earlier review evidence is no longer
+    readable. The state it moved to when it left review says what that review
+    decided, and it survives in the database when the files do not, so it can
+    still place the job rather than leaving it classified nowhere.
+    """
+
+    # `to_state` is a persisted enum that may still hold an undecoded string,
+    # so it is narrowed before being read as a verdict.
+    exits = sorted(
+        (transition.occurred_at, EXIT_VERDICTS[transition.to_state])
+        for transition in transitions
+        if transition.from_state is RunState.REVIEWING
+        and transition.occurred_at < end
+        and isinstance(transition.to_state, RunState)
+        and transition.to_state in EXIT_VERDICTS
+    )
+    return exits[-1][1] if exits else None
+
+
 def _reviewed_in_window(
     transitions: Iterable[JobTransition], start: datetime, end: datetime
 ) -> bool:
@@ -623,6 +655,7 @@ def build_stats_document(
     """
 
     job_verdicts: dict[str, list[ReviewEvent]] = {}
+    durable_counts: dict[str, str] = {}
     review_counts = dict.fromkeys(VERDICTS, 0)
     finding_counts = {'raised': 0} | dict.fromkeys(DISPOSITIONS, 0)
     unavailable_ids: list[str] = []
@@ -681,6 +714,18 @@ def build_stats_document(
             standing = [review for review in dated if review.occurred_at < end]
             if standing:
                 job_verdicts[job_id] = standing
+                continue
+            # The job did in-window work, so it exists for this report. When no
+            # readable verdict places it, durable state still can; only a job
+            # that neither can place is reported unrecoverable. Counting its
+            # findings while omitting the job entirely would describe work on a
+            # job the document never admits to.
+            durable = _standing_from_transitions(transitions.get(job_id, ()), end)
+            if durable is not None:
+                durable_counts[job_id] = durable
+            else:
+                report_unavailable(job_id, 'invalid_evidence')
+            continue
         # Any usable in-window history keeps a job off the unavailable list,
         # whether it was a verdict or a disposition. Only a job that gave the
         # report nothing is reported as unrecoverable.
@@ -690,6 +735,8 @@ def build_stats_document(
             report_unavailable(job_id, 'invalid_evidence')
 
     job_counts = dict.fromkeys(VERDICTS, 0)
+    for verdict in durable_counts.values():
+        job_counts[verdict] += 1
     for reviews in job_verdicts.values():
         latest = max(reviews, key=lambda review: (review.occurred_at, review.iteration))
         job_counts[latest.verdict] += 1
@@ -701,7 +748,7 @@ def build_stats_document(
             'end': _isoformat(end),
             'timezone': 'UTC',
         },
-        'jobs_total': len(job_verdicts) + len(unavailable_ids),
+        'jobs_total': len(job_verdicts) + len(durable_counts) + len(unavailable_ids),
         'jobs': job_counts,
         'reviews': review_counts,
         'findings': finding_counts,
