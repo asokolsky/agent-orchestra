@@ -1298,3 +1298,95 @@ def test_an_overlong_since_value_is_an_invalid_argument() -> None:
     with pytest.raises(StatsError) as caught:
         parse_since('9' * 5000 + 'd')
     assert caught.value.code == 'invalid_since'
+
+
+def test_an_aggregate_with_a_malformed_member_is_unusable(tmp_path: Path) -> None:
+    """
+    Refuse an aggregate mixing a readable member with an unreadable one.
+
+    Skipping the bad entry would leave the remaining citations self-consistent,
+    so the batch would be counted as a whole decision when part of it cannot be
+    read at all.
+    """
+
+    job, directory = make_job(tmp_path, 'malformed-member')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='changes_requested',
+        at=START + timedelta(hours=2),
+        findings=2,
+        reviewer_id='security',
+    )
+    batches = directory / 'review-batches'
+    batches.mkdir()
+    (batches / '000001.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'run_id': directory.name,
+                'iteration': 1,
+                'verdict': 'changes_requested',
+                'reviewers': [
+                    {
+                        'reviewer_id': 'security',
+                        'outcome': 'changes_requested',
+                        'result_path': ('messages/000002-security-review-result.json'),
+                    },
+                    {},
+                ],
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    result = report(tmp_path, [job])
+    assert result['reviews']['changes_requested'] == 0
+    assert result['findings']['raised'] == 0
+
+
+def test_an_unsafe_batch_directory_is_reported_unavailable(tmp_path: Path) -> None:
+    """
+    Report a reviewed job whose batch directory is unsafe, never omit it.
+
+    An absent `review-batches` is ordinary and says nothing about readability.
+    A symlinked one is damaged evidence, and calling the job fully read would
+    drop it from the report instead of listing it under unavailable.
+    """
+
+    job, job_directory = make_job(tmp_path, 'unsafe-batches')
+    outside = tmp_path / 'outside-batches'
+    outside.mkdir()
+    (job_directory / 'review-batches').symlink_to(outside, target_is_directory=True)
+    transitions = {
+        str(job.id): (
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.APPROVED,
+                scope_digest=DIGEST,
+                occurred_at=START + timedelta(hours=1),
+            ),
+        )
+    }
+    result = report(tmp_path, [job], transitions=transitions)
+    assert result['unavailable']['count'] == 1
+    assert result['jobs_total'] == 1
+
+
+def test_an_absent_batch_directory_is_not_damage(tmp_path: Path) -> None:
+    """Leave a single-reviewer job readable when it has no batch directory."""
+
+    job, directory = make_job(tmp_path, 'no-batches')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='approved',
+        at=START + timedelta(hours=1),
+    )
+    result = report(tmp_path, [job])
+    assert result['reviews']['approved'] == 1
+    assert result['unavailable']['count'] == 0

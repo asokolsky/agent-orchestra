@@ -209,23 +209,26 @@ def _contained_children(
     evidence_root: Path, job_id: str, directory: str
 ) -> list[Path] | None:
     """
-    Return one evidence subdirectory's entries, or None when it is unsafe.
+    Return one evidence subdirectory's entries, or None when it is absent.
 
     Every path is rebuilt through the evidence containment API rather than
     walked from the job directory. A symlinked `messages` or `review-batches`
     would otherwise be followed out of the evidence root, and whatever JSON it
     pointed at would be counted as this job's history.
+
+    Absent and unsafe are different answers and must not collapse into one. A
+    job may legitimately have no `review-batches` at all, but a symlinked one
+    is damaged evidence, so this raises for unsafe and returns None for absent.
     """
 
+    resolved = resolve_evidence_path(evidence_root, job_id, directory)
     try:
-        resolved = resolve_evidence_path(evidence_root, job_id, directory)
         names = sorted(entry.name for entry in resolved.iterdir())
-        return [
-            resolve_evidence_path(evidence_root, job_id, directory, name)
-            for name in names
-        ]
-    except EvidencePathError, OSError, ValueError:
+    except FileNotFoundError:
         return None
+    return [
+        resolve_evidence_path(evidence_root, job_id, directory, name) for name in names
+    ]
 
 
 def _message_documents(
@@ -241,7 +244,10 @@ def _message_documents(
     another.
     """
 
-    entries = _contained_children(evidence_root, job_id, 'messages')
+    try:
+        entries = _contained_children(evidence_root, job_id, 'messages')
+    except EvidencePathError, OSError, ValueError:
+        return [], False
     if entries is None:
         return [], False
     documents: list[tuple[str, str, dict[str, Any]]] = []
@@ -277,11 +283,16 @@ def _batch_documents(
     cannot stand in for it, because a member is never a review on its own.
     """
 
-    entries = _contained_children(evidence_root, job_id, 'review-batches')
+    try:
+        entries = _contained_children(evidence_root, job_id, 'review-batches')
+    except EvidencePathError, OSError, ValueError:
+        # An unsafe or unreadable batch directory is damaged evidence, and
+        # saying the job was fully read would let it drop out of the report
+        # entirely rather than appear under unavailable.
+        return {}, False
     if entries is None:
-        # No readable batch directory is the ordinary shape of a job that was
-        # never reviewed by a set. An unsafe one is not, but refusing to read
-        # it is the same conservative outcome either way.
+        # Having no batch directory is the ordinary shape of a job that was
+        # never reviewed by a set, and says nothing about readability.
         return {}, True
     documents: dict[int, dict[str, Any]] = {}
     complete = True
@@ -525,11 +536,19 @@ def _cited_result_paths(document: Mapping[str, Any]) -> list[str] | None:
         # malformed, and returning an empty citation list would let it pass the
         # completeness checks and be counted as a real verdict.
         return None
-    return [
-        member['result_path']
-        for member in members
-        if isinstance(member, dict) and isinstance(member.get('result_path'), str)
-    ]
+    cited: list[str] = []
+    for member in members:
+        # A member that cannot be read is not a member that can be skipped.
+        # Filtering it out would leave the remaining citations self-consistent,
+        # and the aggregate would count as a whole decision it is not.
+        if not isinstance(member, dict) or 'result_path' not in member:
+            return None
+        result_path = member['result_path']
+        if isinstance(result_path, str):
+            cited.append(result_path)
+        elif result_path is not None:
+            return None
+    return cited
 
 
 def _review_exits(
