@@ -165,8 +165,8 @@ It lets an author choose the failure channel by choosing the command's success
 contract, and lets a caller use one parser for every outcome of a JSON command.
 The version, help, `init`, `enqueue-local`, `enqueue-issue`, and `skills install`
 commands are plain-text commands. `enqueue-locals`, `review-issue`,
-`post-issue-feedback`, `jobs`, `job`, `tasks`, `task`, `audit`, `cancel`, `run`,
-`resume`, `prune`, and `config show` are JSON commands.
+`post-issue-feedback`, `jobs`, `job`, `tasks`, `task`, `audit`, `stats`,
+`cancel`, `run`, `resume`, `prune`, and `config show` are JSON commands.
 
 Argument parsing and usage errors are the deliberate exception. They occur
 before a command's output contract begins, so argparse writes them to stderr.
