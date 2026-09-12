@@ -75,7 +75,7 @@ uv run agent-orchestra --version
 
 ### Running agent-orchestra - option 3
 
-Yet another option is to built the distribution and install it to put
+Yet another option is to build the distribution and install it to put
 `agent-orchestra` in your `PATH`.
 
 ```sh
@@ -88,8 +88,8 @@ All three accept identical arguments; see [Invocation](cli.md#invocation).
 
 ## 1. Install the role skills
 
-Enable agent's use of `agent-orchestra` for various [roles](concepts.md#roles)
-by installing the [`skills`](cli.md#skills):
+Enable agents to use `agent-orchestra` for various [roles](concepts.md#roles) by
+installing the [`skills`](cli.md#skills):
 
 ```shell
 mise agent-orchestra -- skills install \
