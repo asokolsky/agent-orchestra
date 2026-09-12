@@ -12,7 +12,7 @@ the shorter option names `--reviewer-agent` and `--developer-agent`.
 
 ## Invocation
 
-Run the CLI from this repo through mise:
+Run the CLI from a checkout of this repo through mise:
 
 ```shell
 mise agent-orchestra -- COMMAND [OPTIONS]
@@ -24,8 +24,10 @@ After installing the distribution, invoke the entry point directly:
 agent-orchestra COMMAND [OPTIONS]
 ```
 
-Both forms accept the same arguments. Examples below use the installed entry
-point for brevity.
+Both forms accept the same arguments. Runnable examples below use the mise form,
+because the distribution is not yet published to a package index and a checkout
+is how you get the command. Usage synopses omit the prefix so the argument
+grammar stays legible; read `agent-orchestra COMMAND` in those as either form.
 
 Before parsing or running a command, the CLI validates its packaged provider,
 runtime-adapter, and evidence-name manifests. An invalid manifest exits 2 with
@@ -92,13 +94,13 @@ Examples:
 
 ```shell
 # Show global help.
-agent-orchestra --help
+mise agent-orchestra -- --help
 
-# Show the version from the repo through mise.
+# Show the version.
 mise agent-orchestra -- --version
 
 # Query a non-default state database. Global options precede the command.
-agent-orchestra --database /var/tmp/orchestra/state.db jobs
+mise agent-orchestra -- --database /var/tmp/orchestra/state.db jobs
 ```
 
 Example output from `--version` for version `0.1.0`:
@@ -110,6 +112,42 @@ agent-orchestra 0.1.0
 `--version` and valid `--help` requests write plain text to stdout and exit 0.
 Argument syntax errors write argparse usage and a diagnostic to stderr and exit
 2 before a command runs.
+
+## Global settings
+
+Agent Orchestra reads `$XDG_CONFIG_HOME/agent-orchestra/config.toml`, falling
+back to `~/.config/agent-orchestra/config.toml`. The file is optional; unknown
+fields, malformed TOML, invalid paths, and a non-positive duration fail closed.
+
+```toml
+[storage]
+database = "~/.local/state/agent-orchestra/state.db"
+runs_directory = "~/.local/state/agent-orchestra/runs"
+
+[retention]
+job_evidence_days = 90
+
+[reviewer_sets.default]
+members = [
+  { id = "codex", runtime = "codex", model = "gpt-5.6" },
+  { id = "claude", runtime = "claude-code" },
+]
+```
+
+Precedence is command-line option, settings file, then built-in default.
+Environment variables select the XDG location but do not override individual
+values.
+
+### `config`
+
+`config show` reports each effective value and source without creating
+or migrating the database:
+
+```shell
+mise agent-orchestra -- config show
+mise agent-orchestra -- --database /var/lib/orchestra/state.db config show \
+  --runs-directory /var/lib/orchestra/runs
+```
 
 ## Output and failure channels
 
@@ -152,10 +190,10 @@ Examples:
 
 ```shell
 # Initialize the default database.
-agent-orchestra init
+mise agent-orchestra -- init
 
 # Initialize an explicitly selected database.
-agent-orchestra --database /var/tmp/orchestra/state.db init
+mise agent-orchestra -- --database /var/tmp/orchestra/state.db init
 ```
 
 Example output from the second command:
@@ -199,13 +237,13 @@ Examples:
 
 ```shell
 # Capture the current worktree relative to HEAD.
-export JOB_ID="$(agent-orchestra enqueue-local)"
+export JOB_ID="$(mise agent-orchestra -- enqueue-local)"
 
 # Capture a specific worktree relative to origin/main.
-export JOB_ID="$(agent-orchestra enqueue-local --base origin/main /path/to/repo)"
+export JOB_ID="$(mise agent-orchestra -- enqueue-local --base origin/main /path/to/repo)"
 
 # Replace a terminal job that cannot be resumed.
-export JOB_ID="$(agent-orchestra enqueue-local \
+export JOB_ID="$(mise agent-orchestra -- enqueue-local \
   --supersedes 20260903T194500Z-a7f3c921 /path/to/repo)"
 
 # Use the returned job ID in a later command.
@@ -257,10 +295,10 @@ Examples:
 
 ```shell
 # Enqueue changed immediate children and retain the complete result.
-agent-orchestra enqueue-locals ~/PersonalProjects
+mise agent-orchestra -- enqueue-locals ~/PersonalProjects
 
 # Select all created job IDs for further processing.
-agent-orchestra enqueue-locals ~/PersonalProjects \
+mise agent-orchestra -- enqueue-locals ~/PersonalProjects \
   | jq -r '.jobs[].job_id'
 ```
 
@@ -324,7 +362,7 @@ To obtain one job ID, select it explicitly instead of assigning the complete
 document to `JOB_ID`:
 
 ```shell
-export JOB_ID="$(agent-orchestra enqueue-locals ~/PersonalProjects | jq -r '.jobs[0].job_id')"
+export JOB_ID="$(mise agent-orchestra -- enqueue-locals ~/PersonalProjects | jq -r '.jobs[0].job_id')"
 ```
 
 Capture is completed for every candidate before any job is persisted. One
@@ -394,7 +432,7 @@ change a review-relevant issue field first.
 A custom issue reviewer may be supplied for testing or integration:
 
 ```shell
-agent-orchestra review-issue "$JOB_ID" -- /absolute/path/to/reviewer
+mise agent-orchestra -- review-issue "$JOB_ID" -- /absolute/path/to/reviewer
 ```
 
 The command receives request and result paths as its final two arguments and
@@ -427,73 +465,9 @@ stdout. Failures exit 2 and use the stable code `job_not_found` or
 `issue_feedback_failed`. Omitting `--authorize` is a usage error that remains
 plain text on stderr and performs no provider write.
 
-## Global settings
-
-Agent Orchestra reads `$XDG_CONFIG_HOME/agent-orchestra/config.toml`, falling
-back to `~/.config/agent-orchestra/config.toml`. The file is optional; unknown
-fields, malformed TOML, invalid paths, and a non-positive duration fail closed.
-
-```toml
-[storage]
-database = "~/.local/state/agent-orchestra/state.db"
-runs_directory = "~/.local/state/agent-orchestra/runs"
-
-[retention]
-job_evidence_days = 90
-
-[reviewer_sets.default]
-members = [
-  { id = "codex", runtime = "codex", model = "gpt-5.6" },
-  { id = "claude", runtime = "claude-code" },
-]
-```
-
-Precedence is command-line option, settings file, then built-in default.
-Environment variables select the XDG location but do not override individual
-values. `config show` reports each effective value and source without creating
-or migrating the database:
-
-```shell
-agent-orchestra config show
-agent-orchestra --database /var/lib/orchestra/state.db config show \
-  --runs-directory /var/lib/orchestra/runs
-```
-
-Reviewer sets are ordered and named. Each set contains at least two required
-reviewers with unique stable IDs. Runtime identifiers are validated against the
-runtime registry, and vendor attribution is derived from that registry rather
-than configured separately. Optional reviewers and quorum policies are not yet
-supported; `required = false` is rejected. An explicit `[reviewer_sets]` table
-must contain at least one named set. Select a set for one source-code review
-batch with `run --reviewer-set NAME`; its required reviewers execute
-concurrently against the same immutable diff and keep disjoint request, result,
-artifact, stream, runtime-metadata, and invocation evidence. The batch advances
-to approval only when every reviewer approves. A complete changes-requested
-batch launches developer remediation, then sends the amended immutable diff
-through the full reviewer set again. A timed-out, failed, or invalid member
-leaves the batch interrupted; `resume` preserves accepted peer responses and
-retries only incomplete reviewers with incremented attempts. A complete blocked
-batch and a worktree mutation fail terminally. An incomplete or blocked batch
-writes `failure.json` with the stable code `reviewer_batch_incomplete`, whether
-the resulting state is resumable or terminal. If an activated reviewer-set step
-fails unexpectedly, the initial review iteration is terminal `failed`; a later
-remediation iteration returns to `interrupted` so its durable partial work can
-be resumed. Reviewer-set width is the configured member count, with one
-concurrent agent process per member and no separate concurrency cap; operators
-should size sets for available local resources. The canonical aggregate decision
-is stored under `review-batches/`, has a human-readable aggregate artifact under
-`artifacts/`, and is included in audit history. `config show` reports configured
-reviewer sets with a `status` of `"full_workflow"`.
-
-The separate-job fallback remains available when a native reviewer set cannot
-be configured. Freeze the worktree, enqueue one reviewer-only job per reviewer
-against the same base SHA, head SHA, and diff digest, and keep each job's
-evidence under a separate external directory. Do not start developer work until
-all jobs finish; compare their verdicts manually, and invalidate every result if
-the worktree changes. This fallback has no shared lineage or canonical aggregate,
-so prefer `run --reviewer-set` when every required runtime is available.
-
 ## Persistent evidence retention
+
+### `prune`
 
 `prune` is a dry run unless `--apply` is present. `--older-than` accepts a
 positive whole-day duration such as `30d`; otherwise the configured duration is
@@ -502,9 +476,9 @@ eligible, with age taken from the matching terminal transition. Active jobs and
 states requiring human action are always skipped.
 
 ```shell
-agent-orchestra prune
-agent-orchestra prune --older-than 30d
-agent-orchestra prune --older-than 30d --apply
+mise agent-orchestra -- prune
+mise agent-orchestra -- prune --older-than 30d
+mise agent-orchestra -- prune --older-than 30d --apply
 ```
 
 The default action expires external evidence only and retains SQLite history.
@@ -544,6 +518,8 @@ agent-orchestra [--database DATABASE] tasks JOB_ID [--runs-directory DIRECTORY]
 agent-orchestra [--database DATABASE] task TASK_ID [--runs-directory DIRECTORY]
 ```
 
+### `jobs`
+
 `jobs` lists stored jobs newest first. Repeat `--state` to select the union of
 one or more durable states. `--attention` selects the states requiring human
 action: `changes_requested`, `awaiting_commit_authorization`,
@@ -558,11 +534,18 @@ absent; `not_git_worktree` means it exists but is not the root of a Git
 worktree. Unrunnable source-code jobs remain visible in an unfiltered listing
 but are excluded from `jobs --attention`.
 
+### `cancel`
+
 Terminate an unrunnable source-code job explicitly with:
 
 ```text
 agent-orchestra [--database DATABASE] cancel JOB_ID --reason TEXT
 ```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `JOB_ID` | Required | The source-code job to terminate. |
+| `--reason TEXT` | Required | Why the job was cancelled. Recorded on the transition and retained with the job's evidence. |
 
 Cancellation applies only to source-code jobs. It refuses an issue-review job,
 an available worktree, and any job already in a terminal state. It records the
@@ -575,11 +558,20 @@ If a stored job contains a state or scenario unknown to this installation,
 row, and the command exits 2. Single-job views return the same error at the
 document level with the selected `job_id`.
 
+### `job`
+
 `job` returns one job plus a `current`
 array of non-terminal tasks; the array is empty when nothing is pending or
 running. Source-code `job` and `tasks` documents also include every validated
-aggregate reviewer decision in `review_batches`. `tasks` returns complete task
-history. `task` derives the parent job from the globally unique task ID and
+aggregate reviewer decision in `review_batches`.
+
+### `tasks`
+
+`tasks` returns complete task history for one job.
+
+### `task`
+
+`task` derives the parent job from the globally unique task ID and
 returns every attempt, including contained stdout and stderr paths and content.
 A source reviewer task includes its iteration's aggregate decision as
 `review_batch` once that batch is complete.
@@ -668,9 +660,9 @@ aliases. Callers must use the four commands above and the current `job_id`,
 
 The new views do not reproduce the former log-filter flags. Select a task by
 its stable ID, then filter the structured document with `jq`; for example,
-`agent-orchestra tasks "$JOB_ID" | jq '.tasks[] | select(.role == "reviewer")'`
+`mise agent-orchestra -- tasks "$JOB_ID" | jq '.tasks[] | select(.role == "reviewer")'`
 replaces role filtering, and
-`agent-orchestra task "$TASK_ID" | jq '.task.attempts[].streams.stdout'`
+`mise agent-orchestra -- task "$TASK_ID" | jq '.task.attempts[].streams.stdout'`
 selects stdout. Iteration, runtime, attempt ID, and stream are ordinary fields
 in the same documents, so callers can combine filters without another CLI
 schema change.
@@ -742,11 +734,47 @@ Stable finding codes are `integrity_index_missing`,
 objects as the other job views.
 
 ```shell
-agent-orchestra audit "$JOB_ID"
-agent-orchestra audit "$JOB_ID" --verify
-agent-orchestra audit "$JOB_ID" --verify \
+mise agent-orchestra -- audit "$JOB_ID"
+mise agent-orchestra -- audit "$JOB_ID" --verify
+mise agent-orchestra -- audit "$JOB_ID" --verify \
   --runs-directory /var/tmp/orchestra/runs
 ```
+
+## Reviewer sets
+
+Reviewer sets are ordered and named. Each set contains at least two required
+reviewers with unique stable IDs. Runtime identifiers are validated against the
+runtime registry, and vendor attribution is derived from that registry rather
+than configured separately. Optional reviewers and quorum policies are not yet
+supported; `required = false` is rejected. An explicit `[reviewer_sets]` table
+must contain at least one named set. Select a set for one source-code review
+batch with `run --reviewer-set NAME`; its required reviewers execute
+concurrently against the same immutable diff and keep disjoint request, result,
+artifact, stream, runtime-metadata, and invocation evidence. The batch advances
+to approval only when every reviewer approves. A complete changes-requested
+batch launches developer remediation, then sends the amended immutable diff
+through the full reviewer set again. A timed-out, failed, or invalid member
+leaves the batch interrupted; `resume` preserves accepted peer responses and
+retries only incomplete reviewers with incremented attempts. A complete blocked
+batch and a worktree mutation fail terminally. An incomplete or blocked batch
+writes `failure.json` with the stable code `reviewer_batch_incomplete`, whether
+the resulting state is resumable or terminal. If an activated reviewer-set step
+fails unexpectedly, the initial review iteration is terminal `failed`; a later
+remediation iteration returns to `interrupted` so its durable partial work can
+be resumed. Reviewer-set width is the configured member count, with one
+concurrent agent process per member and no separate concurrency cap; operators
+should size sets for available local resources. The canonical aggregate decision
+is stored under `review-batches/`, has a human-readable aggregate artifact under
+`artifacts/`, and is included in audit history. `config show` reports configured
+reviewer sets with a `status` of `"full_workflow"`.
+
+The separate-job fallback remains available when a native reviewer set cannot
+be configured. Freeze the worktree, enqueue one reviewer-only job per reviewer
+against the same base SHA, head SHA, and diff digest, and keep each job's
+evidence under a separate external directory. Do not start developer work until
+all jobs finish; compare their verdicts manually, and invalidate every result if
+the worktree changes. This fallback has no shared lineage or canonical aggregate,
+so prefer `run --reviewer-set` when every required runtime is available.
 
 ## `run`
 
@@ -762,6 +790,7 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--timeout SECONDS` | `1800` | Positive timeout for each reviewer invocation. |
 | `--developer-timeout SECONDS` | `1800` | Positive timeout for each developer remediation invocation. |
 | `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. Bounds remediation rounds, so it has no effect when no developer can be dispatched. |
+| `--reviewer-set NAME` | unset | Run every required reviewer in this configured set as one batch, instead of a single reviewer. See [Reviewer sets](#reviewer-sets). |
 | `--no-remediation` | off | Review once and stop, without dispatching a developer. Rejected when a developer option selects anything other than its default, since no developer can run. |
 | `--developer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for development remediation. |
 | `--developer-model MODEL` | Runtime default | Optional model passed to the developer adapter. |
@@ -783,11 +812,11 @@ Examples:
 
 ```shell
 # Use the default Codex developer and reviewer adapters.
-agent-orchestra run "$JOB_ID" \
+mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review the queued implementation"
 
 # Select adapters, models, and the iteration bound explicitly.
-agent-orchestra run "$JOB_ID" \
+mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review and remediate the queued implementation" \
   --developer-agent claude-code \
   --developer-model sonnet \
@@ -799,7 +828,7 @@ agent-orchestra run "$JOB_ID" \
 Review without remediating, to read the verdict and address it yourself:
 
 ```shell
-agent-orchestra run 20260903T194500Z-a7f3c921 \
+mise agent-orchestra -- run 20260903T194500Z-a7f3c921 \
   --objective 'Review the change.' \
   --no-remediation
 ```
@@ -865,7 +894,7 @@ Append `-- COMMAND [ARGUMENT ...]` to replace the built-in reviewer adapter:
 Example:
 
 ```shell
-agent-orchestra run "$JOB_ID" \
+mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review the queued implementation" \
   -- /absolute/path/to/reviewer --flag
 ```
@@ -929,10 +958,10 @@ Examples:
 
 ```shell
 # Continue a job shown as recoverable by `job`.
-agent-orchestra resume "$JOB_ID"
+mise agent-orchestra -- resume "$JOB_ID"
 
 # Use the same custom evidence root supplied to run.
-agent-orchestra resume "$JOB_ID" --runs-directory /var/tmp/orchestra/runs
+mise agent-orchestra -- resume "$JOB_ID" --runs-directory /var/tmp/orchestra/runs
 ```
 
 Successful output is versioned JSON:
@@ -991,7 +1020,7 @@ Example:
 
 ```shell
 # List the available skills subcommands.
-agent-orchestra skills --help
+mise agent-orchestra -- skills --help
 ```
 
 Example output:
@@ -1026,12 +1055,12 @@ Examples:
 
 ```shell
 # Install both bundled skills for Codex and Claude Code.
-agent-orchestra skills install \
+mise agent-orchestra -- skills install \
   --skill agent-orchestra-developer \
   --skill agent-orchestra-reviewer
 
 # Install only the reviewer skill into an alternate Codex home.
-agent-orchestra skills install \
+mise agent-orchestra -- skills install \
   --agent codex \
   --skill agent-orchestra-reviewer \
   --skill-home codex=/var/tmp/codex
@@ -1071,7 +1100,7 @@ destination is changed.
 Example:
 
 ```shell
-if agent-orchestra job "$JOB_ID" >job-state.json; then
+if mise agent-orchestra -- job "$JOB_ID" >job-state.json; then
   jq -r '.job.state' job-state.json
 else
   exit_code=$?
