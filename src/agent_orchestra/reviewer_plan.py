@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from agent_orchestra.adapter.registry import RuntimeRegistry, RuntimeRole
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.invocations import InvocationIdentity
 from agent_orchestra.schemas import ReviewerExecutionPlanSchema
 
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
     from agent_orchestra.settings import ReviewerSet, Settings
 
 
-class ReviewerPlanError(ValueError):
+class ReviewerPlanError(AgentOrchestraError):
     """Raised when a reviewer execution plan cannot be resolved."""
 
 

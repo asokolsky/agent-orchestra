@@ -20,6 +20,7 @@ from agent_orchestra.attempt_documents import (
 from agent_orchestra.evidence import (
     EVIDENCE_TYPES,
     HASH_CHUNK_SIZE,
+    EvidencePathError,
     WorkerError,
     resolve_evidence_path,
 )
@@ -309,7 +310,7 @@ def _read_index(
             continue
         try:
             resolve_evidence_path(root, job_id, *Path(relative).parts)
-        except ValueError as error:
+        except (EvidencePathError, ValueError) as error:
             findings.append(_finding('evidence_path_escape', str(error), relative))
             continue
         paths.add(relative)
@@ -335,7 +336,7 @@ def _verify_entry(
     document = dict(entry)
     try:
         path = resolve_evidence_path(root, job_id, *Path(relative).parts)
-    except ValueError as error:
+    except (EvidencePathError, ValueError) as error:
         document['status'] = 'escaped'
         return document, _finding('evidence_path_escape', str(error), relative)
     flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
@@ -411,7 +412,13 @@ def _validate_canonical_json(
             execution = EXECUTION_RECORD_ADAPTER.validate_python(execution_raw)
             if isinstance(execution, ReviewerSetExecutionRecordSchema):
                 reviewer_plan = execution.reviewer_plan
-        except (OSError, ValueError, json.JSONDecodeError, ValidationError) as error:
+        except (
+            OSError,
+            EvidencePathError,
+            ValueError,
+            json.JSONDecodeError,
+            ValidationError,
+        ) as error:
             findings.append(
                 _finding('invalid_canonical_json', str(error), 'execution.json')
             )
@@ -445,6 +452,7 @@ def _validate_canonical_json(
                 parsed_batch = REVIEWER_BATCH_RESULT_ADAPTER.validate_python(raw)
             except (
                 OSError,
+                EvidencePathError,
                 ValueError,
                 json.JSONDecodeError,
                 ValidationError,
@@ -464,7 +472,13 @@ def _validate_canonical_json(
             path = resolve_evidence_path(root, str(job.id), *Path(relative).parts)
             raw = json.loads(path.read_text(encoding='utf-8'))
             parsed = schema.model_validate(raw)
-        except (OSError, ValueError, json.JSONDecodeError, ValidationError) as error:
+        except (
+            OSError,
+            EvidencePathError,
+            ValueError,
+            json.JSONDecodeError,
+            ValidationError,
+        ) as error:
             findings.append(_finding('invalid_canonical_json', str(error), relative))
             continue
         document = parsed.model_dump(mode='json')
@@ -848,7 +862,7 @@ def _validate_source_message_chain(root: Path, job: Run) -> list[AuditFinding]:
             str(job.id),
             allow_incomplete_tail=job.state is RunState.INTERRUPTED,
         )
-    except (OSError, ValueError, WorkerError) as error:
+    except (OSError, ValueError, WorkerError, EvidencePathError) as error:
         return [
             _finding(
                 'message_correlation_failure',
@@ -871,7 +885,7 @@ def _tasks(
             if job_directory.is_dir()
             else ()
         )
-    except (InvocationEvidenceError, OSError, ValueError) as error:
+    except (InvocationEvidenceError, EvidencePathError, OSError, ValueError) as error:
         return [], [], [_finding('invalid_invocation_evidence', str(error))]
     grouped: dict[str, list[dict[str, Any]]] = {}
     in_progress: list[dict[str, object]] = []

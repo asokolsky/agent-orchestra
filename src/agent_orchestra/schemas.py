@@ -16,10 +16,11 @@ from pydantic import (
     model_validator,
 )
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.reviewer_paths import REVIEWER_ID_PATTERN
 
 
-class SchemaValidationError(RuntimeError):
+class SchemaValidationError(AgentOrchestraError):
     """Raised when an agent returns an invalid canonical schema document."""
 
 

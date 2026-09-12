@@ -512,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
             ClaudeCodeDeveloperAdapter(parsed.model).execute(
                 parsed.request, parsed.response
             )
-    except (ClaudeCodeReviewerError, DeveloperAdapterError, OSError) as error:
+    except (AdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         if isinstance(error, AdapterError) and error.timed_out:
             # The orchestrator sees only a non-zero exit, so report the reason

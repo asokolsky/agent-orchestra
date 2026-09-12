@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 from agent_orchestra.adapter.registry import RuntimeRole
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import (
     RESUME_ACTIVATION_UNCERTAIN_CODE,
     EvidencePathError,
@@ -46,7 +47,7 @@ INVOCATION_RECORD_ESCAPE = 'invocation record escapes the run directory'
 UNEXPECTED_FIELDS = 'unexpected fields'
 
 
-class InvocationEvidenceError(RuntimeError):
+class InvocationEvidenceError(AgentOrchestraError):
     """Raised when invocation evidence is unsafe or malformed."""
 
 
@@ -441,7 +442,7 @@ def validate_attempt_record(record: InvocationRecord) -> None:
     if record.reviewer_id is not None:
         try:
             reviewer_id = validate_reviewer_id(record.reviewer_id)
-        except ValueError as error:
+        except ReviewerIdentityError as error:
             _fail(str(error), error)
         expected_task_suffix = rf':\d{{6}}-reviewer-{re.escape(reviewer_id)}'
     else:

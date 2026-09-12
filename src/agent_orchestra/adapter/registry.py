@@ -11,6 +11,7 @@ from agent_orchestra.adapter.base import (
     IssueReviewerAdapter,
     ReviewerAdapter,
 )
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.persisted_enum import PersistedEnum
 
 RUNTIME_REGISTRY_EMPTY = 'runtime registry requires non-empty identifiers'
@@ -32,7 +33,7 @@ class RuntimeRole(PersistedEnum):
     ISSUE_REVIEWER = 'issue_reviewer'
 
 
-class RuntimeRegistryError(ValueError):
+class RuntimeRegistryError(AgentOrchestraError):
     """Report a stable runtime lookup or capability failure."""
 
     def __init__(

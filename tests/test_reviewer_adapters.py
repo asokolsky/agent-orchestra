@@ -13,6 +13,7 @@ import pytest
 
 from agent_orchestra.adapter.claude_code import ClaudeCodeReviewerAdapter
 from agent_orchestra.adapter.codex import CodexReviewerAdapter
+from agent_orchestra.adapter.errors import AdapterError
 from agent_orchestra.runtime_metadata import RUNTIME_METADATA_ENV
 
 
@@ -237,5 +238,5 @@ def test_reviewer_adapters_report_stable_execution_failures(
     monkeypatch.setattr(f'{module}.run_streaming_process', fail)
     invoke = run_codex_reviewer if runtime == 'codex' else run_claude_code_reviewer
 
-    with pytest.raises(RuntimeError, match=expected):
+    with pytest.raises(AdapterError, match=expected):
         invoke(request, tmp_path / 'run/response.json')

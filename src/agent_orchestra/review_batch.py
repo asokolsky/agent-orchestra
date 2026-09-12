@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.reviewer_paths import ReviewerIdentityError, validate_reviewer_id
 
 ReviewerOutcome = Literal['approved', 'changes_requested', 'blocked', 'incomplete']
@@ -15,7 +16,7 @@ INVALID_OUTCOME = 'review batch contains an invalid reviewer outcome'
 VALID_OUTCOMES = frozenset(get_args(ReviewerOutcome))
 
 
-class ReviewBatchError(ValueError):
+class ReviewBatchError(AgentOrchestraError):
     """Raised when reviewer outcomes cannot form one valid batch decision."""
 
 

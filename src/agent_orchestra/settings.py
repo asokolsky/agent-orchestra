@@ -14,9 +14,10 @@ from agent_orchestra.adapter.registry import (
     RuntimeRegistryError,
     RuntimeRole,
 )
+from agent_orchestra.errors import AgentOrchestraError
 
 
-class SettingsError(ValueError):
+class SettingsError(AgentOrchestraError):
     """Raised when the global settings file is invalid."""
 
 

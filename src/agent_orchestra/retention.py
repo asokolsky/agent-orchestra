@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import (
     EvidencePathError,
     evidence_root_for_job,
@@ -36,7 +37,7 @@ REQUIRED_DATABASE_COLUMNS = {
 }
 
 
-class RetentionError(RuntimeError):
+class RetentionError(AgentOrchestraError):
     """Raised when a safe prune plan cannot be established or applied."""
 
 

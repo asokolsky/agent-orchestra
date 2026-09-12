@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from agent_orchestra.adapter.registry import RuntimeRegistryError
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.invocations import EffectiveModelStatus, InvocationIdentity
 
 if TYPE_CHECKING:
@@ -17,7 +19,7 @@ if TYPE_CHECKING:
 RUNTIME_METADATA_ENV = 'AGENT_ORCHESTRA_RUNTIME_METADATA_PATH'
 
 
-class RuntimeMetadataError(OSError):
+class RuntimeMetadataError(AgentOrchestraError):
     """Raised when runtime provenance is malformed."""
 
 
@@ -159,6 +161,6 @@ def runtime_metadata_path(
 
     try:
         runtime = registry.require(identity.runtime)
-    except ValueError:
+    except RuntimeRegistryError:
         return None
     return path if runtime.reports_runtime_metadata else None
