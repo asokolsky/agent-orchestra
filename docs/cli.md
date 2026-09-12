@@ -831,6 +831,8 @@ with in-window activity is counted exactly once. A partial report is a success: 
 An invalid `--since` exits 2 with a JSON document whose `error.code` is
 `invalid_since`. Zero, negative, fractional, and unknown units are all
 rejected, as is a count too large to express as a window.
+If the selected database does not exist, the command exits 2 with
+`error.code` `state_database_not_found`.
 
 A job whose database row cannot be decoded is reported under `unavailable`
 using its own stable code, such as `unknown_job_state`, rather than being

@@ -21,6 +21,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ValidationError
+
 from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import (
     EvidencePathError,
@@ -34,6 +36,13 @@ from agent_orchestra.manifests import (
 )
 from agent_orchestra.messages import reviewer_id_from_message_path
 from agent_orchestra.models import Run, RunState
+from agent_orchestra.schemas import (
+    REVIEWER_BATCH_RESULT_ADAPTER,
+    DeveloperHandoffMessageSchema,
+    RemediationRequestMessageSchema,
+    ReviewRequestMessageSchema,
+    ReviewResultMessageSchema,
+)
 from agent_orchestra.store import UnreadableJob
 
 if TYPE_CHECKING:
@@ -59,6 +68,13 @@ INVALID_SINCE = (
 
 VERDICTS = ('approved', 'changes_requested', 'blocked')
 DISPOSITIONS = ('addressed', 'rejected', 'blocked')
+
+MESSAGE_SCHEMAS: dict[str, type[BaseModel]] = {
+    'review_request': ReviewRequestMessageSchema,
+    'review_result': ReviewResultMessageSchema,
+    'remediation_request': RemediationRequestMessageSchema,
+    'developer_handoff': DeveloperHandoffMessageSchema,
+}
 
 
 class StatsError(AgentOrchestraError):
@@ -191,15 +207,38 @@ def _parse_timestamp(value: object) -> datetime | None:
     # An offset-free timestamp parses to a naive datetime, and comparing that
     # with the aware window raises rather than degrading. One malformed
     # document must cost its own job's readability, never the whole report.
-    if parsed.tzinfo is None:
+    return _utc_moment(parsed)
+
+
+def _utc_moment(value: object) -> datetime | None:
+    """Return one offset-aware datetime in UTC, or None when unusable."""
+
+    if not isinstance(value, datetime) or value.tzinfo is None:
         return None
     try:
-        return parsed.astimezone(UTC)
+        return value.astimezone(UTC)
     except OverflowError, OSError, ValueError:
         # A timestamp near the representable boundary can overflow on its way
         # to UTC. That is still one job's unusable evidence, not a reason to
         # abandon the report.
         return None
+
+
+def _unusable_transition_may_be_in_window(
+    value: object, start: datetime, end: datetime
+) -> bool:
+    """Return whether an unusable transition timestamp may affect the window."""
+
+    if not isinstance(value, datetime) or value.tzinfo is not None:
+        return True
+    # A naive database value has lost its offset. ISO 8601 offsets are bounded
+    # to less than one day, so only values within a one-day margin around the
+    # window could represent an in-window instant. This keeps a damaged old or
+    # future row from making the job unavailable in every report forever.
+    margin = timedelta(days=1)
+    naive_start = (start - margin).replace(tzinfo=None)
+    naive_end = (end + margin).replace(tzinfo=None)
+    return naive_start <= value < naive_end
 
 
 def _read_document(path: Path) -> dict[str, Any] | None:
@@ -274,7 +313,16 @@ def _message_documents(
         if document.get('message_type') != declared:
             complete = False
             continue
-        documents.append((declared, relative, document))
+        schema = MESSAGE_SCHEMAS.get(declared)
+        if schema is None:
+            complete = False
+            continue
+        try:
+            parsed = schema.model_validate(document)
+        except ValidationError:
+            complete = False
+            continue
+        documents.append((declared, relative, parsed.model_dump(mode='json')))
     return documents, complete
 
 
@@ -305,12 +353,19 @@ def _batch_documents(
     complete = True
     for path in entries:
         document = _read_document(path)
-        iteration = document.get('iteration') if document is not None else None
         ordinal = evidence_ordinal('review_batch_result', f'review-batches/{path.name}')
-        if document is None or not isinstance(iteration, int) or iteration != ordinal:
+        if document is None:
             complete = False
             continue
-        documents[iteration] = document
+        try:
+            parsed = REVIEWER_BATCH_RESULT_ADAPTER.validate_python(document)
+        except ValidationError:
+            complete = False
+            continue
+        if parsed.iteration != ordinal:
+            complete = False
+            continue
+        documents[parsed.iteration] = parsed.model_dump(mode='json')
     return documents, complete
 
 
@@ -572,13 +627,17 @@ def _review_exits(
     and shift every later round onto the wrong instant.
     """
 
-    exits = sorted(
-        transition.occurred_at
+    completed = (
+        transition
         for transition in transitions
         if transition.from_state is RunState.REVIEWING
         and transition.to_state is not RunState.INTERRUPTED
     )
-    return dict(enumerate(exits, start=1))
+    return {
+        iteration: moment
+        for iteration, transition in enumerate(completed, start=1)
+        if (moment := _utc_moment(transition.occurred_at)) is not None
+    }
 
 
 EXIT_VERDICTS = {
@@ -603,12 +662,13 @@ def _standing_from_transitions(
     # `to_state` is a persisted enum that may still hold an undecoded string,
     # so it is narrowed before being read as a verdict.
     exits = sorted(
-        (transition.occurred_at, EXIT_VERDICTS[transition.to_state])
+        (moment, EXIT_VERDICTS[transition.to_state])
         for transition in transitions
         if transition.from_state is RunState.REVIEWING
-        and transition.occurred_at < end
         and isinstance(transition.to_state, RunState)
         and transition.to_state in EXIT_VERDICTS
+        and (moment := _utc_moment(transition.occurred_at)) is not None
+        and moment < end
     )
     return exits[-1][1] if exits else None
 
@@ -626,10 +686,11 @@ def _reviewed_in_window(
     """
 
     return any(
-        start <= transition.occurred_at < end
-        and transition.from_state is RunState.REVIEWING
-        and transition.to_state is not RunState.INTERRUPTED
+        start <= moment < end
         for transition in transitions
+        if transition.from_state is RunState.REVIEWING
+        and transition.to_state is not RunState.INTERRUPTED
+        and (moment := _utc_moment(transition.occurred_at)) is not None
     )
 
 
@@ -669,11 +730,19 @@ def build_stats_document(
 
     for run in runs:
         job_id = run.job_id if isinstance(run, UnreadableJob) else str(run.id)
-        reviewed = _reviewed_in_window(transitions.get(job_id, ()), start, end)
+        job_transitions = transitions.get(job_id, ())
+        transitions_readable = not any(
+            _utc_moment(transition.occurred_at) is None
+            and _unusable_transition_may_be_in_window(
+                transition.occurred_at, start, end
+            )
+            for transition in job_transitions
+        )
+        reviewed = _reviewed_in_window(job_transitions, start, end)
         if isinstance(run, UnreadableJob):
             # The row cannot be decoded, but its transitions can, so a job with
             # an in-window verdict is reported rather than disappearing.
-            if reviewed:
+            if reviewed or not transitions_readable:
                 report_unavailable(job_id, run.error.code)
             continue
         events = read_job_events(evidence_root, job_id)
@@ -681,7 +750,7 @@ def build_stats_document(
         # which is when it actually completed. Its member results were written
         # before that, so preferring them could place a verdict in a window it
         # did not yet exist in.
-        exits = _review_exits(transitions.get(job_id, ()))
+        exits = _review_exits(job_transitions)
         dated = list(events.reviews)
         for aggregate in events.aggregates:
             moment = exits.get(aggregate.iteration, aggregate.fallback)
@@ -704,13 +773,11 @@ def build_stats_document(
             if start <= disposition.occurred_at < end:
                 finding_counts[disposition.disposition] += 1
                 contributed = True
-        # A job is classified by its standing, which is its latest verdict at
-        # or before the window ends, not only by the verdicts inside it.
-        # Remediation routinely lands in the window after the review it answers,
-        # and counting that job's findings while leaving the job itself out of
-        # every bucket would describe work on a job the document does not admit
-        # exists.
         if contributed:
+            # A job is classified by its standing, which is its latest verdict
+            # at or before the window ends, not only by verdicts inside it.
+            # Remediation routinely lands in a later window, so usable review
+            # or disposition activity must keep the job in the report.
             standing = [review for review in dated if review.occurred_at < end]
             if standing:
                 job_verdicts[job_id] = standing
@@ -720,18 +787,17 @@ def build_stats_document(
             # that neither can place is reported unrecoverable. Counting its
             # findings while omitting the job entirely would describe work on a
             # job the document never admits to.
-            durable = _standing_from_transitions(transitions.get(job_id, ()), end)
+            durable = _standing_from_transitions(job_transitions, end)
             if durable is not None:
                 durable_counts[job_id] = durable
             else:
                 report_unavailable(job_id, 'invalid_evidence')
             continue
-        # Any usable in-window history keeps a job off the unavailable list,
-        # whether it was a verdict or a disposition. Only a job that gave the
-        # report nothing is reported as unrecoverable.
-        if contributed or events.readable:
+        # With no usable in-window history, fully readable sources establish
+        # that this job simply had no event in the window.
+        if events.readable and transitions_readable:
             continue
-        if reviewed:
+        if reviewed or not transitions_readable:
             report_unavailable(job_id, 'invalid_evidence')
 
     job_counts = dict.fromkeys(VERDICTS, 0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -21,6 +22,7 @@ from agent_orchestra.stats_review import (
     StatsError,
     build_stats_document,
     parse_since,
+    read_job_events,
 )
 from agent_orchestra.store import JobStore, PersistedEnumError, UnreadableJob
 
@@ -37,6 +39,37 @@ def stamp(moment: datetime) -> str:
     """Return one canonical message timestamp."""
 
     return moment.isoformat().replace('+00:00', 'Z')
+
+
+def message_id(directory: Path, name: str) -> str:
+    """Return one stable canonical message UUID for a test evidence path."""
+
+    return str(uuid5(NAMESPACE_URL, f'{directory.name}/{name}'))
+
+
+def scope(directory: Path) -> dict[str, str]:
+    """Return one canonical immutable diff scope for a test job."""
+
+    return {
+        'worktree_path': str(directory),
+        'base_sha': 'a' * 40,
+        'head_sha': 'b' * 40,
+        'diff_digest': DIGEST,
+    }
+
+
+def finding(index: int) -> dict[str, object]:
+    """Return one canonical standalone review finding."""
+
+    return {
+        'finding_id': f'f{index}',
+        'severity': 'medium',
+        'title': f'Finding {index}',
+        'path': 'src/example.py',
+        'line': index + 1,
+        'explanation': 'The behavior is incorrect.',
+        'acceptance_criterion': 'Correct the behavior.',
+    }
 
 
 def make_job(tmp_path: Path, name: str) -> tuple[Run, Path]:
@@ -57,7 +90,7 @@ def write_review(
     iteration: int,
     verdict: str,
     at: datetime,
-    findings: int = 0,
+    findings: int | None = None,
     reviewer_id: str | None = None,
 ) -> None:
     """Write one canonical reviewer result message."""
@@ -68,21 +101,32 @@ def write_review(
         if reviewer_id
         else f'{stem}-review-result.json'
     )
+    finding_count = 1 if findings is None and verdict == 'changes_requested' else 0
+    if findings is not None:
+        finding_count = findings
     document: dict[str, Any] = {
         'schema_version': 1,
-        'message_id': f'{directory.name}-{name}',
+        'message_id': message_id(directory, name),
+        'in_reply_to': 'review-request',
         'run_id': directory.name,
         'sequence': sequence,
         'iteration': iteration,
         'message_type': 'review_result',
+        'sender': 'reviewer',
+        'recipient': 'orchestrator',
         'created_at': stamp(at),
+        'scope': scope(directory),
         # No body reviewer_id: the strict envelope has no such field and
         # forbids extras, so reviewer identity is carried only by the filename.
         # Writing one here would let the reader pass on evidence the worker
         # cannot produce.
         'payload': {
             'verdict': verdict,
-            'findings': [{'finding_id': f'f{index}'} for index in range(findings)],
+            'summary': 'Review completed.',
+            'findings': [finding(index) for index in range(finding_count)],
+            'validation': [],
+            'verification_gaps': [],
+            'artifact_path': 'artifacts/review.md',
         },
     }
     (directory / 'messages' / name).write_text(json.dumps(document), encoding='utf-8')
@@ -95,28 +139,59 @@ def write_batch(
     verdict: str,
     findings: int = 0,
     members: tuple[tuple[int, str], ...] = ((2, 'security'), (2, 'portability')),
+    schema_version: int = 3,
 ) -> None:
     """Write one aggregate reviewer-set decision citing its member results."""
 
     batches = directory / 'review-batches'
     batches.mkdir(exist_ok=True)
-    document = {
-        'schema_version': 3,
+    reviewer_ids = [reviewer_id for _, reviewer_id in members]
+    outcomes = {
+        'approved': 'approved',
+        'changes_requested': 'changes_requested',
+        'blocked': 'blocked',
+    }
+    batch_findings = []
+    for index in range(findings):
+        reviewer_id = reviewer_ids[index % len(reviewer_ids)]
+        source = f'f{index}'
+        batch_findings.append(
+            finding(index)
+            | {
+                'finding_id': f'{reviewer_id}:{source}',
+                'reviewer_id': reviewer_id,
+                'source_finding_id': source,
+            }
+        )
+    document: dict[str, Any] = {
+        'schema_version': schema_version,
         'run_id': directory.name,
         'iteration': iteration,
+        'reviewer_set_id': 'default',
+        'aggregation_policy': 'all_required',
+        'diff_digest': DIGEST,
         'verdict': verdict,
-        'findings': [{'finding_id': f'f{index}'} for index in range(findings)],
         'reviewers': [
             {
                 'reviewer_id': reviewer_id,
-                'outcome': verdict,
+                'outcome': outcomes[verdict],
                 'result_path': (
                     f'messages/{sequence:06d}-{reviewer_id}-review-result.json'
                 ),
             }
             for sequence, reviewer_id in members
         ],
+        'changes_requested_by': (
+            reviewer_ids if verdict == 'changes_requested' else []
+        ),
+        'blocked_by': reviewer_ids if verdict == 'blocked' else [],
+        'incomplete_reviewers': [],
     }
+    if schema_version >= 2:
+        document['findings'] = batch_findings
+    if schema_version >= 3:
+        document['message_id'] = message_id(directory, f'batch-{iteration}')
+        document['artifact_path'] = f'artifacts/review-batch-{iteration:04d}.md'
     (batches / f'{iteration:06d}.json').write_text(
         json.dumps(document), encoding='utf-8'
     )
@@ -130,17 +205,26 @@ def write_handoff(
     name = f'{sequence:06d}-developer-handoff.json'
     document = {
         'schema_version': 1,
-        'message_id': f'{directory.name}-{name}',
+        'message_id': message_id(directory, name),
+        'in_reply_to': 'remediation-request',
         'run_id': directory.name,
         'sequence': sequence,
         'iteration': 1,
         'message_type': 'developer_handoff',
+        'sender': 'developer',
+        'recipient': 'orchestrator',
         'created_at': stamp(at),
+        'scope': scope(directory),
         'payload': {
+            'status': 'ready_for_review',
+            'summary': 'Reviewer findings were addressed.',
+            'files_changed': ['src/example.py'],
+            'validation': [],
             'dispositions': [
                 {'finding_id': f'f{index}', 'disposition': value, 'rationale': 'r'}
                 for index, value in enumerate(dispositions)
-            ]
+            ],
+            'remaining_risks': [],
         },
     }
     (directory / 'messages' / name).write_text(json.dumps(document), encoding='utf-8')
@@ -511,6 +595,58 @@ def test_a_naive_timestamp_costs_only_its_own_job(tmp_path: Path) -> None:
     assert result['jobs_total'] == 1
 
 
+def test_a_naive_transition_timestamp_costs_only_its_own_job(tmp_path: Path) -> None:
+    """Report an unusable transition timestamp without aborting the report."""
+
+    job, _ = make_job(tmp_path, 'naive-transition')
+    transitions = {
+        str(job.id): (
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.APPROVED,
+                scope_digest=DIGEST,
+                occurred_at=START.replace(tzinfo=None),
+            ),
+        )
+    }
+
+    result = report(tmp_path, [job], transitions=transitions)
+
+    assert result['unavailable'] == {
+        'count': 1,
+        'job_ids': [str(job.id)],
+        'reasons': {'invalid_evidence': 1},
+    }
+    assert result['jobs_total'] == 1
+
+
+def test_a_naive_transition_outside_the_window_does_not_include_the_job(
+    tmp_path: Path,
+) -> None:
+    """Ignore a damaged transition that cannot represent in-window activity."""
+
+    job, _ = make_job(tmp_path, 'old-naive-transition')
+    transitions = {
+        str(job.id): (
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.APPROVED,
+                scope_digest=DIGEST,
+                occurred_at=(START - timedelta(days=2)).replace(tzinfo=None),
+            ),
+        )
+    }
+
+    result = report(tmp_path, [job], transitions=transitions)
+
+    assert result['unavailable']['count'] == 0
+    assert result['jobs_total'] == 0
+
+
 def test_a_result_from_another_job_is_not_counted(tmp_path: Path) -> None:
     """Refuse a canonical message whose run does not match its directory."""
 
@@ -546,6 +682,53 @@ def test_a_mislabelled_message_is_not_counted(tmp_path: Path) -> None:
     path.write_text(json.dumps(document), encoding='utf-8')
 
     assert report(tmp_path, [job])['findings']['addressed'] == 0
+
+
+def test_an_unsupported_message_schema_is_not_counted(tmp_path: Path) -> None:
+    """Refuse a message declaring a schema version the package cannot read."""
+
+    job, directory = make_job(tmp_path, 'unsupported-message-schema')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='approved',
+        at=START + timedelta(hours=1),
+    )
+    path = directory / 'messages' / '000002-review-result.json'
+    document = json.loads(path.read_text())
+    document['schema_version'] = 999
+    path.write_text(json.dumps(document), encoding='utf-8')
+
+    events = read_job_events(tmp_path / 'runs', str(job.id))
+    assert not events.readable
+    assert not events.reviews
+    assert report(tmp_path, [job])['reviews']['approved'] == 0
+
+
+def test_an_unsupported_batch_schema_is_not_counted(tmp_path: Path) -> None:
+    """Refuse an aggregate declaring a schema version the package cannot read."""
+
+    job, directory = make_job(tmp_path, 'unsupported-batch-schema')
+    for reviewer_id in ('security', 'portability'):
+        write_review(
+            directory,
+            sequence=2,
+            iteration=1,
+            verdict='approved',
+            at=START + timedelta(hours=1),
+            reviewer_id=reviewer_id,
+        )
+    write_batch(directory, iteration=1, verdict='approved')
+    path = directory / 'review-batches' / '000001.json'
+    document = json.loads(path.read_text())
+    document['schema_version'] = 999
+    path.write_text(json.dumps(document), encoding='utf-8')
+
+    events = read_job_events(tmp_path / 'runs', str(job.id))
+    assert not events.readable
+    assert not events.aggregates
+    assert report(tmp_path, [job])['reviews']['approved'] == 0
 
 
 def test_an_unusable_aggregate_does_not_expose_its_members(tmp_path: Path) -> None:
@@ -809,29 +992,7 @@ def test_a_schema_one_aggregate_still_counts(tmp_path: Path) -> None:
             at=at,
             reviewer_id=reviewer_id,
         )
-    batches = directory / 'review-batches'
-    batches.mkdir()
-    (batches / '000001.json').write_text(
-        json.dumps(
-            {
-                'schema_version': 1,
-                'run_id': directory.name,
-                'iteration': 1,
-                'verdict': 'approved',
-                'reviewers': [
-                    {
-                        'reviewer_id': reviewer_id,
-                        'outcome': 'approved',
-                        'result_path': (
-                            f'messages/000002-{reviewer_id}-review-result.json'
-                        ),
-                    }
-                    for reviewer_id in ('security', 'portability')
-                ],
-            }
-        ),
-        encoding='utf-8',
-    )
+    write_batch(directory, iteration=1, verdict='approved', schema_version=1)
 
     result = report(tmp_path, [job])
     assert result['reviews']['approved'] == 1
@@ -869,6 +1030,7 @@ def test_a_blocked_batch_with_an_incomplete_member_still_counts(
     document['reviewers'].append(
         {'reviewer_id': 'portability', 'outcome': 'incomplete', 'result_path': None}
     )
+    document['incomplete_reviewers'] = ['portability']
     path.write_text(json.dumps(document), encoding='utf-8')
 
     result = report(tmp_path, [job])
@@ -933,28 +1095,11 @@ def test_a_schema_one_batch_counts_findings_from_its_members(
             findings=findings,
             reviewer_id=reviewer_id,
         )
-    batches = directory / 'review-batches'
-    batches.mkdir()
-    (batches / '000001.json').write_text(
-        json.dumps(
-            {
-                'schema_version': 1,
-                'run_id': directory.name,
-                'iteration': 1,
-                'verdict': 'changes_requested',
-                'reviewers': [
-                    {
-                        'reviewer_id': reviewer_id,
-                        'outcome': 'changes_requested',
-                        'result_path': (
-                            f'messages/000002-{reviewer_id}-review-result.json'
-                        ),
-                    }
-                    for reviewer_id in ('security', 'portability')
-                ],
-            }
-        ),
-        encoding='utf-8',
+    write_batch(
+        directory,
+        iteration=1,
+        verdict='changes_requested',
+        schema_version=1,
     )
 
     result = report(tmp_path, [job])
@@ -1007,6 +1152,9 @@ def test_an_all_incomplete_blocked_batch_is_dated_from_its_transition(
                 'schema_version': 1,
                 'run_id': directory.name,
                 'iteration': 1,
+                'reviewer_set_id': 'default',
+                'aggregation_policy': 'all_required',
+                'diff_digest': DIGEST,
                 'verdict': 'blocked',
                 'reviewers': [
                     {
@@ -1016,6 +1164,9 @@ def test_an_all_incomplete_blocked_batch_is_dated_from_its_transition(
                     }
                     for reviewer_id in ('security', 'portability')
                 ],
+                'changes_requested_by': [],
+                'blocked_by': [],
+                'incomplete_reviewers': ['security', 'portability'],
             }
         ),
         encoding='utf-8',
@@ -1058,6 +1209,9 @@ def test_an_interrupted_round_does_not_consume_an_iteration(
                 'schema_version': 1,
                 'run_id': directory.name,
                 'iteration': 1,
+                'reviewer_set_id': 'default',
+                'aggregation_policy': 'all_required',
+                'diff_digest': DIGEST,
                 'verdict': 'blocked',
                 'reviewers': [
                     {
@@ -1067,6 +1221,9 @@ def test_an_interrupted_round_does_not_consume_an_iteration(
                     }
                     for reviewer_id in ('security', 'portability')
                 ],
+                'changes_requested_by': [],
+                'blocked_by': [],
+                'incomplete_reviewers': ['security', 'portability'],
             }
         ),
         encoding='utf-8',
@@ -1094,6 +1251,73 @@ def test_an_interrupted_round_does_not_consume_an_iteration(
     result = report(tmp_path, [job], transitions=transitions)
     assert result['reviews']['blocked'] == 1
     assert result['jobs']['blocked'] == 1
+
+
+def test_an_unusable_review_exit_does_not_renumber_later_rounds(
+    tmp_path: Path,
+) -> None:
+    """Keep later aggregates paired with their durable review-exit ordinal."""
+
+    job, directory = make_job(tmp_path, 'unusable-first-exit')
+    write_batch(directory, iteration=1, verdict='blocked', schema_version=1)
+    first_batch = directory / 'review-batches' / '000001.json'
+    first_document = json.loads(first_batch.read_text())
+    for reviewer in first_document['reviewers']:
+        reviewer['outcome'] = 'incomplete'
+        reviewer['result_path'] = None
+    first_document['blocked_by'] = []
+    first_document['incomplete_reviewers'] = ['security', 'portability']
+    first_batch.write_text(json.dumps(first_document), encoding='utf-8')
+
+    for reviewer_id in ('security', 'portability'):
+        write_review(
+            directory,
+            sequence=6,
+            iteration=2,
+            verdict='approved',
+            at=START - timedelta(days=2),
+            reviewer_id=reviewer_id,
+        )
+    write_batch(
+        directory,
+        iteration=2,
+        verdict='approved',
+        members=((6, 'security'), (6, 'portability')),
+        schema_version=1,
+    )
+    transitions = {
+        str(job.id): (
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.FAILED,
+                scope_digest=DIGEST,
+                occurred_at=START.replace(tzinfo=None),
+            ),
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.APPROVED,
+                scope_digest=DIGEST,
+                occurred_at=START + timedelta(hours=1),
+            ),
+        )
+    }
+
+    result = report(tmp_path, [job], transitions=transitions)
+
+    assert result['reviews'] == {
+        'approved': 1,
+        'changes_requested': 0,
+        'blocked': 0,
+    }
+    assert result['jobs'] == {
+        'approved': 1,
+        'changes_requested': 0,
+        'blocked': 0,
+    }
 
 
 def test_an_interruption_alone_is_not_review_activity(tmp_path: Path) -> None:
@@ -1141,28 +1365,11 @@ def test_a_schema_one_batch_with_a_damaged_member_is_unusable(
     document = json.loads(path.read_text())
     del document['payload']['findings']
     path.write_text(json.dumps(document), encoding='utf-8')
-    batches = directory / 'review-batches'
-    batches.mkdir()
-    (batches / '000001.json').write_text(
-        json.dumps(
-            {
-                'schema_version': 1,
-                'run_id': directory.name,
-                'iteration': 1,
-                'verdict': 'changes_requested',
-                'reviewers': [
-                    {
-                        'reviewer_id': reviewer_id,
-                        'outcome': 'changes_requested',
-                        'result_path': (
-                            f'messages/000002-{reviewer_id}-review-result.json'
-                        ),
-                    }
-                    for reviewer_id in ('security', 'portability')
-                ],
-            }
-        ),
-        encoding='utf-8',
+    write_batch(
+        directory,
+        iteration=1,
+        verdict='changes_requested',
+        schema_version=1,
     )
 
     result = report(tmp_path, [job])
@@ -1189,27 +1396,18 @@ def test_a_batch_citing_one_result_twice_is_unusable(tmp_path: Path) -> None:
         findings=2,
         reviewer_id='security',
     )
-    batches = directory / 'review-batches'
-    batches.mkdir()
-    (batches / '000001.json').write_text(
-        json.dumps(
-            {
-                'schema_version': 1,
-                'run_id': directory.name,
-                'iteration': 1,
-                'verdict': 'changes_requested',
-                'reviewers': [
-                    {
-                        'reviewer_id': reviewer_id,
-                        'outcome': 'changes_requested',
-                        'result_path': 'messages/000002-security-review-result.json',
-                    }
-                    for reviewer_id in ('security', 'portability')
-                ],
-            }
-        ),
-        encoding='utf-8',
+    write_batch(
+        directory,
+        iteration=1,
+        verdict='changes_requested',
+        schema_version=1,
     )
+    path = directory / 'review-batches' / '000001.json'
+    document = json.loads(path.read_text())
+    document['reviewers'][1]['result_path'] = (
+        'messages/000002-security-review-result.json'
+    )
+    path.write_text(json.dumps(document), encoding='utf-8')
 
     result = report(tmp_path, [job])
     assert result['reviews']['changes_requested'] == 0
@@ -1267,20 +1465,14 @@ def test_an_aggregate_declaring_no_members_is_unusable(
     """
 
     job, directory = make_job(tmp_path, f'no-members-{members is None}')
-    batches = directory / 'review-batches'
-    batches.mkdir()
-    (batches / '000001.json').write_text(
-        json.dumps(
-            {
-                'schema_version': 1,
-                'run_id': directory.name,
-                'iteration': 1,
-                'verdict': 'blocked',
-                **({} if members is None else {'reviewers': members}),
-            }
-        ),
-        encoding='utf-8',
-    )
+    write_batch(directory, iteration=1, verdict='blocked', schema_version=1)
+    path = directory / 'review-batches' / '000001.json'
+    document = json.loads(path.read_text())
+    if members is None:
+        del document['reviewers']
+    else:
+        document['reviewers'] = members
+    path.write_text(json.dumps(document), encoding='utf-8')
     transitions = {
         str(job.id): (
             JobTransition(
@@ -1325,27 +1517,16 @@ def test_an_aggregate_with_a_malformed_member_is_unusable(tmp_path: Path) -> Non
         findings=2,
         reviewer_id='security',
     )
-    batches = directory / 'review-batches'
-    batches.mkdir()
-    (batches / '000001.json').write_text(
-        json.dumps(
-            {
-                'schema_version': 1,
-                'run_id': directory.name,
-                'iteration': 1,
-                'verdict': 'changes_requested',
-                'reviewers': [
-                    {
-                        'reviewer_id': 'security',
-                        'outcome': 'changes_requested',
-                        'result_path': ('messages/000002-security-review-result.json'),
-                    },
-                    {},
-                ],
-            }
-        ),
-        encoding='utf-8',
+    write_batch(
+        directory,
+        iteration=1,
+        verdict='changes_requested',
+        schema_version=1,
     )
+    path = directory / 'review-batches' / '000001.json'
+    document = json.loads(path.read_text())
+    document['reviewers'][1] = {}
+    path.write_text(json.dumps(document), encoding='utf-8')
 
     result = report(tmp_path, [job])
     assert result['reviews']['changes_requested'] == 0
@@ -1413,31 +1594,16 @@ def test_a_reviewer_set_round_in_the_workers_own_shape_is_counted(
     job, directory = make_job(tmp_path, 'worker-shaped')
     at = START + timedelta(hours=2)
     for reviewer_id in ('security', 'portability'):
-        (
-            directory / 'messages' / f'000002-{reviewer_id}-review-result.json'
-        ).write_text(
-            json.dumps(
-                {
-                    'schema_version': 1,
-                    'message_id': f'message-{reviewer_id}',
-                    'in_reply_to': 'request',
-                    'run_id': directory.name,
-                    'sequence': 2,
-                    'iteration': 1,
-                    'message_type': 'review_result',
-                    'sender': 'reviewer',
-                    'recipient': 'orchestrator',
-                    'created_at': stamp(at),
-                    'scope': {},
-                    'payload': {
-                        'verdict': 'changes_requested',
-                        'findings': [{'finding_id': 'f0'}],
-                        'artifact_path': 'artifacts/review-0001.md',
-                    },
-                }
-            ),
-            encoding='utf-8',
+        write_review(
+            directory,
+            sequence=2,
+            iteration=1,
+            verdict='changes_requested',
+            at=at,
+            reviewer_id=reviewer_id,
         )
+        path = directory / 'messages' / f'000002-{reviewer_id}-review-result.json'
+        assert 'reviewer_id' not in json.loads(path.read_text())
     write_batch(directory, iteration=1, verdict='changes_requested', findings=2)
 
     result = report(tmp_path, [job])

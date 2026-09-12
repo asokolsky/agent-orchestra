@@ -175,6 +175,29 @@ def test_issue_job_records_ordered_transitions_with_source_digest(
     assert all(item.scope_digest == job.source_digest for item in transitions)
 
 
+def test_list_transitions_by_job_groups_selected_histories(tmp_path: Path) -> None:
+    """Read several selected jobs' ordered transitions in one grouped result."""
+
+    store = JobStore(tmp_path / 'state.db')
+    store.initialize()
+    first = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'first')
+    second = Run.create_local(tmp_path, tmp_path, 'base', 'head', 'second')
+    store.add(first)
+    store.add(second)
+    store.update(transition(first, RunState.PREPARING), expected_state=RunState.QUEUED)
+
+    grouped = store.list_transitions_by_job(
+        [str(first.id), str(second.id), 'missing-job']
+    )
+
+    assert [item.to_state for item in grouped[str(first.id)]] == [
+        RunState.QUEUED,
+        RunState.PREPARING,
+    ]
+    assert [item.to_state for item in grouped[str(second.id)]] == [RunState.QUEUED]
+    assert grouped['missing-job'] == ()
+
+
 def test_list_transitions_does_not_create_an_absent_database(tmp_path: Path) -> None:
     """Return empty history without creating storage from a read path."""
 
@@ -222,10 +245,13 @@ def test_list_transitions_reads_run_only_schema_without_migrating(
         )
 
     history = JobStore(database).list_transitions(run.id)
+    grouped = JobStore(database).list_transitions_by_job([str(run.id), 'missing-job'])
 
     assert len(history) == 1
     assert history[0].scenario is ScenarioType.LOCAL_CHANGES
     assert history[0].scope_digest is None
+    assert grouped[str(run.id)] == history
+    assert grouped['missing-job'] == ()
     with sqlite3.connect(database) as connection:
         columns = {
             row[1] for row in connection.execute('PRAGMA table_info(transitions)')

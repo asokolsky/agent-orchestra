@@ -1656,19 +1656,16 @@ def _stats(args: argparse.Namespace, store: JobStore) -> int:
         _write_document(error={'code': INVALID_SINCE_CODE, 'message': INVALID_SINCE})
         return 2
     runs = list(store.list_runs_with_errors())
+    job_ids = [
+        run.job_id if isinstance(run, UnreadableJob) else str(run.id) for run in runs
+    ]
     document = build_stats_document(
         runs,
         evidence_root=args.runs_directory,
         start=start,
         end=end,
         since=args.since.strip(),
-        transitions={
-            job_id: store.list_transitions(job_id)
-            for job_id in (
-                run.job_id if isinstance(run, UnreadableJob) else str(run.id)
-                for run in runs
-            )
-        },
+        transitions=store.list_transitions_by_job(job_ids),
     )
     _write_document(document)
     return 0
