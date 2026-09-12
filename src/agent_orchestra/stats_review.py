@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import (
     EvidencePathError,
     WorkerError,
@@ -60,7 +61,7 @@ VERDICTS = ('approved', 'changes_requested', 'blocked')
 DISPOSITIONS = ('addressed', 'rejected', 'blocked')
 
 
-class StatsError(ValueError):
+class StatsError(AgentOrchestraError):
     """
     Raised when a statistics request cannot be interpreted.
 
@@ -97,8 +98,6 @@ def parse_since(value: str) -> timedelta:
             raise StatsError(INVALID_SINCE, code=INVALID_SINCE_CODE)
         return count * SINCE_UNITS[match.group(2)]
     except (OverflowError, ValueError) as error:
-        if isinstance(error, StatsError):
-            raise
         # A width no datetime can express is a bad argument, and the caller is
         # owed the documented JSON error rather than a traceback.
         raise StatsError(INVALID_SINCE, code=INVALID_SINCE_CODE) from error
