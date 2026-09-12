@@ -18,20 +18,25 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agent_orchestra.evidence import EvidencePathError, resolve_evidence_path
+from agent_orchestra.evidence import (
+    EvidencePathError,
+    WorkerError,
+    resolve_evidence_path,
+)
 from agent_orchestra.manifests import (
     canonical_evidence_type,
     evidence_ordinal,
     evidence_path,
 )
+from agent_orchestra.messages import reviewer_id_from_message_path
 from agent_orchestra.models import Run, RunState
 from agent_orchestra.store import UnreadableJob
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
-    from pathlib import Path
 
     from agent_orchestra.models import JobTransition
 
@@ -368,10 +373,14 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
             continue
         seen_identities.add(identity)
         if message_type == 'review_result':
-            # A body that disagrees with its own filename cannot be placed:
-            # the same document copied under another name would otherwise be
-            # counted twice, or cited as a member that was never written.
-            if iteration is None or _message_relative(document) != relative:
+            # The body must agree with the sequence its filename declares, so a
+            # document copied under another name is neither counted twice nor
+            # accepted as a member that was never written.
+            ordinal = evidence_ordinal('review_result', relative)
+            if iteration is None or ordinal is None:
+                readable = False
+                continue
+            if document.get('sequence') != ordinal:
                 readable = False
                 continue
             member_findings = payload.get('findings')
@@ -386,7 +395,7 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
             # A member of a reviewer set is never a review by itself. Counting
             # one when its aggregate is missing or pruned would turn a single
             # decision into as many reviews as the set had members.
-            if document.get('reviewer_id') is not None:
+            if _member_reviewer(relative) is not None:
                 continue
             verdict = payload.get('verdict')
             findings = payload.get('findings')
@@ -460,22 +469,24 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
     )
 
 
-def _message_relative(document: Mapping[str, Any]) -> str | None:
+def _member_reviewer(relative: str) -> str | None:
     """
-    Return one message's job-relative path as its aggregate would cite it.
+    Return the reviewer a canonical result path is qualified by, if any.
 
-    The path is rebuilt from the manifest rather than taken from the filename
-    so that a member is matched to an aggregate's `result_path` by the same
-    rule that produced it.
+    Reviewer identity lives in the filename. The strict review-result envelope
+    has no `reviewer_id` field and forbids extras, so the body cannot say which
+    member wrote it and the path is the only place that can.
     """
 
-    sequence = document.get('sequence')
-    reviewer_id = document.get('reviewer_id')
-    if not isinstance(sequence, int):
+    try:
+        ordinal = evidence_ordinal('review_result', relative)
+        if ordinal is None:
+            return None
+        return reviewer_id_from_message_path(
+            Path(relative), sequence=ordinal, message_type='review_result'
+        )
+    except WorkerError, ValueError:
         return None
-    if isinstance(reviewer_id, str):
-        return evidence_path('review_result', ordinal=sequence, reviewer_id=reviewer_id)
-    return evidence_path('review_result', ordinal=sequence)
 
 
 def _aggregate_findings(

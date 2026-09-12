@@ -76,7 +76,10 @@ def write_review(
         'iteration': iteration,
         'message_type': 'review_result',
         'created_at': stamp(at),
-        **({'reviewer_id': reviewer_id} if reviewer_id else {}),
+        # No body reviewer_id: the strict envelope has no such field and
+        # forbids extras, so reviewer identity is carried only by the filename.
+        # Writing one here would let the reader pass on evidence the worker
+        # cannot produce.
         'payload': {
             'verdict': verdict,
             'findings': [{'finding_id': f'f{index}'} for index in range(findings)],
@@ -1390,3 +1393,74 @@ def test_an_absent_batch_directory_is_not_damage(tmp_path: Path) -> None:
     result = report(tmp_path, [job])
     assert result['reviews']['approved'] == 1
     assert result['unavailable']['count'] == 0
+
+
+def test_a_reviewer_set_round_in_the_workers_own_shape_is_counted(
+    tmp_path: Path,
+) -> None:
+    """
+    Count a reviewer-set round written exactly as the worker writes it.
+
+    `ReviewResultMessageSchema` has no `reviewer_id` field and forbids extras,
+    so a member result carries its reviewer only in its filename. A reader that
+    looked for identity in the body would reject every real reviewer-set round
+    while synthetic evidence carrying the extra field passed.
+    """
+
+    job, directory = make_job(tmp_path, 'worker-shaped')
+    at = START + timedelta(hours=2)
+    for reviewer_id in ('security', 'portability'):
+        (
+            directory / 'messages' / f'000002-{reviewer_id}-review-result.json'
+        ).write_text(
+            json.dumps(
+                {
+                    'schema_version': 1,
+                    'message_id': f'message-{reviewer_id}',
+                    'in_reply_to': 'request',
+                    'run_id': directory.name,
+                    'sequence': 2,
+                    'iteration': 1,
+                    'message_type': 'review_result',
+                    'sender': 'reviewer',
+                    'recipient': 'orchestrator',
+                    'created_at': stamp(at),
+                    'scope': {},
+                    'payload': {
+                        'verdict': 'changes_requested',
+                        'findings': [{'finding_id': 'f0'}],
+                        'artifact_path': 'artifacts/review-0001.md',
+                    },
+                }
+            ),
+            encoding='utf-8',
+        )
+    write_batch(directory, iteration=1, verdict='changes_requested', findings=2)
+
+    result = report(tmp_path, [job])
+    assert result['reviews']['changes_requested'] == 1
+    assert result['jobs'] == {'approved': 0, 'changes_requested': 1, 'blocked': 0}
+    assert result['findings']['raised'] == 2
+
+
+def test_an_invalid_window_is_reported_without_a_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report an invalid duration whether or not the database exists."""
+
+    assert (
+        cli_module.main(
+            [
+                '--database',
+                str(tmp_path / 'missing.db'),
+                'stats',
+                '--since',
+                '0d',
+                '--runs-directory',
+                str(tmp_path / 'runs'),
+            ]
+        )
+        == 2
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_since'

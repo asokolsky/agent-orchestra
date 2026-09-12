@@ -1632,6 +1632,13 @@ def _stats(args: argparse.Namespace, store: JobStore) -> int:
     lowering the total.
     """
 
+    # The argument is checked before the database, so an invalid window
+    # reports invalid_since whether or not unrelated local state exists.
+    try:
+        width = parse_since(args.since)
+    except StatsError as error:
+        _write_document(error={'code': error.code, 'message': str(error)})
+        return 2
     if not args.database.is_file():
         _write_document(
             error={
@@ -1639,11 +1646,6 @@ def _stats(args: argparse.Namespace, store: JobStore) -> int:
                 'message': f'state database not found: {args.database}',
             }
         )
-        return 2
-    try:
-        width = parse_since(args.since)
-    except StatsError as error:
-        _write_document(error={'code': error.code, 'message': str(error)})
         return 2
     # One clock read for the whole report: a window whose end moved while the
     # scan ran would count an event into a report that does not contain it.
