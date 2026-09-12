@@ -71,6 +71,7 @@ from agent_orchestra.models import (
     ProviderAction,
     Run,
     RunState,
+    utc_now,
 )
 from agent_orchestra.queued_review import (
     run_queued_review,
@@ -91,6 +92,13 @@ from agent_orchestra.reviewer_plan import (
 from agent_orchestra.schemas import REVIEWER_BATCH_RESULT_ADAPTER, SchemaValidationError
 from agent_orchestra.settings import Settings, SettingsError, load_settings
 from agent_orchestra.skill_install import SkillInstallError, install_skills
+from agent_orchestra.stats_review import (
+    INVALID_SINCE,
+    INVALID_SINCE_CODE,
+    StatsError,
+    build_stats_document,
+    parse_since,
+)
 from agent_orchestra.store import (
     ConcurrentUpdateError,
     JobStore,
@@ -376,6 +384,21 @@ def _add_query_commands(
     )
     audit.add_argument('job_id')
     audit.add_argument('--verify', action='store_true')
+
+    stats = commands.add_parser(
+        'stats',
+        help='report review outcomes over a rolling window',
+        parents=[evidence],
+    )
+    stats.add_argument(
+        '--since',
+        required=True,
+        metavar='DURATION',
+        help=(
+            'rolling window ending now, as a whole count of hours, days, '
+            'weeks, or months: 9h, 2d, 1w, 2m'
+        ),
+    )
 
 
 def _add_execution_commands(
@@ -1595,6 +1618,60 @@ def _task(args: argparse.Namespace, store: JobStore) -> int:
     return 0
 
 
+def _stats(args: argparse.Namespace, store: JobStore) -> int:
+    """
+    Report review outcomes for every source-code job in one rolling window.
+
+    Issue-readiness jobs are excluded. A `ready` issue and an `approved` diff
+    are different protocols, and counting them in one total would produce a
+    number that describes neither.
+
+    Rows whose persisted enums cannot be decoded are kept rather than filtered.
+    Their transitions still decode, so a job with a verdict in the window is
+    reported under `unavailable` with its own stable code instead of quietly
+    lowering the total.
+    """
+
+    if not args.database.is_file():
+        _write_document(
+            error={
+                'code': 'state_database_not_found',
+                'message': f'state database not found: {args.database}',
+            }
+        )
+        return 2
+    try:
+        width = parse_since(args.since)
+    except StatsError as error:
+        _write_document(error={'code': error.code, 'message': str(error)})
+        return 2
+    # One clock read for the whole report: a window whose end moved while the
+    # scan ran would count an event into a report that does not contain it.
+    end = utc_now()
+    try:
+        start = end - width
+    except OverflowError:
+        _write_document(error={'code': INVALID_SINCE_CODE, 'message': INVALID_SINCE})
+        return 2
+    runs = list(store.list_runs_with_errors())
+    document = build_stats_document(
+        runs,
+        evidence_root=args.runs_directory,
+        start=start,
+        end=end,
+        since=args.since.strip(),
+        transitions={
+            job_id: store.list_transitions(job_id)
+            for job_id in (
+                run.job_id if isinstance(run, UnreadableJob) else str(run.id)
+                for run in runs
+            )
+        },
+    )
+    _write_document(document)
+    return 0
+
+
 def _audit(args: argparse.Namespace, store: JobStore) -> int:
     """Reconstruct and optionally verify one job's durable local history."""
 
@@ -2059,6 +2136,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911
         return _task(args, store)
     if args.command == 'audit':
         return _audit(args, store)
+    if args.command == 'stats':
+        return _stats(args, store)
     if args.command == 'config' and args.config_command == 'show':
         return _config_show(args, settings, arguments)
     if args.command == 'prune':

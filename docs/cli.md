@@ -740,6 +740,93 @@ mise agent-orchestra -- audit "$JOB_ID" --verify \
   --runs-directory /var/tmp/orchestra/runs
 ```
 
+## `stats`
+
+Report review outcomes across every source-code job in a rolling window:
+
+```text
+agent-orchestra [--database DATABASE] stats --since DURATION
+    [--runs-directory DIRECTORY]
+```
+
+`--since` is required and takes a positive whole count of one unit:
+
+- `h` hours,
+- `d` days,
+- `w` weeks, or
+- `m` months.
+
+`--since 2d` means the preceding 48 hours, not two calendar days,
+and `--since 2m` means the preceding 60 days. A month is
+a fixed 30 days because a calendar month would make the width of the window
+depend on when it was asked for. The window is computed in UTC over the
+half-open interval `[start, end)`, where `end` is read once when the command
+starts, and the resolved interval is reported back:
+
+```json
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "window": {
+    "since": "2d",
+    "start": "2026-09-10T12:00:00Z",
+    "end": "2026-09-12T12:00:00Z",
+    "timezone": "UTC"
+  },
+  "jobs_total": 7,
+  "jobs": {"approved": 3, "changes_requested": 4, "blocked": 0},
+  "reviews": {"approved": 3, "changes_requested": 10, "blocked": 0},
+  "findings": {"raised": 21, "addressed": 18, "rejected": 0, "blocked": 0},
+  "unavailable": {"count": 0, "job_ids": [], "reasons": {}},
+  "error": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `window.since` | String | The requested duration, normalized. |
+| `window.start` / `window.end` | String | Resolved UTC bounds; `start` is included and `end` is excluded. |
+| `jobs_total` | Integer | Distinct source-code jobs with a review event in the window, including any reported unavailable. |
+| `jobs` | Object | Those jobs classified by their latest verdict at or before `window.end`. |
+| `reviews` | Object | Verdict events in the window, one per review round. |
+| `findings.raised` | Integer | Findings belonging to those in-window review events. |
+| `findings.addressed` / `rejected` / `blocked` | Integer | Developer disposition events recorded in the window. |
+| `unavailable` | Object | Jobs with in-window review activity whose evidence yielded no usable history, with a count per stable error code. |
+
+`jobs` values plus `unavailable.count` equal `jobs_total`. `reviews` values do
+not, and are not meant to: a job reviewed three times contributes one job and
+three reviews. That difference is the point of reporting both — `jobs` answers
+where things stand, `reviews` answers how much review happened.
+
+The window counts events, not jobs. A job created before the window still
+contributes when its review falls inside it, and a job created inside the window
+contributes nothing until it is reviewed. A reviewer set's aggregate decision is
+one review; its members' verdicts are a breakdown and never increase `reviews`.
+A review inside the window whose developer disposition happens after it
+contributes to `findings.raised` and not to the disposition counts.
+
+Issue-readiness jobs are excluded. `ready` and a source-code `approved` are
+different protocols, so counting them together would report a number that means
+neither.
+
+Unreadable evidence is reported, never dropped. A job whose evidence is
+partially readable contributes every usable event and is not listed; only a job
+yielding no usable history is. A partial report is a success: `error` stays
+`null` and the exit status is 0, because unreadable evidence after
+[`prune`](#prune) is an expected state rather than a command failure.
+
+An invalid `--since` exits 2 with a JSON document whose `error.code` is
+`invalid_since`. Zero, negative, fractional, and unknown units are all
+rejected, as is a count too large to express as a window.
+
+A job whose database row cannot be decoded is reported under `unavailable`
+using its own stable code, such as `unknown_job_state`, rather than being
+omitted.
+
+```shell
+mise agent-orchestra -- stats --since 7d
+```
+
 ## Reviewer sets
 
 Reviewer sets are ordered and named. Each set contains at least two required
