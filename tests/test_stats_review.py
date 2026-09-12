@@ -1464,3 +1464,82 @@ def test_an_invalid_window_is_reported_without_a_database(
     )
     document = json.loads(capsys.readouterr().out)
     assert document['error']['code'] == 'invalid_since'
+
+
+def test_a_job_remediated_in_the_window_is_classified(tmp_path: Path) -> None:
+    """
+    Classify a job whose review preceded the window but whose work is inside it.
+
+    Remediation routinely lands in the window after the review it answers.
+    Counting those dispositions while leaving the job out of every bucket would
+    report findings addressed for a job the document does not admit exists.
+    """
+
+    job, directory = make_job(tmp_path, 'cross-window')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='changes_requested',
+        at=START - timedelta(hours=6),
+        findings=2,
+    )
+    write_handoff(
+        directory,
+        sequence=4,
+        dispositions=['addressed', 'addressed'],
+        at=START + timedelta(hours=1),
+    )
+
+    result = report(tmp_path, [job])
+    assert result['reviews'] == {
+        'approved': 0,
+        'changes_requested': 0,
+        'blocked': 0,
+    }
+    assert result['findings']['addressed'] == 2
+    assert result['jobs'] == {'approved': 0, 'changes_requested': 1, 'blocked': 0}
+    assert result['jobs_total'] == 1
+    assert (
+        sum(result['jobs'].values()) + result['unavailable']['count']
+        == (result['jobs_total'])
+    )
+
+
+def test_an_aggregate_completing_after_the_window_is_excluded(
+    tmp_path: Path,
+) -> None:
+    """
+    Date a reviewer-set verdict by when it completed, not when a member finished.
+
+    A member can return just before the window ends while aggregation completes
+    just after it. Dating by the member would count a decision that did not yet
+    exist inside the window.
+    """
+
+    job, directory = make_job(tmp_path, 'late-aggregate')
+    for reviewer_id in ('security', 'portability'):
+        write_review(
+            directory,
+            sequence=2,
+            iteration=1,
+            verdict='approved',
+            at=END - timedelta(minutes=1),
+            reviewer_id=reviewer_id,
+        )
+    write_batch(directory, iteration=1, verdict='approved')
+    transitions = {
+        str(job.id): (
+            JobTransition(
+                job_id=str(job.id),
+                scenario=ScenarioType.LOCAL_CHANGES,
+                from_state=RunState.REVIEWING,
+                to_state=RunState.APPROVED,
+                scope_digest=DIGEST,
+                occurred_at=END + timedelta(minutes=1),
+            ),
+        )
+    }
+    result = report(tmp_path, [job], transitions=transitions)
+    assert result['reviews']['approved'] == 0
+    assert result['jobs_total'] == 0

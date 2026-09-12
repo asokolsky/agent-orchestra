@@ -786,8 +786,8 @@ starts, and the resolved interval is reported back:
 |---|---|---|
 | `window.since` | String | The requested duration, normalized. |
 | `window.start` / `window.end` | String | Resolved UTC bounds; `start` is included and `end` is excluded. |
-| `jobs_total` | Integer | Distinct source-code jobs with a review event in the window, including any reported unavailable. |
-| `jobs` | Object | Those jobs classified by their latest verdict at or before `window.end`. |
+| `jobs_total` | Integer | Distinct source-code jobs with any review or disposition event in the window, including any reported unavailable. |
+| `jobs` | Object | Those jobs classified by their standing: the latest verdict at or before `window.end`, which may predate the window. |
 | `reviews` | Object | Verdict events in the window, one per review round. |
 | `findings.raised` | Integer | Findings belonging to those in-window review events. |
 | `findings.addressed` / `rejected` / `blocked` | Integer | Developer disposition events recorded in the window. |
@@ -800,10 +800,21 @@ where things stand, `reviews` answers how much review happened.
 
 The window counts events, not jobs. A job created before the window still
 contributes when its review falls inside it, and a job created inside the window
-contributes nothing until it is reviewed. A reviewer set's aggregate decision is
-one review; its members' verdicts are a breakdown and never increase `reviews`.
-A review inside the window whose developer disposition happens after it
-contributes to `findings.raised` and not to the disposition counts.
+contributes nothing until it is reviewed or worked on. A reviewer set's
+aggregate decision is one review; its members' verdicts are a breakdown and
+never increase `reviews`. A review inside the window whose developer
+disposition happens after it contributes to `findings.raised` and not to the
+disposition counts.
+
+Remediation often lands in a later window than the review it answers, so a job
+whose only in-window activity is a disposition still appears in `jobs`, carrying
+the standing its earlier verdict gave it. `reviews` counts only what happened
+inside the window, which is why the two totals move independently.
+
+A reviewer set's decision is dated by the transition that recorded it, not by
+its member results, which are written before aggregation completes. A batch
+whose last member returns just before the window ends and whose decision lands
+just after it belongs to the later window.
 
 Issue-readiness jobs are excluded. `ready` and a source-code `approved` are
 different protocols, so counting them together would report a number that means

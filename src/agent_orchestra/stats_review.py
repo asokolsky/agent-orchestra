@@ -138,20 +138,23 @@ class DispositionEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class UndatedReview:
+class AggregateReview:
     """
-    One aggregate verdict that no member result can place in time.
+    One reviewer-set verdict, carried out of the reader to be dated.
 
-    Schema 1 permits every member of a reviewer set to be incomplete, which is
-    how a blocked batch with no member result at all was recorded. The verdict
-    is real, so it is carried out of the reader for the caller to date from the
-    durable transition that left review.
+    The aggregate document has no timestamp of its own. Its member results are
+    written before aggregation completes, so dating a decision by them can
+    place it in a window it did not yet exist in. The durable transition that
+    left review is when the decision actually landed, so the caller prefers it
+    and falls back to the newest member result only when no such transition
+    survives.
     """
 
     job_id: str
     iteration: int
     verdict: str
     findings: int
+    fallback: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +170,7 @@ class JobEvents:
 
     reviews: tuple[ReviewEvent, ...]
     dispositions: tuple[DispositionEvent, ...]
-    undated: tuple[UndatedReview, ...] = ()
+    aggregates: tuple[AggregateReview, ...] = ()
     readable: bool = field(kw_only=True)
 
 
@@ -353,7 +356,7 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
     seen_identities: set[str] = set()
     reviews: list[ReviewEvent] = []
     dispositions: list[DispositionEvent] = []
-    undated: list[UndatedReview] = []
+    aggregates: list[AggregateReview] = []
 
     for message_type, relative, document in messages:
         occurred_at = _parse_timestamp(document.get('created_at'))
@@ -447,25 +450,18 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
         if raised is None:
             readable = False
             continue
-        if present:
-            reviews.append(
-                ReviewEvent(
-                    job_id,
-                    iteration,
-                    verdict,
-                    max(moment for moment, _ in present.values()),
-                    raised,
-                )
+        aggregates.append(
+            AggregateReview(
+                job_id,
+                iteration,
+                verdict,
+                raised,
+                max((moment for moment, _ in present.values()), default=None),
             )
-            continue
-        # Schema 1 allows every member to be incomplete, and such a batch is
-        # blocked with no member result to date it. Dropping it would lose the
-        # blocked verdict, so the caller places it from the durable transition
-        # that left review.
-        undated.append(UndatedReview(job_id, iteration, verdict, raised))
+        )
 
     return JobEvents(
-        tuple(reviews), tuple(dispositions), tuple(undated), readable=readable
+        tuple(reviews), tuple(dispositions), tuple(aggregates), readable=readable
     )
 
 
@@ -649,31 +645,43 @@ def build_stats_document(
                 report_unavailable(job_id, run.error.code)
             continue
         events = read_job_events(evidence_root, job_id)
-        # An aggregate no member result can date is placed by the transition
-        # that left review, which is the only other durable record of when the
-        # verdict happened.
+        # A reviewer-set decision is dated by the transition that left review,
+        # which is when it actually completed. Its member results were written
+        # before that, so preferring them could place a verdict in a window it
+        # did not yet exist in.
         exits = _review_exits(transitions.get(job_id, ()))
-        dated = list(events.reviews) + [
-            ReviewEvent(
-                pending.job_id,
-                pending.iteration,
-                pending.verdict,
-                exits[pending.iteration],
-                pending.findings,
-            )
-            for pending in events.undated
-            if pending.iteration in exits
-        ]
+        dated = list(events.reviews)
+        for aggregate in events.aggregates:
+            moment = exits.get(aggregate.iteration, aggregate.fallback)
+            if moment is not None:
+                dated.append(
+                    ReviewEvent(
+                        aggregate.job_id,
+                        aggregate.iteration,
+                        aggregate.verdict,
+                        moment,
+                        aggregate.findings,
+                    )
+                )
         in_window = [review for review in dated if start <= review.occurred_at < end]
         for review in in_window:
             review_counts[review.verdict] += 1
             finding_counts['raised'] += review.findings
-            job_verdicts.setdefault(job_id, []).append(review)
         contributed = bool(in_window)
         for disposition in events.dispositions:
             if start <= disposition.occurred_at < end:
                 finding_counts[disposition.disposition] += 1
                 contributed = True
+        # A job is classified by its standing, which is its latest verdict at
+        # or before the window ends, not only by the verdicts inside it.
+        # Remediation routinely lands in the window after the review it answers,
+        # and counting that job's findings while leaving the job itself out of
+        # every bucket would describe work on a job the document does not admit
+        # exists.
+        if contributed:
+            standing = [review for review in dated if review.occurred_at < end]
+            if standing:
+                job_verdicts[job_id] = standing
         # Any usable in-window history keeps a job off the unavailable list,
         # whether it was a verdict or a disposition. Only a job that gave the
         # report nothing is reported as unrecoverable.
