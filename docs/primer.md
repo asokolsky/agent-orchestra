@@ -245,12 +245,45 @@ ready for another review, use agent-orchestra to capture its updated diff as a
 new job and return the new job ID.
 ```
 
-## Short-circuit the review cycle, steps 2-5
+## 6. Authorize each Git action
 
-To perform steps 2-5 in a cycle until the code is ready for PR:
+Approval leaves the job in `awaiting_commit_authorization` and your worktree
+exactly as the reviewer saw it. Agent-orchestra does not commit, push, or merge.
+Those are yours to ask for, one at a time.
+
+Give each state-changing operation its own instruction, and let it finish before
+you give the next:
 
 ```text
-Use agent-orchestra to review the uncommitted change. Address the feedback and
+Commit the validated changes with a Conventional Commit.
+```
+
+Then, only when publication is intended:
+
+```text
+Push the committed branch and create a pull request. Do not merge it.
+```
+
+Finally, only after checking the live pull-request head, checks, approvals, and
+mergeability:
+
+```text
+Merge <pull-request URL> and verify the resulting default-branch commit.
+```
+
+Keeping them separate is the point, not ceremony. An agent given "commit, push,
+and open a pull request" as one instruction will reasonably carry it through to
+the end, and each step past the commit is harder to undo than the one before it.
+The approval you are acting on binds to the diff that was reviewed, so anything
+that changes the branch after it also invalidates it.
+
+## Short-circuit the review cycle, steps 2-6
+
+To perform steps 2-6 in a cycle, from the uncommitted change through to an open
+pull request:
+
+```text
+Use agent-orchestra to review the uncommitted change. Address the feedback,
 repeat the review until approved. Then commit, push, and create a pull request.
 ```
 
