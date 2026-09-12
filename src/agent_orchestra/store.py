@@ -23,7 +23,7 @@ from agent_orchestra.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 LEGACY_REVIEW_STATE = 'awaiting_review'
 
@@ -566,51 +566,92 @@ class JobStore:
                     'SELECT * FROM transitions WHERE job_id = ? ORDER BY id',
                     (job_id,),
                 ).fetchall()
-        transitions: list[JobTransition] = []
+        return tuple(self._transition_from_row(row) for row in rows)
+
+    def list_transitions_by_job(
+        self, job_ids: Iterable[str]
+    ) -> dict[str, tuple[JobTransition, ...]]:
+        """Return selected jobs' transitions using one database read."""
+
+        selected = set(job_ids)
+        grouped: dict[str, list[JobTransition]] = {job_id: [] for job_id in selected}
+        if not selected or not self.database_path.is_file():
+            return dict.fromkeys(selected, ())
+        with closing(self._connect_read_only()) as connection:
+            columns = {
+                row['name']
+                for row in connection.execute(
+                    'PRAGMA table_info(transitions)'
+                ).fetchall()
+            }
+            if not columns:
+                return dict.fromkeys(selected, ())
+            if 'run_id' in columns:
+                rows = connection.execute(
+                    """SELECT transitions.run_id AS job_id,
+                        COALESCE(runs.scenario, ?) AS scenario,
+                        transitions.from_state, transitions.to_state,
+                        NULL AS scope_digest, transitions.occurred_at
+                    FROM transitions
+                    LEFT JOIN runs ON runs.id = transitions.run_id
+                    ORDER BY transitions.id""",
+                    (ScenarioType.LOCAL_CHANGES,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    'SELECT * FROM transitions ORDER BY id'
+                ).fetchall()
         for row in rows:
-            unrecognized: list[str] = []
-            try:
-                reason = row['reason']
-            except IndexError:
-                reason = None
-            scenario = _decode_transition_enum(
-                ScenarioType,
-                row['scenario'],
-                job_id=row['job_id'],
-                column='scenario',
-                unrecognized=unrecognized,
-            )
-            from_state = (
-                _decode_transition_enum(
-                    RunState,
-                    row['from_state'],
-                    job_id=row['job_id'],
-                    column='from_state',
-                    unrecognized=unrecognized,
-                )
-                if row['from_state'] is not None
-                else None
-            )
-            to_state = _decode_transition_enum(
+            job_id = str(row['job_id'])
+            if job_id in selected:
+                grouped[job_id].append(self._transition_from_row(row))
+        return {job_id: tuple(transitions) for job_id, transitions in grouped.items()}
+
+    @staticmethod
+    def _transition_from_row(row: sqlite3.Row) -> JobTransition:
+        """Decode one persisted transition while retaining unknown enum text."""
+
+        job_id = str(row['job_id'])
+        unrecognized: list[str] = []
+        try:
+            reason = row['reason']
+        except IndexError:
+            reason = None
+        scenario = _decode_transition_enum(
+            ScenarioType,
+            row['scenario'],
+            job_id=job_id,
+            column='scenario',
+            unrecognized=unrecognized,
+        )
+        from_state = (
+            _decode_transition_enum(
                 RunState,
-                row['to_state'],
-                job_id=row['job_id'],
-                column='to_state',
+                row['from_state'],
+                job_id=job_id,
+                column='from_state',
                 unrecognized=unrecognized,
             )
-            transitions.append(
-                JobTransition(
-                    job_id=row['job_id'],
-                    scenario=scenario,
-                    from_state=from_state,
-                    to_state=to_state,
-                    scope_digest=row['scope_digest'],
-                    occurred_at=datetime.fromisoformat(row['occurred_at']),
-                    reason=reason,
-                    unrecognized_fields=tuple(unrecognized),
-                )
-            )
-        return tuple(transitions)
+            if row['from_state'] is not None
+            else None
+        )
+        to_state = _decode_transition_enum(
+            RunState,
+            row['to_state'],
+            job_id=job_id,
+            column='to_state',
+            unrecognized=unrecognized,
+        )
+        return JobTransition(
+            job_id=job_id,
+            scenario=scenario,
+            from_state=from_state,
+            to_state=to_state,
+            scope_digest=row['scope_digest'],
+            occurred_at=datetime.fromisoformat(row['occurred_at']),
+            reason=reason,
+            unrecognized_fields=tuple(unrecognized),
+        )
 
     def interrupted_origin(self, run_id: str) -> RunState:
         """Return the active state from which a run was interrupted."""

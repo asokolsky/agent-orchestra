@@ -72,6 +72,9 @@ the schema, compatibility rules, and stable failure codes.
   tasks, attempts, canonical message summaries, and provider actions for either
   workflow. Optional local verification checks the finalized evidence index and
   hashes without reading process-stream contents or contacting a provider.
+- The implemented [`stats`](docs/cli.md#stats) report summarizes review verdicts,
+  job standing, and finding dispositions across a rolling time window while
+  identifying jobs whose history is unavailable.
 - The implemented [settings and retention commands](docs/cli.md#global-settings)
   provide XDG-aware storage defaults, effective-value inspection, and a
   dry-run-first policy for expiring terminal job evidence. Database cleanup and
