@@ -17,6 +17,7 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.manifests import evidence_path
 from agent_orchestra.models import same_diff_digest
 
@@ -78,7 +79,7 @@ EVIDENCE_TYPES: frozenset[str] = frozenset(
 )
 
 
-class EvidencePathError(ValueError):
+class EvidencePathError(AgentOrchestraError):
     """Raised when evidence cannot be contained beneath its selected job."""
 
 
@@ -566,7 +567,7 @@ RESUME_ACTIVATION_UNCERTAIN_CODE = 'resume_activation_uncertain'
 RESUME_CANCELLED_CODE = 'resume_cancelled'
 
 
-class WorkerError(RuntimeError):
+class WorkerError(AgentOrchestraError):
     """Raised when a queued run cannot complete its review step."""
 
     def __init__(self, message: str, *, code: str | None = None) -> None:
@@ -624,7 +625,7 @@ def worktree_digest(
 
     try:
         return digest_worktree(worktree, base_sha)
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, AgentOrchestraError) as error:
         raise WorkerError(f'cannot compute worktree digest: {error}') from error
 
 

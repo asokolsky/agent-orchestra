@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 
 
-class InvalidTransitionError(ValueError):
+class InvalidTransitionError(AgentOrchestraError):
     """Raised when a workflow transition violates the lifecycle contract."""
 
 
-class ApprovalInvalidationError(ValueError):
+class ApprovalInvalidationError(AgentOrchestraError):
     """Raised when approval cannot be invalidated for a changed diff."""
 
 

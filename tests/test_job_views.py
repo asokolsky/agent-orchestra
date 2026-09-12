@@ -871,6 +871,31 @@ def test_job_view_rejects_invalid_reviewer_batch(
     assert document['error']['code'] == 'invalid_evidence'
 
 
+def test_task_views_normalize_an_invalid_batch_reviewer_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reject an unsafe batch identity before projecting reviewer results."""
+
+    database, job, job_directory = create_job(tmp_path)
+    task_id = add_attempt(job, job_directory, reviewer_id='security')
+    write_review_batch(job, job_directory)
+    batch_path = job_directory / 'review-batches/000001.json'
+    batch = json.loads(batch_path.read_text(encoding='utf-8'))
+    batch['reviewers'][0]['reviewer_id'] = 'bad id!'
+    batch_path.write_text(json.dumps(batch), encoding='utf-8')
+    root = evidence_root_for_job(job_directory)
+
+    for command, identifier in (
+        ('tasks', str(job.id)),
+        ('task', task_id),
+    ):
+        assert main(arguments(database, command, identifier, root)) == 2
+        document = json.loads(capsys.readouterr().out)
+        assert document['error']['code'] == 'invalid_evidence'
+        assert document['job_id'] == str(job.id)
+        assert 'reviewer_id' in document['error']['message']
+
+
 def test_job_view_rejects_uncorrelated_reviewer_batch(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

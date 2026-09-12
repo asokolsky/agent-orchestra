@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from importlib.metadata import version
 from pathlib import Path
 from threading import Barrier, Lock, Thread
@@ -1532,6 +1532,65 @@ def test_job_selects_one_job_by_id(
     assert document['schema_version'] == 23
     assert document['job']['job_id'] == str(first.id)
     assert document['job']['current'] == []
+
+
+def test_tasks_normalizes_an_invalid_reviewer_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Report malformed reviewer invocation evidence as stable JSON."""
+
+    context = create_worker_run(tmp_path)
+    job_id = str(context.run.id)
+    job_directory = evidence_directory(context)
+    invocations_directory = job_directory / 'invocations'
+    invocations_directory.mkdir(parents=True)
+    reviewer_id = 'bad id!'
+    task_id = f'{job_id}:000001-reviewer-{reviewer_id}'
+    record = InvocationRecord(
+        schema_version=5,
+        run_id=job_id,
+        task_id=task_id,
+        invocation_id=f'{task_id}:attempt-0001',
+        role=RuntimeRole.REVIEWER,
+        agent_vendor='openai',
+        requested_model=None,
+        effective_models=(),
+        effective_model_status=invocations.EffectiveModelStatus.UNAVAILABLE,
+        runtime='codex',
+        iteration=1,
+        started_at='2026-09-12T08:00:00Z',
+        finished_at=None,
+        exit_code=None,
+        timed_out=False,
+        interrupted=False,
+        stdout_path='logs/reviewer.stdout.log',
+        stderr_path='logs/reviewer.stderr.log',
+        attempt=1,
+        status=invocations.AttemptStatus.PENDING,
+        conclusion=None,
+        reviewer_id=reviewer_id,
+    )
+    (invocations_directory / 'reviewer.json').write_text(
+        json.dumps(asdict(record)), encoding='utf-8'
+    )
+
+    result = main(
+        [
+            '--database',
+            str(context.database),
+            'tasks',
+            job_id,
+            '--runs-directory',
+            str(context.runs_directory),
+        ]
+    )
+
+    assert result == 2
+    document = json.loads(capsys.readouterr().out)
+    assert document['error'] == {
+        'code': 'invalid_evidence',
+        'message': f'invalid reviewer ID: {reviewer_id!r}',
+    }
 
 
 def test_job_reads_persisted_review_state_without_initializing(

@@ -6,10 +6,11 @@ import json
 from typing import Any
 
 from agent_orchestra.adapter.registry import RuntimeRole
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.manifests import role_assignment
 
 
-class IssueReviewerError(RuntimeError):
+class IssueReviewerError(AgentOrchestraError):
     """Raised when an issue reviewer cannot return a structured result."""
 
     def __init__(

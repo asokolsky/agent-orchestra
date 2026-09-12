@@ -12,6 +12,7 @@ from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
     RuntimeMetadata,
+    RuntimeMetadataError,
     read_runtime_metadata,
 )
 
@@ -98,7 +99,7 @@ class CommandAgentAdapter:
             return RuntimeMetadata()
         try:
             return read_runtime_metadata(path)
-        except OSError:
+        except RuntimeMetadataError:
             return RuntimeMetadata()
         finally:
             with suppress(OSError):

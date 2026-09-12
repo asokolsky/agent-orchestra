@@ -30,6 +30,7 @@ from agent_orchestra.attempt_documents import (
     project_attempt,
 )
 from agent_orchestra.audit import build_audit_document, is_known_temporary
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import (
     EvidencePathError,
     WorkerError,
@@ -167,7 +168,7 @@ def _distribution_version() -> str:
         return '0+unknown'
 
 
-class GitCommandError(RuntimeError):
+class GitCommandError(AgentOrchestraError):
     """Raised when a required read-only Git command fails."""
 
 
@@ -653,6 +654,8 @@ def _enqueue_issue(args: argparse.Namespace, store: JobStore) -> int:
         write_snapshot(root, job.id, snapshot_path, snapshot)
         store.initialize()
         store.add_issue(job)
+    # Keep this boundary explicit: the package root would also convert manifest
+    # contract failures into ordinary provider-enqueue failures.
     except (EvidencePathError, IssueSourceError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 2
@@ -679,6 +682,8 @@ def _review_issue(args: argparse.Namespace, store: JobStore) -> int:
             command=tuple(args.reviewer_command),
             registry=args.runtime_registry,
         )
+    # Keep this boundary explicit: the shared base would also normalize unrelated
+    # package failures as issue-review documents with potentially incorrect codes.
     except (
         RunNotFoundError,
         IssueReviewError,
@@ -1783,6 +1788,8 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
                     developer_identity=developer_identity,
                 ),
             )
+    # Keep this boundary explicit: a package-wide catch here would turn failures
+    # outside the established run contract into versioned run-failure documents.
     except (
         OSError,
         ReviewerPlanError,
@@ -1869,6 +1876,8 @@ def _resume(args: argparse.Namespace, store: JobStore) -> int:
             error_message=f'job changed concurrently: {error}',
         )
         return 2
+    # Keep this boundary explicit: other package failures must not be mislabeled
+    # as invalid resume evidence merely because they share the package root.
     except (IssueReviewError, InvocationEvidenceError, OSError, WorkerError) as error:
         message = str(error)
         code = error.code if isinstance(error, WorkerError) else None

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Never
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import JobEvidence
 from agent_orchestra.manifests import ManifestError, classify_provider_failure
 
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-class IssueSourceError(RuntimeError):
+class IssueSourceError(AgentOrchestraError):
     """Raised when an issue source cannot be resolved safely."""
 
     def __init__(self, code: str, diagnostic: str | None = None) -> None:

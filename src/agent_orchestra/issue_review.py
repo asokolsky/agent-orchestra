@@ -22,6 +22,7 @@ from agent_orchestra.adapter.registry import (
     RuntimeRegistryError,
     RuntimeRole,
 )
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.evidence import (
     EvidencePathError,
     EvidenceType,
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
     from agent_orchestra.store import JobStore
 
 
-class IssueReviewError(RuntimeError):
+class IssueReviewError(AgentOrchestraError):
     """Raised when an issue review cannot be completed safely."""
 
 
@@ -605,6 +606,8 @@ def run_issue_review(
         _finish_invocation(job_directory, record_path, invocation, execution=execution)
         invocation_finished = True
         _write_json(job_directory, result_path, result_document, 'issue_review_result')
+    # Keep this boundary explicit: catching the package root would also convert
+    # unrelated package defects into durable issue-review failure evidence.
     except (
         IssueReviewError,
         IssueReviewerError,

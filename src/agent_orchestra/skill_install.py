@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY, RuntimeRegistry
+from agent_orchestra.errors import AgentOrchestraError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,7 +22,7 @@ INSTALL_MANIFEST = '.agent-orchestra-install.json'
 HASH_CHUNK_SIZE = 1024 * 1024
 
 
-class SkillInstallError(RuntimeError):
+class SkillInstallError(AgentOrchestraError):
     """Raised when a skill installation cannot be completed safely."""
 
 

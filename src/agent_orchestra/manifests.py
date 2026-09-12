@@ -16,6 +16,7 @@ from agent_orchestra.adapter.registry import (
     RuntimeRegistry,
     RuntimeRole,
 )
+from agent_orchestra.errors import AgentOrchestraError
 
 MANIFEST_ENGINE_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
@@ -60,7 +61,7 @@ MESSAGE_EVIDENCE_TYPES = frozenset(
 )
 
 
-class ManifestError(RuntimeError):
+class ManifestError(AgentOrchestraError):
     """Report a stable packaged-manifest loading failure."""
 
     def __init__(self, code: str, manifest_id: str) -> None:

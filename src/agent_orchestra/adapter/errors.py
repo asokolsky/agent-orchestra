@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from agent_orchestra.errors import AgentOrchestraError
 
-class AdapterError(RuntimeError):
+
+class AdapterError(AgentOrchestraError):
     """Raised when a role adapter cannot produce its canonical response."""
 
     def __init__(self, *args: object, timed_out: bool = False) -> None:

@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.manifests import evidence_path
 
 REVIEWER_ID_PATTERN = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
 
 
-class ReviewerIdentityError(ValueError):
+class ReviewerIdentityError(AgentOrchestraError):
     """Raised when a reviewer identifier cannot safely qualify evidence."""
 
 

@@ -17,6 +17,7 @@ from agent_orchestra.adapter.codex import (
     CodexDeveloperAdapter,
     _developer_environment,
 )
+from agent_orchestra.adapter.errors import AdapterError
 from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
@@ -443,7 +444,7 @@ def test_developer_adapters_report_stable_execution_failures(
     monkeypatch.setattr(f'{module}.run_streaming_process', fail)
     invoke = run_codex_developer if runtime == 'codex' else run_claude_code_developer
 
-    with pytest.raises(RuntimeError, match=expected):
+    with pytest.raises(AdapterError, match=expected):
         invoke(request, tmp_path / 'run/response.json')
 
 
@@ -483,7 +484,7 @@ def test_claude_developer_reports_models_before_nonzero_exit(
         ),
     )
 
-    with pytest.raises(RuntimeError, match='failed with code 9'):
+    with pytest.raises(AdapterError, match='failed with code 9'):
         run_claude_code_developer(request, tmp_path / 'run/response.json')
 
     assert read_runtime_metadata(metadata) == RuntimeMetadata(
@@ -509,5 +510,5 @@ def test_codex_developer_rejects_nonpositive_timeout(
         lambda _: pytest.fail('Codex lookup must not occur'),
     )
 
-    with pytest.raises(RuntimeError, match='codex development timed out'):
+    with pytest.raises(AdapterError, match='codex development timed out'):
         run_codex_developer(request, tmp_path / 'run/response.json')

@@ -10,6 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.models import (
     TERMINAL_STATES,
     IssueJob,
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 LEGACY_REVIEW_STATE = 'awaiting_review'
 
 
-class PersistedEnumError(ValueError):
+class PersistedEnumError(AgentOrchestraError):
     """Describe one enum value that this installation cannot interpret."""
 
     def __init__(self, job_id: str, field: str, value: str) -> None:
@@ -93,11 +94,16 @@ def _decode_transition_enum[EnumT: StrEnum](
         return value
 
 
-class RunNotFoundError(LookupError):
-    """Raised when a requested run does not exist."""
+class RunNotFoundError(AgentOrchestraError, LookupError):
+    """
+    Raised when a requested keyed record does not exist.
+
+    ``LookupError`` is retained because callers may reasonably handle a missing
+    persisted record in the same way as another failed keyed lookup.
+    """
 
 
-class ConcurrentUpdateError(RuntimeError):
+class ConcurrentUpdateError(AgentOrchestraError):
     """Raised when persisted state changed before an update completed."""
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.reviewer_paths import (
     ReviewerEvidencePaths,
     ReviewerIdentityError,
@@ -21,7 +22,7 @@ DUPLICATE_REVIEWER_IDS = 'review fan-out contains duplicate reviewer IDs'
 EMPTY_FANOUT = 'review fan-out requires at least two reviewers'
 
 
-class ReviewFanoutError(ValueError):
+class ReviewFanoutError(AgentOrchestraError):
     """Raised when a reviewer batch cannot own disjoint durable evidence."""
 
 

@@ -90,6 +90,13 @@ def test_schema_5_correlates_reviewer_identity() -> None:
         )
 
 
+def test_schema_5_normalizes_an_invalid_reviewer_identity() -> None:
+    """Keep malformed reviewer identities inside the evidence boundary."""
+
+    with pytest.raises(InvocationEvidenceError, match='invalid reviewer ID'):
+        validate_attempt_record(replace(reviewer_attempt(), reviewer_id='bad id!'))
+
+
 def test_schema_5_record_round_trip_preserves_reviewer_id(tmp_path: Path) -> None:
     """Persist and read one reviewer-qualified attempt without losing identity."""
 

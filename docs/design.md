@@ -292,6 +292,26 @@ wrong:
 Refactors that introduce a collaborator change no public document, evidence
 path, or stable error code, and do not move `CLI_SCHEMA_VERSION`.
 
+### Package exception hierarchy
+
+Every exception declared by `agent_orchestra` derives from
+`AgentOrchestraError`, giving callers one package-wide root when a boundary
+deliberately handles every domain failure. Package exceptions do not also
+derive from `ValueError`, `RuntimeError`, or `OSError`: catching one of those
+builtins should not accidentally absorb a domain failure just because of its
+implementation history.
+
+`RunNotFoundError` additionally derives from `LookupError`. A missing run is a
+failed keyed lookup, so retaining that builtin semantic base is deliberate and
+covered by the package hierarchy tests. It is the sole exception to the rule
+against builtin bases.
+
+Most boundaries should catch the narrowest errors they can translate
+correctly, rather than `AgentOrchestraError`. A package-root catch is suitable
+only when every package failure in the protected operation has the same public
+meaning. This keeps an unrelated manifest, evidence, or runtime failure from
+being persisted or reported under the wrong subsystem's error code.
+
 ### Typing a persisted enum value
 
 A value written to durable evidence and read back is typed as its enum, and the
@@ -301,13 +321,13 @@ enum is the only place its legal values are written down. `AttemptStatus`,
 widening. `InvocationRecord` carries those enums directly; there is no parallel
 `Literal` alias and no hand-written value set anywhere.
 
-The reason a persisted value cannot simply be widened is that `EnumT(value)`
-raises `ValueError` for anything this build does not recognize, turning an
-unknown persisted value into an unhandled crash rather than a reported one, the
-failure #43 and #49 removed elsewhere. `decode()` widens through a
-caller-supplied failure function, so each subsystem keeps its own stable domain
-error: `InvocationEvidenceError` for invocation records, `PersistedEnumError`
-from the `store` decode boundary for job state.
+The reason a persisted value cannot simply be widened is that the standard
+library expression `EnumT(value)` raises `ValueError` for anything this build
+does not recognize. That builtin implementation error must not escape the read
+boundary or become a semantic base for the package's own errors. `decode()`
+instead widens through a caller-supplied failure function, so each subsystem
+keeps its own stable domain error: `InvocationEvidenceError` for invocation
+records, `PersistedEnumError` from the `store` decode boundary for job state.
 
 Enum typing therefore depends on the read path passing through such a boundary.
 Invocation evidence has exactly one, where a record is constructed from its
