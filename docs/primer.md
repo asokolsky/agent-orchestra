@@ -1,25 +1,50 @@
 # Primer
 
-This takes you from an unreviewed change to a review you can act on.
+Agent-orchestra enables collaboration of agents from multiple vendors.
 
-For the exhaustive option tables, see the [CLI reference](cli.md). For why the
-tool is shaped this way, see the [design](design.md). This page teaches the
-workflow and links onward rather than repeating either.
+This doc takes you step by step from an un-reviewed change in your repo to a
+reviewed PR.
 
-## Before you start
+## What this tool is for
 
-You need three things:
+Suppose you have a change in your
+[worktree](https://git-scm.com/docs/git-worktree) developed, possibly with
+assistance of an agent. To improve the quality of the code it would be nice to
+request a code review from another agent and then act on its findings. Rinse,
+repeat, until the code is ready for a pull request.
 
-- A Git repository containing the change you want reviewed.
-- A working `codex` or `claude` command, authenticated.
-- The `agent-orchestra` command, which is not published to a package index yet.
-  The next section builds it from a checkout.
+You want:
+
+- [evidence](concepts.md#canonical-messages-and-artifacts) rather than a chat log,
+- bound to an exact [diff digest](concepts.md#jobs-tasks-and-attempts),
+- stored on disk to be inspected afterwards.
+
+Agent-orchestra runs that review as a
+[job](concepts.md#jobs-tasks-and-attempts). It:
+
+- records the diff digest before the reviewer starts,
+- runs the reviewer with only the [capabilities](concepts.md#capabilities) its
+  [role](concepts.md#roles) allows,
+- validates the response against a schema, and
+- writes every request, result, and process stream under a runs directory
+  outside your worktree.
+
+In this scenario nothing is committed or published without a separate, explicit
+decision from you.
+
+## Prerequisites
+
+Before you begin, you need:
+
+- Your own Git repo containing the change you want reviewed,
+  [git worktree](https://git-scm.com/docs/git-worktree) workflow recommended.
+- Agent [runtimes](concepts.md#runtimes) installed and authenticated, e.g. a
+  working `codex` and/or `claude` session.
+- [mise](https://mise.jdx.dev/) to manage the toolchain.
 
 ### Making `agent-orchestra` available
 
-You also need [mise](https://mise.jdx.dev/getting-started.html), which installs
-the rest of the toolchain including `uv`. Then clone this repository, enter it,
-and prepare its dependencies:
+Clone it and install the toolchain:
 
 ```shell
 git clone https://github.com/asokolsky/agent-orchestra.git
@@ -29,12 +54,9 @@ mise install
 uv sync --group dev
 ```
 
-`mise trust` is required before the first `mise install`: mise refuses to read a
-`mise.toml` it has not been told to trust.
+### Running agent-orchestra - option 1
 
-Run the remaining commands from inside that checkout.
-
-Run it through mise, which is how this guide invokes it throughout:
+Run these commands from inside the checkout.
 
 ```shell
 mise agent-orchestra -- --version
@@ -43,45 +65,38 @@ mise agent-orchestra -- --version
 That prints `agent-orchestra 0.1.0`. The `--` separates mise's own arguments
 from the command's.
 
-Two alternatives exist if you prefer them. `uv run agent-orchestra ...` works
-from the checkout without mise, and installing the built distribution
-(`mise run build`, then `uv tool install dist/*.whl`) puts a plain
-`agent-orchestra` on your `PATH`. All three accept identical arguments; see
-[Invocation](cli.md#invocation).
+### Running agent-orchestra - option 2
 
-## What this tool is for
+Alternatively, this works from the checkout without mise:
 
-You have a change in a worktree. You want an agent to review it, and you want
-the review to be evidence rather than a chat log: bound to an exact diff, stored
-on disk, and inspectable afterwards.
+```sh
+uv run agent-orchestra --version
+```
 
-A [worktree](https://git-scm.com/docs/git-worktree) is the directory holding a
-repository's checked-out files. An ordinary clone is one, and that is all this
-guide needs; Git can attach further worktrees to the same repository with
-`git worktree add` when you want several branches checked out at once.
+### Running agent-orchestra - option 3
 
-Agent-orchestra runs that review as a **job**. It records the diff digest before
-the reviewer starts, runs the reviewer with only the capabilities its role
-allows, validates the response against a schema, and writes every request,
-result, and process stream under a runs directory outside your worktree. Nothing
-is committed or published without a separate, explicit decision from you.
+Yet another option is to built the distribution and install it to put
+`agent-orchestra` in your `PATH`.
 
-It is worth reaching for when you want the review recorded and repeatable. It is
-not worth reaching for to ask an agent a quick question about your code.
+```sh
+mise run build
+uv tool install dist/*.whl
+agent-orchestra --version
+```
+
+All three accept identical arguments; see [Invocation](cli.md#invocation).
 
 ## 1. Install the role skills
 
-The reviewer and developer roles read their instructions from an installed
-skill, so install both before the first run:
+Enable agent's use of `agent-orchestra` for various [roles](concepts.md#roles)
+by installing the [`skills`](cli.md#skills):
 
 ```shell
 mise agent-orchestra -- skills install \
   --skill agent-orchestra-developer --skill agent-orchestra-reviewer
 ```
 
-Repeat this after a skill version changes. Where it installs, what it does to an
-existing installation, and how to override a runtime root are documented under
-[`skills`](cli.md#skills).
+Repeat this after a skill version changes.
 
 ## 2. Capture the change
 
@@ -92,17 +107,24 @@ export JOB_ID="$(mise agent-orchestra -- enqueue-local /path/to/repo)"
 printf '%s\n' "$JOB_ID"
 ```
 
+Or ask your agent to do exactly this step:
+
+```text
+Use agent-orchestra to capture the current uncommitted diff in /path/to/repo
+as a new job. Do not start a review or modify the worktree. Return the job ID.
+```
+
 [`enqueue-local`](cli.md#enqueue-local) prints only the job ID, so command
 substitution captures it directly. It records the worktree's current diff and
-starts nothing; what counts as that diff is documented with the command.
-
-The digest captured here is what the review is bound to. If you edit the
-worktree afterwards, the review no longer describes what you have.
+starts nothing. The digest captured here is what the review is bound to. If you
+edit the worktree afterwards, the review no longer describes what you have.
 
 To scan a directory of repositories and enqueue only the dirty ones, use
 [`enqueue-locals`](cli.md#enqueue-locals).
 
-## 3. Review it
+## 3. Request review
+
+Ask the default (Codex) agent to review the uncommitted change:
 
 ```shell
 mise agent-orchestra -- run "$JOB_ID" \
@@ -110,15 +132,25 @@ mise agent-orchestra -- run "$JOB_ID" \
   --no-remediation
 ```
 
+Or ask your agent to do exactly this step:
+
+```text
+Use agent-orchestra to review job <JOB_ID> with the objective "Review the
+queued implementation." Run one review without remediation. Do not modify,
+commit, or publish the worktree. Return the resulting job state.
+```
+
 `--objective` is what the reviewer is asked to judge. Be specific: naming what
 you are unsure about produces a more useful review than "review this".
 
 `--no-remediation` reviews once and stops, which is what you want when you
-intend to address the findings yourself. Without it, a developer is dispatched to
-address what the reviewer raises. Both options, and the bounds on that loop, are
-described under [`run`](cli.md#run).
+intend to address the findings yourself. Without it, a
+[developer](concepts.md#roles) is dispatched to address what the reviewer
+raises. Both options, and the bounds on that loop, are described under
+[`run`](cli.md#run).
 
-To use Claude Code instead of the default Codex adapter:
+To use Claude Code instead of the default Codex
+[adapter](concepts.md#adapters):
 
 ```shell
 mise agent-orchestra -- run "$JOB_ID" \
@@ -126,7 +158,7 @@ mise agent-orchestra -- run "$JOB_ID" \
   --reviewer-agent claude-code --reviewer-model sonnet --no-remediation
 ```
 
-## 4. Read the result
+## 4. Read the review result
 
 The command prints a versioned JSON document ending in the job's state. These
 are the outcomes you will see:
@@ -145,10 +177,10 @@ stays in `reviewing` because nothing about the change has been decided.
 (A reviewer set behaves differently: a batch that comes back blocked fails
 terminally. See [`run`](cli.md#run).)
 
-To see what stopped it, read the reviewer's Markdown review. It has Summary,
-Findings, Validation, and Verification gaps sections, and the rationale for a
-block may be in the summary or the gaps. `audit` reports its job-relative path
-under `evidence` as a `review_artifact`, and it sits beneath the runs directory:
+To see what stopped it, read the review. It has Summary, Findings, Validation,
+and Verification gaps sections, and the rationale for a block may be in the
+summary or the gaps. `audit` reports its job-relative path under `evidence` as a
+`review_artifact`, and it sits beneath the runs directory:
 
 ```shell
 find ~/.local/state/agent-orchestra/runs -path "*$JOB_ID*" -name 'review-0*.md'
@@ -159,8 +191,8 @@ set `[storage].runs_directory` in the settings file, so if the search finds
 nothing, check the effective value with
 `mise agent-orchestra -- config show` and search there instead.
 
-Once you have cleared the obstacle, **start a new review**: capture the
-diff again with `enqueue-local` and run it. The blocked job is not resumed into a
+Once you have cleared the obstacle, **start a new review**: capture the diff
+again with `enqueue-local` and run it. The blocked job is not resumed into a
 fresh review — [`run`](cli.md#run) requires a queued job and will refuse this
 one, and [`resume`](cli.md#resume) revalidates the completed blocked attempt and
 returns the same `reviewing` job rather than launching another reviewer. The
@@ -172,8 +204,19 @@ To see the findings, read the job's evidence:
 mise agent-orchestra -- audit "$JOB_ID"
 ```
 
-[`audit`](cli.md#audit) reports the whole job: every transition, task, attempt,
-and message, with each reviewer verdict and its findings under `history`. Add
+Or ask your agent to do exactly this step:
+
+```text
+Use agent-orchestra to audit job <JOB_ID>. Summarize its state, reviewer
+verdict, findings, validation, verification gaps, and evidence paths. Do not
+modify the worktree or the job.
+```
+
+[`audit`](cli.md#audit) reports the whole
+[job](concepts.md#jobs-tasks-and-attempts): every transition,
+[task and attempt](concepts.md#jobs-tasks-and-attempts), and
+[message](concepts.md#canonical-messages-and-artifacts), with each reviewer
+verdict and its findings under `history`. Add
 `--verify` to hash every stored file and confirm the evidence matches what was
 recorded.
 
@@ -183,19 +226,40 @@ shows one task's attempts including captured stdout and stderr.
 
 ## 5. When changes are requested
 
-The findings are yours to act on. Fix what you agree with in the worktree, then
-capture and review again — a new `enqueue-local` records the new diff, and the
-new job is reviewed against it. The previous job stays on disk as the record of
-what was found the first time.
+The findings are yours or agent's to act on. Fix what you agree with in the
+worktree, then capture and review again — a new `enqueue-local` records the new
+diff, and the new job is reviewed against it. The previous job stays on disk as
+the record of what was found the first time.
 
 Two things deliberately do not happen automatically: nothing is committed, and
 no finding is marked resolved on your say-so. Approval binds to the exact diff
 reviewed, so changing the code invalidates it.
 
+Ask your agent to do exactly this step:
+
+```text
+Read the review findings for job <JOB_ID>. Evaluate each finding, apply the
+valid fixes to /path/to/repo, and run the repo's validation commands. Explain
+any finding you reject. Do not commit or publish anything. When the worktree is
+ready for another review, use agent-orchestra to capture its updated diff as a
+new job and return the new job ID.
+```
+
+## Short-circuit the review cycle, steps 2-5
+
+To perform steps 2-5 in a cycle until the code is ready for PR:
+
+```text
+Use agent-orchestra to review the uncommitted change. Address the feedback and
+repeat the review until approved. Then commit, push, and create a pull request.
+```
+
 ## Where to go next
 
 - [CLI reference](cli.md) — every command, option, and output document.
-- [Concepts](concepts.md) — jobs, tasks, attempts, roles, runtimes, adapters.
+- [Concepts](concepts.md) — [jobs, tasks, and
+  attempts](concepts.md#jobs-tasks-and-attempts), [roles](concepts.md#roles),
+  [runtimes](concepts.md#runtimes), and [adapters](concepts.md#adapters).
 - [Workflows](workflows.md) — the state machine and its recovery paths.
 - [Design](design.md) — why the tool is built this way, and the contracts it
   keeps.
