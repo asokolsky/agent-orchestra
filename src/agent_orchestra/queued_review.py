@@ -31,6 +31,10 @@ from agent_orchestra.agents import (
 from agent_orchestra.evidence import (
     RESUME_EXECUTION_FAILED_CODE,
     RESUME_INTERRUPTED_CODE,
+    REVIEWER_PROVIDER_BUDGET_EXHAUSTED_CODE,
+    REVIEWER_PROVIDER_EXECUTION_FAILED_CODE,
+    REVIEWER_STRUCTURED_OUTPUT_EXHAUSTED_CODE,
+    REVIEWER_TURN_LIMIT_EXHAUSTED_CODE,
     WorkerError,
     archive_unaccepted_response,
     finalize_temporary_path,
@@ -78,6 +82,11 @@ from agent_orchestra.messages import (
 )
 from agent_orchestra.models import Run, RunState, same_diff_digest, utc_now
 from agent_orchestra.runtime_metadata import (
+    PROVIDER_BUDGET_EXHAUSTED,
+    PROVIDER_EXECUTION_FAILED,
+    RETRYABLE_REVIEW_FAILURES,
+    STRUCTURED_OUTPUT_EXHAUSTED,
+    TURN_LIMIT_EXHAUSTED,
     exception_runtime_metadata,
     runtime_metadata_path,
 )
@@ -85,6 +94,12 @@ from agent_orchestra.workflow import transition
 
 DEVELOPER_DISAGREEMENT = 'developer disputed every finding without changing the diff'
 EMPTY_COMMAND = 'reviewer command must not be empty'
+REVIEW_FAILURE_ERROR_CODES = {
+    PROVIDER_BUDGET_EXHAUSTED: REVIEWER_PROVIDER_BUDGET_EXHAUSTED_CODE,
+    PROVIDER_EXECUTION_FAILED: REVIEWER_PROVIDER_EXECUTION_FAILED_CODE,
+    STRUCTURED_OUTPUT_EXHAUSTED: REVIEWER_STRUCTURED_OUTPUT_EXHAUSTED_CODE,
+    TURN_LIMIT_EXHAUSTED: REVIEWER_TURN_LIMIT_EXHAUSTED_CODE,
+}
 
 
 def _run_queued_review(
@@ -443,8 +458,22 @@ def _run_queued_review(
                     conclusion=failure_conclusion(completed.timed_out)
                 ),
             )
-            failed = transition(reviewing, RunState.FAILED)
-            store.update(failed, expected_state=RunState.REVIEWING)
+            retryable = completed.failure_code in RETRYABLE_REVIEW_FAILURES
+            stopped = transition(
+                reviewing, RunState.INTERRUPTED if retryable else RunState.FAILED
+            )
+            store.update(stopped, expected_state=RunState.REVIEWING)
+            if completed.failure_code in REVIEW_FAILURE_ERROR_CODES:
+                diagnostic = completed.failure_message or 'reviewer execution failed'
+                retry_action = (
+                    '; resume the interrupted job to retry the same review request'
+                    if retryable
+                    else ''
+                )
+                raise WorkerError(
+                    f'{diagnostic}{retry_action}',
+                    code=REVIEW_FAILURE_ERROR_CODES[completed.failure_code],
+                )
             raise WorkerError(
                 f'reviewer exited with code {completed.exit_code}',
                 code=RESUME_EXECUTION_FAILED_CODE,

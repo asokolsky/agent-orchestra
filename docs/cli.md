@@ -860,7 +860,9 @@ leaves the batch interrupted; `resume` preserves accepted peer responses and
 retries only incomplete reviewers with incremented attempts. A complete blocked
 batch and a worktree mutation fail terminally. An incomplete or blocked batch
 writes `failure.json` with the stable code `reviewer_batch_incomplete`, whether
-the resulting state is resumable or terminal. If an activated reviewer-set step
+the resulting state is resumable or terminal. When a member reports classified
+failure metadata, that member's diagnostic is included in the human-readable
+error message. If an activated reviewer-set step
 fails unexpectedly, the initial review iteration is terminal `failed`; a later
 remediation iteration returns to `interrupted` so its durable partial work can
 be resumed. Reviewer-set width is the configured member count, with one
@@ -989,6 +991,21 @@ not report effective model identity; Codex records therefore use
 `effective_model_status: "unavailable"` without guessing from defaults or
 human-formatted output. Custom commands use the same explicit unknown state.
 
+Claude Code reviewer profiles request the documented `dontAsk` permission mode.
+With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, Claude Code's hardening currently
+reports the effective mode as `default`; an installed-CLI test pins that
+behavior. The explicit `dontAsk` input remains intentional: it is a documented
+headless mode, while the environment scrub is responsible for any effective
+override. The reviewer sandbox, narrowed tool list, and explicit allowed-tool
+rules remain the enforcement boundary.
+
+Known nonzero Claude result subtypes are translated into provider-neutral
+runtime metadata. Its structured failure message retains safe diagnostics when
+present: turn count, total estimated cost, and the names of denied tools. The
+complete provider envelope remains in the invocation stdout log. This avoids
+adding Claude-specific fields to the shared invocation schema while keeping the
+operator-facing failure actionable.
+
 ### Custom reviewer command
 
 Append `-- COMMAND [ARGUMENT ...]` to replace the built-in reviewer adapter:
@@ -1093,14 +1110,35 @@ An expected failure also remains JSON on stdout and exits 2:
 }
 ```
 
-Stable error codes are `state_database_not_found`, `job_not_found`,
-`job_not_resumable`, `concurrent_update`, `resume_metadata_unsupported`,
-`resume_scope_changed`, `resume_interrupted`,
-`resume_execution_failed`, `resume_activation_uncertain`, `resume_cancelled`, and
-`resume_evidence_invalid`.
-Historical jobs whose
-`execution.json` lacks the version 2 resume context fail closed with
-`resume_metadata_unsupported`; start an explicitly linked replacement with
+Stable error codes are:
+
+- `state_database_not_found`,
+- `job_not_found`,
+- `job_not_resumable`,
+- `concurrent_update`,
+- `resume_metadata_unsupported`,
+- `resume_scope_changed`,
+- `resume_interrupted`,
+- `resume_execution_failed`,
+- `reviewer_provider_budget_exhausted`,
+- `reviewer_provider_execution_failed`,
+- `reviewer_structured_output_exhausted`,
+- `reviewer_turn_limit_exhausted`,
+- `resume_activation_uncertain`,
+- `resume_cancelled`, and
+- `resume_evidence_invalid`.
+
+`reviewer_structured_output_exhausted`, `reviewer_turn_limit_exhausted`, and
+`reviewer_provider_budget_exhausted` leave the job interrupted so the same
+immutable review request can be retried with `resume`; each retry is retained as
+a separate attempt. `reviewer_provider_execution_failed` is classified but
+terminal because it is not evidence that a bounded retry was exhausted; inspect
+the retained provider output, correct the underlying execution problem, and
+explicitly enqueue a replacement rather than looping the same request.
+
+Historical jobs whose `execution.json` lacks the version 2 resume context fail
+closed with `resume_metadata_unsupported`;
+start an explicitly linked replacement with
 [`enqueue-local --supersedes`](#enqueue-local) only after the old job is
 terminal. Valid version 3 reviewer-set execution records preserve completed
 responses and retry only incomplete members with incremented attempt ordinals.

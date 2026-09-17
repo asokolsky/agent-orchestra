@@ -1132,6 +1132,8 @@ def test_incomplete_reviewer_set_is_resumable(
                 stdout='',
                 stderr='failure',
                 exit_code=1,
+                failure_code='structured_output_exhausted',
+                failure_message='claude-code exhausted structured-output retries',
             )
         response = _approved_response(document, request.artifact_path)
         if mode == 'invalid':
@@ -1180,9 +1182,15 @@ def test_incomplete_reviewer_set_is_resumable(
     assert store.get(run.id).state is expected_state
     run_directory = next((tmp_path / 'runs').rglob('execution.json')).parent
     failure = json.loads((run_directory / 'failure.json').read_text(encoding='utf-8'))
+    expected_message = 'reviewer batch did not complete'
+    if mode == 'nonzero':
+        diagnostic = 'claude-code exhausted structured-output retries'
+        expected_message = (
+            f'{expected_message}: security: {diagnostic}; portability: {diagnostic}'
+        )
     assert failure['error'] == {
         'code': 'reviewer_batch_incomplete',
-        'message': 'reviewer batch did not complete',
+        'message': expected_message,
     }
     if mode in {'timeout', 'nonzero'}:
         assert not tuple(run_directory.glob('.*.review-result.json'))

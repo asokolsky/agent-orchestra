@@ -135,7 +135,7 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
 
         monkeypatch.setattr('agent_orchestra.adapter.codex.run_streaming_process', run)
         invoke: Callable[..., None] = run_codex_developer
-    else:
+    elif runtime == 'claude-code':
         monkeypatch.setattr(
             'agent_orchestra.adapter.claude_code.skill_destination',
             lambda *_args, **_kwargs: skill,
@@ -163,6 +163,8 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
             'agent_orchestra.adapter.claude_code.run_streaming_process', run
         )
         invoke = run_claude_code_developer
+    else:
+        raise AssertionError(f'unsupported runtime: {runtime}')
 
     invoke(request, response, model='runtime-model')
 
@@ -195,6 +197,10 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
         assert environment['MISE_SHARED_INSTALL_DIRS']
         assert Path(environment['MISE_STATE_DIR']).name == 'mise-state'
         assert Path(environment['UV_CACHE_DIR']).name == 'uv-cache'
+    elif runtime == 'claude-code':
+        assert command[command.index('--permission-mode') + 1] == 'acceptEdits'
+    else:
+        raise AssertionError(f'unsupported runtime: {runtime}')
 
 
 @pytest.mark.skipif(shutil.which('mise') is None, reason='mise is not installed')
@@ -418,12 +424,16 @@ def test_developer_adapters_report_stable_execution_failures(
     skill = tmp_path / 'skills/agent-orchestra-developer'
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('developer instructions\n')
-    module = (
-        'agent_orchestra.adapter.codex'
-        if runtime == 'codex'
-        else 'agent_orchestra.adapter.claude_code'
-    )
-    executable = 'codex' if runtime == 'codex' else 'claude'
+    if runtime == 'codex':
+        module = 'agent_orchestra.adapter.codex'
+        executable = 'codex'
+        invoke = run_codex_developer
+    elif runtime == 'claude-code':
+        module = 'agent_orchestra.adapter.claude_code'
+        executable = 'claude'
+        invoke = run_claude_code_developer
+    else:
+        raise AssertionError(f'unsupported runtime: {runtime}')
     monkeypatch.setattr(f'{module}.skill_destination', lambda *_args: skill)
     monkeypatch.setattr(
         f'{module}.shutil.which',
@@ -439,10 +449,12 @@ def test_developer_adapters_report_stable_execution_failures(
             return subprocess.CompletedProcess(command, 9, stdout='', stderr='failed')
         if runtime == 'claude-code':
             return subprocess.CompletedProcess(command, 0, stdout='not-json', stderr='')
-        return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+        elif runtime == 'codex':
+            return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+        else:
+            raise AssertionError(f'unsupported runtime: {runtime}')
 
     monkeypatch.setattr(f'{module}.run_streaming_process', fail)
-    invoke = run_codex_developer if runtime == 'codex' else run_claude_code_developer
 
     with pytest.raises(AdapterError, match=expected):
         invoke(request, tmp_path / 'run/response.json')

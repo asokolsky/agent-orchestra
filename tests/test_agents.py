@@ -55,10 +55,12 @@ def test_command_adapter_preserves_metadata_across_exceptional_exit(
         path.write_text(
             json.dumps(
                 {
-                    'schema_version': 2,
+                    'schema_version': 3,
                     'effective_models': ['reported-model'],
                     'status': 'reported',
                     'timed_out': False,
+                    'failure_code': 'structured_output_exhausted',
+                    'failure_message': 'structured output retries exhausted',
                 }
             )
         )
@@ -82,6 +84,11 @@ def test_command_adapter_preserves_metadata_across_exceptional_exit(
 
     assert raised.value.__dict__['effective_models'] == ('reported-model',)
     assert raised.value.__dict__['effective_model_status'] == 'reported'
+    assert raised.value.__dict__['failure_code'] == 'structured_output_exhausted'
+    assert (
+        raised.value.__dict__['failure_message']
+        == 'structured output retries exhausted'
+    )
     assert not metadata_path.exists()
 
 
@@ -104,10 +111,12 @@ def test_command_adapter_reports_adapter_detected_timeout(
             path.write_text(
                 json.dumps(
                     {
-                        'schema_version': 2,
+                        'schema_version': 3,
                         'effective_models': [],
                         'status': 'unavailable',
                         'timed_out': True,
+                        'failure_code': 'adapter_timeout',
+                        'failure_message': 'adapter child exceeded its bound',
                     }
                 )
             )
@@ -140,6 +149,8 @@ def test_command_adapter_reports_adapter_detected_timeout(
     assert result.exit_code == 2
     assert result.succeeded is False
     assert result.timed_out is True
+    assert result.failure_code == 'adapter_timeout'
+    assert result.failure_message == 'adapter child exceeded its bound'
     assert not metadata_path.exists()
 
 

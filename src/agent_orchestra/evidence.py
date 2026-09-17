@@ -558,6 +558,10 @@ WORKTREE_CHANGED = 'worktree changed during read-only review'
 # them: a code without its exception is not usable on its own, and every module
 # that raises WorkerError needs the same vocabulary.
 REVIEWER_BATCH_INCOMPLETE_CODE = 'reviewer_batch_incomplete'
+REVIEWER_PROVIDER_EXECUTION_FAILED_CODE = 'reviewer_provider_execution_failed'
+REVIEWER_PROVIDER_BUDGET_EXHAUSTED_CODE = 'reviewer_provider_budget_exhausted'
+REVIEWER_STRUCTURED_OUTPUT_EXHAUSTED_CODE = 'reviewer_structured_output_exhausted'
+REVIEWER_TURN_LIMIT_EXHAUSTED_CODE = 'reviewer_turn_limit_exhausted'
 RUN_NOT_RESUMABLE_CODE = 'run_not_resumable'
 RESUME_METADATA_UNSUPPORTED_CODE = 'resume_metadata_unsupported'
 RESUME_SCOPE_CHANGED_CODE = 'resume_scope_changed'

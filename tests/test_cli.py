@@ -2919,6 +2919,156 @@ def test_run_marks_reviewer_timeout(
     assert invocation['timed_out'] is True
 
 
+@pytest.mark.parametrize(
+    'failure_case',
+    [
+        (
+            'structured_output_exhausted',
+            'claude-code exhausted structured-output retries: Failed after 5 attempts',
+            'reviewer_structured_output_exhausted',
+        ),
+        (
+            'turn_limit_exhausted',
+            'claude-code exhausted its turn limit; num_turns=22',
+            'reviewer_turn_limit_exhausted',
+        ),
+        (
+            'provider_budget_exhausted',
+            'claude-code exhausted its budget limit; total_cost_usd=0.48',
+            'reviewer_provider_budget_exhausted',
+        ),
+    ],
+)
+def test_bounded_reviewer_failure_is_resumable_with_a_new_attempt(
+    failure_case: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
+) -> None:
+    """Preserve the failed attempt and retry its immutable request on resume."""
+
+    failure_code, failure_message, workflow_code = failure_case
+    reviewer = enqueued_run.repo.parent / 'reviewer.py'
+    reviewer.write_text('"""Adapter boundary placeholder."""\n')
+    attempts = 0
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Fail once with runtime metadata, then return canonical approval."""
+
+        nonlocal attempts
+        attempts += 1
+        if request.on_started is not None:
+            request.on_started()
+        if attempts == 1:
+            return AgentResult(
+                succeeded=False,
+                summary='',
+                stdout=None,
+                stderr='error: reviewer bound exhausted',
+                exit_code=2,
+                failure_code=failure_code,
+                failure_message=failure_message,
+            )
+        document = json.loads(request.request_path.read_text())
+        artifact = Path(document['payload']['artifact_path'])
+        artifact.write_text('# Review\n')
+        request.response_path.write_text(
+            json.dumps(
+                {
+                    'schema_version': 1,
+                    'message_id': str(uuid4()),
+                    'in_reply_to': document['message_id'],
+                    'run_id': document['run_id'],
+                    'sequence': document['sequence'] + 1,
+                    'iteration': document['iteration'],
+                    'message_type': 'review_result',
+                    'sender': 'reviewer',
+                    'recipient': 'orchestrator',
+                    'created_at': '2026-09-16T20:00:00Z',
+                    'scope': document['scope'],
+                    'payload': {
+                        'verdict': 'approved',
+                        'summary': 'Ready.',
+                        'findings': [],
+                        'validation': [],
+                        'verification_gaps': [],
+                        'artifact_path': str(artifact),
+                    },
+                }
+            )
+        )
+        return AgentResult(
+            succeeded=True,
+            summary='',
+            stdout=None,
+            stderr=None,
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+
+    assert main(run_arguments(enqueued_run, reviewer=reviewer)) == 2
+    failure_document = json.loads(capsys.readouterr().out)
+    assert failure_document['error']['code'] == workflow_code
+    assert failure_message in failure_document['error']['message']
+    assert 'resume the interrupted job' in failure_document['error']['message']
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.INTERRUPTED
+    persisted_failure = json.loads(
+        (evidence_directory(enqueued_run) / 'failure.json').read_text()
+    )
+    assert persisted_failure['state'] == 'interrupted'
+    assert persisted_failure['error']['code'] == workflow_code
+
+    assert main(resume_arguments(enqueued_run)) == 0
+    resumed = json.loads(capsys.readouterr().out)
+    assert resumed['state'] == 'awaiting_commit_authorization'
+    invocations_directory = evidence_directory(enqueued_run) / 'invocations'
+    first = json.loads((invocations_directory / '000001-reviewer.json').read_text())
+    retry = json.loads(
+        (invocations_directory / '000001-reviewer-attempt-0002.json').read_text()
+    )
+    assert first['attempt'] == 1
+    assert first['conclusion'] == 'failed'
+    assert retry['attempt'] == 2
+    assert retry['conclusion'] == 'succeeded'
+
+
+def test_provider_execution_failure_is_classified_and_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    enqueued_run: CliRunContext,
+) -> None:
+    """Expose a provider execution failure without offering an unsafe retry."""
+
+    reviewer = enqueued_run.repo.parent / 'reviewer.py'
+    reviewer.write_text('"""Adapter boundary placeholder."""\n')
+
+    def execute(_adapter: CommandAgentAdapter, request: AgentRequest) -> AgentResult:
+        """Return one classified non-bound provider failure."""
+
+        if request.on_started is not None:
+            request.on_started()
+        return AgentResult(
+            succeeded=False,
+            summary='',
+            stdout=None,
+            stderr='error: provider execution failed',
+            exit_code=2,
+            failure_code='provider_execution_failed',
+            failure_message='claude-code failed during execution',
+        )
+
+    monkeypatch.setattr(CommandAgentAdapter, 'execute', execute)
+
+    assert main(run_arguments(enqueued_run, reviewer=reviewer)) == 2
+    failure = json.loads(capsys.readouterr().out)
+    assert failure['error'] == {
+        'code': 'reviewer_provider_execution_failed',
+        'message': 'claude-code failed during execution',
+    }
+    assert enqueued_run.store.get(enqueued_run.run.id).state is RunState.FAILED
+
+
 def test_resume_interrupted_reviewer_reuses_request(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

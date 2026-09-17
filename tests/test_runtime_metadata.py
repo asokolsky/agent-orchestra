@@ -91,6 +91,49 @@ def test_runtime_metadata_round_trip(
     assert not path.exists()
 
 
+def test_runtime_metadata_round_trips_adapter_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carry one stable adapter failure through the private sidecar."""
+
+    path = tmp_path / 'runtime.json'
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(path))
+
+    write_runtime_metadata(
+        ('claude-sonnet',),
+        failure_code='structured_output_exhausted',
+        failure_message='structured output failed after five attempts',
+    )
+
+    assert json.loads(path.read_text())['schema_version'] == 3
+    assert read_runtime_metadata(path) == RuntimeMetadata(
+        effective_models=('claude-sonnet',),
+        effective_model_status=EffectiveModelStatus.REPORTED,
+        failure_code='structured_output_exhausted',
+        failure_message='structured output failed after five attempts',
+    )
+
+
+def test_runtime_metadata_reads_schema_two_without_failure_details(
+    tmp_path: Path,
+) -> None:
+    """Keep the prior ephemeral metadata schema readable during upgrades."""
+
+    path = tmp_path / 'runtime.json'
+    path.write_text(
+        json.dumps(
+            {
+                'schema_version': 2,
+                'effective_models': [],
+                'status': 'unavailable',
+                'timed_out': False,
+            }
+        )
+    )
+
+    assert read_runtime_metadata(path) == RuntimeMetadata()
+
+
 def test_runtime_metadata_rejects_inconsistent_status(
     tmp_path: Path,
 ) -> None:
