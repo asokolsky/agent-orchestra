@@ -1,0 +1,108 @@
+"""Deterministic tests for the provider-neutral live-runtime assertions."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from tests.live.runtime_harness import assert_review_cycle_messages
+
+
+def _review_documents(
+    verdicts: tuple[str, ...], *, validation: tuple[dict[str, str], ...] = ()
+) -> tuple[
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+]:
+    """Build minimal correlated documents for one review cycle."""
+
+    requests = tuple(
+        {
+            'message_id': f'request-{index}',
+            'scope': {'diff_digest': f'digest-{index}'},
+        }
+        for index in range(len(verdicts))
+    )
+    results = tuple(
+        {
+            'message_id': f'result-{index}',
+            'in_reply_to': f'request-{index}',
+            'scope': {'diff_digest': f'digest-{index}'},
+            'payload': {
+                'verdict': verdict,
+                'findings': (
+                    [{'finding_id': f'finding-{index}'}]
+                    if verdict == 'changes_requested'
+                    else []
+                ),
+            },
+        }
+        for index, verdict in enumerate(verdicts)
+    )
+    remediation_requests = tuple(
+        {
+            'message_id': f'remediation-{index}',
+            'in_reply_to': f'result-{index}',
+        }
+        for index in range(len(verdicts) - 1)
+    )
+    handoffs = tuple(
+        {
+            'in_reply_to': f'remediation-{index}',
+            'payload': {
+                'dispositions': [
+                    {
+                        'finding_id': f'finding-{index}',
+                        'disposition': 'addressed',
+                    }
+                ],
+                'validation': list(validation),
+            },
+        }
+        for index in range(len(verdicts) - 1)
+    )
+    return requests, results, remediation_requests, handoffs
+
+
+def test_review_cycle_accepts_three_iterations() -> None:
+    """Use first and last semantics when remediation needs another round."""
+
+    documents = _review_documents(
+        ('changes_requested', 'changes_requested', 'approved'),
+        validation=({'command': 'python -m unittest', 'outcome': 'passed'},),
+    )
+
+    assert assert_review_cycle_messages(*documents) == (
+        'reviewer',
+        'developer',
+        'reviewer',
+        'developer',
+        'reviewer',
+    )
+
+
+def test_review_cycle_accepts_empty_developer_validation() -> None:
+    """Permit the schema-valid empty developer validation list."""
+
+    documents = _review_documents(('changes_requested', 'approved'))
+
+    assert assert_review_cycle_messages(*documents) == (
+        'reviewer',
+        'developer',
+        'reviewer',
+    )
+
+
+def test_review_cycle_rejects_mismatched_developer_handoff() -> None:
+    """Require every handoff to reply to its exact remediation request."""
+
+    requests, results, remediation_requests, handoffs = _review_documents(
+        ('changes_requested', 'approved')
+    )
+    handoffs[0]['in_reply_to'] = 'wrong-remediation-request'
+
+    with pytest.raises(AssertionError):
+        assert_review_cycle_messages(requests, results, remediation_requests, handoffs)

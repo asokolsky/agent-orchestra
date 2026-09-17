@@ -250,6 +250,44 @@ def _assert_runtime_metadata(
         assert all(not record['effective_models'] for record in records)
 
 
+def assert_review_cycle_messages(
+    requests: tuple[dict[str, Any], ...],
+    results: tuple[dict[str, Any], ...],
+    remediation_requests: tuple[dict[str, Any], ...],
+    handoffs: tuple[dict[str, Any], ...],
+) -> tuple[str, ...]:
+    """Verify a variable-length review cycle and return its expected role order."""
+
+    assert len(requests) == len(results)
+    assert len(results) >= 2
+    assert len(remediation_requests) == len(handoffs) == len(results) - 1
+    for request, result in zip(requests, results, strict=True):
+        assert result['in_reply_to'] == request['message_id']
+        assert result['scope']['diff_digest'] == request['scope']['diff_digest']
+
+    assert results[0]['payload']['verdict'] == 'changes_requested'
+    assert results[-1]['payload']['verdict'] == 'approved'
+    assert results[-1]['payload']['findings'] == []
+    for result, remediation, handoff in zip(
+        results[:-1], remediation_requests, handoffs, strict=True
+    ):
+        assert result['payload']['verdict'] == 'changes_requested'
+        assert remediation['in_reply_to'] == result['message_id']
+        assert handoff['in_reply_to'] == remediation['message_id']
+        finding_ids = {
+            finding['finding_id'] for finding in result['payload']['findings']
+        }
+        assert finding_ids
+        dispositions = handoff['payload']['dispositions']
+        assert {item['finding_id'] for item in dispositions} == finding_ids
+        assert all(item['disposition'] == 'addressed' for item in dispositions)
+
+    expected_roles = ['reviewer']
+    for _handoff in handoffs:
+        expected_roles.extend(('developer', 'reviewer'))
+    return tuple(expected_roles)
+
+
 def assert_local_scenario(scenario: LocalScenario, runtime: LiveRuntime) -> None:
     """Verify the shared review, remediation, approval, and evidence contract."""
 
@@ -276,34 +314,18 @@ def assert_local_scenario(scenario: LocalScenario, runtime: LiveRuntime) -> None
     results = _read_documents(
         sorted((job_directory / 'messages').glob('*-review-result.json'))
     )
+    remediation_requests = _read_documents(
+        sorted((job_directory / 'messages').glob('*-remediation-request.json'))
+    )
     handoffs = _read_documents(
         sorted((job_directory / 'messages').glob('*-developer-handoff.json'))
     )
-    assert len(requests) == len(results) == 2
-    assert len(handoffs) == 1
-    for request, result in zip(requests, results, strict=True):
-        assert result['in_reply_to'] == request['message_id']
-        assert result['scope']['diff_digest'] == request['scope']['diff_digest']
-    assert results[0]['payload']['verdict'] == 'changes_requested'
-    finding_ids = {
-        finding['finding_id'] for finding in results[0]['payload']['findings']
-    }
-    assert finding_ids
-    assert results[1]['payload']['verdict'] == 'approved'
-    assert results[1]['payload']['findings'] == []
-    handoff = handoffs[0]
-    assert handoff['in_reply_to']
-    dispositions = handoff['payload']['dispositions']
-    assert {item['finding_id'] for item in dispositions} == finding_ids
-    assert all(item['disposition'] == 'addressed' for item in dispositions)
-    assert any(item['outcome'] == 'passed' for item in handoff['payload']['validation'])
+    expected_roles = assert_review_cycle_messages(
+        requests, results, remediation_requests, handoffs
+    )
 
     records = invocation_records(scenario.runs_directory, scenario.job_id)
-    assert [record['role'] for record in records] == [
-        'reviewer',
-        'developer',
-        'reviewer',
-    ]
+    assert tuple(record['role'] for record in records) == expected_roles
     assert all(record['runtime'] == runtime.identifier for record in records)
     assert all(record['conclusion'] == 'succeeded' for record in records)
     _assert_runtime_metadata(records, runtime)
