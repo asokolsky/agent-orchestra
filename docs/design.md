@@ -201,6 +201,10 @@ These choices optimize for local agents and minimum resource use. Python is the
 preferred implementation language, with a toolchain based on uv, Ruff, and
 mise.
 
+The decision to keep skills as the only role-content install target is
+documented in the
+[subagent role publication decision](subagent-role-publication.md).
+
 The public contract is the CLI: its commands, their arguments, and the versioned
 JSON documents they emit. The package root defines and re-exports no application
 names. `agent_orchestra` is a namespace for its submodules, which remain

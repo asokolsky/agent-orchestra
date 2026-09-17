@@ -8,6 +8,7 @@
 | [Workflows](workflows.md) | The state machine, its transitions, and the recovery paths. | You need to know what a state means or how a stopped job resumes. |
 | [Design](design.md) | Why the tool is built this way, and the contracts it keeps. | You are changing the tool, or need the rationale behind a constraint. |
 | [OpenAI Agents API runtime decision](openai-agents-api.md) | Why the Agents API is not a registered runtime. | You are evaluating that API as an execution backend. |
+| [Subagent role publication decision](subagent-role-publication.md) | Why role skills are not also published as vendor subagents. | You are evaluating another role-content install target. |
 
 ## Role contracts
 
