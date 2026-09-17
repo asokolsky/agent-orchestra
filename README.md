@@ -162,8 +162,9 @@ verified rather than rewritten. Run `mise run format-check` locally to see what
 CI will see.
 
 Authenticated runtime checks are deliberately separate from the ordinary test
-suite. After installing the Claude role skills, run `mise run test-live-claude`;
-see [Opt-in live Claude verification](docs/cli.md#opt-in-live-claude-verification)
+suite. After installing the corresponding role skills, run
+`mise run test-live-claude` or `mise run test-live-codex`; see
+[Opt-in live runtime verification](docs/cli.md#opt-in-live-runtime-verification)
 for prerequisites, cost, isolation, and failure semantics.
 
 `mise run tests` distributes the suite across one worker per available CPU,

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -16,21 +15,16 @@ from agent_orchestra.adapter.claude_code import (
     _developer_settings,
     _stage_skill,
 )
-from agent_orchestra.evidence import resolve_evidence_path
-from agent_orchestra.issue_review import run_issue_review
-from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_snapshot
-from agent_orchestra.models import IssueJob, RunState
+from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import child_process_environment
 from agent_orchestra.skill_install import skill_destination
-from agent_orchestra.store import JobStore
 from tests.live.runtime_harness import (
     LiveRuntime,
-    git,
-    invocation_records,
+    assert_issue_scenario,
+    assert_local_scenario,
     require_success,
     run_command,
     run_local_scenario,
-    verified_audit,
 )
 
 if TYPE_CHECKING:
@@ -43,6 +37,7 @@ LIVE_CLAUDE = LiveRuntime(
     opt_in_environment='AGENT_ORCHESTRA_LIVE_CLAUDE',
     model_environment='AGENT_ORCHESTRA_LIVE_CLAUDE_MODEL',
     skill_names=('agent-orchestra-reviewer', 'agent-orchestra-developer'),
+    effective_model_status=EffectiveModelStatus.REPORTED,
 )
 LIVE_TIMEOUT_SECONDS = 240
 SKIP_REASON = 'set AGENT_ORCHESTRA_LIVE_CLAUDE=1 to run live Claude checks'
@@ -259,34 +254,7 @@ def test_live_claude_local_review_and_remediation(
     scenario = run_local_scenario(
         tmp_path, LIVE_CLAUDE, attempt_timeout=LIVE_TIMEOUT_SECONDS
     )
-    store = JobStore(scenario.database)
-    job = store.get(scenario.job_id)
-
-    assert job.state is RunState.AWAITING_COMMIT_AUTHORIZATION
-    assert job.iteration >= 2
-    assert git(scenario.repository, 'rev-list', '--count', 'HEAD') == '1'
-    assert git(scenario.repository, 'status', '--short') == 'M calculator.py'
-    assert 'return left + right' in (scenario.repository / 'calculator.py').read_text(
-        encoding='utf-8'
-    )
-    tests = run_command(
-        [shutil.which('python') or 'python', '-m', 'unittest'],
-        cwd=scenario.repository,
-        timeout=30,
-    )
-    require_success(tests, context='remediated fixture validation')
-
-    records = invocation_records(scenario.runs_directory, scenario.job_id)
-    assert [record['role'] for record in records] == [
-        'reviewer',
-        'developer',
-        'reviewer',
-    ]
-    assert all(record['runtime'] == LIVE_CLAUDE.identifier for record in records)
-    assert all(record['conclusion'] == 'succeeded' for record in records)
-    assert all(record['effective_models'] for record in records)
-    assert all(record['effective_model_status'] == 'reported' for record in records)
-    verified_audit(store, scenario.job_id, scenario.runs_directory)
+    assert_local_scenario(scenario, LIVE_CLAUDE)
 
 
 def test_live_claude_issue_review_uses_local_snapshot(
@@ -294,97 +262,12 @@ def test_live_claude_issue_review_uses_local_snapshot(
     claude_preflight: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review deterministic issue prose without reading or writing a provider."""
+    """Review deterministic issue prose without contacting or writing a provider."""
 
     del claude_preflight
-    body = (
-        'Problem: reject empty widget names before persistence.\n\n'
-        'Scope: update only the create-widget validation path and its unit tests.\n\n'
-        'Constraints: preserve the public API and existing error codes.\n\n'
-        'Acceptance criteria:\n'
-        '- whitespace-only names return invalid_widget_name;\n'
-        '- valid names continue to be persisted;\n'
-        '- unit tests cover both behaviors.\n'
-    )
-    digest = f'sha256:{hashlib.sha256(body.encode()).hexdigest()}'
-    snapshot = IssueSnapshot(
-        locator=IssueLocator(
-            provider='github',
-            host='github.com',
-            namespace='agent-orchestra-live',
-            project='fixture',
-            number=1,
-            url='https://github.com/agent-orchestra-live/fixture/issues/1',
-        ),
-        title='Reject empty widget names',
-        body=body,
-        author='live-test',
-        labels=('test',),
-        state='open',
-        created_at='2026-01-01T00:00:00Z',
-        updated_at='2026-01-01T00:00:00Z',
-        digest=digest,
-    )
-    job = IssueJob.create(
-        provider=snapshot.locator.provider,
-        host=snapshot.locator.host,
-        remote_url=snapshot.locator.url,
-        namespace=snapshot.locator.namespace,
-        project=snapshot.locator.project,
-        issue_number=snapshot.locator.number,
-        title=snapshot.title,
-        author=snapshot.author,
-        source_updated_at=snapshot.updated_at,
-        source_digest=snapshot.digest,
-    )
-    database = tmp_path / 'state' / 'state.db'
-    runs_directory = tmp_path / 'evidence'
-    store = JobStore(database)
-    store.initialize()
-    store.add_issue(job)
-    write_snapshot(
-        runs_directory,
-        job.id,
-        resolve_evidence_path(runs_directory, job.id) / 'issue.json',
-        snapshot,
-    )
-    fetches: list[str] = []
-
-    def fetch_local(url: str) -> IssueSnapshot:
-        """Return the immutable fixture and record every attempted provider read."""
-
-        fetches.append(url)
-        return snapshot
-
-    monkeypatch.setattr('agent_orchestra.issue_review.fetch_issue', fetch_local)
-    finished = run_issue_review(
-        job,
-        store,
-        runs_directory,
-        objective='Review this issue for implementation readiness.',
-        agent=LIVE_CLAUDE.identifier,
-        model=LIVE_CLAUDE.requested_model,
-        timeout=LIVE_TIMEOUT_SECONDS,
-    )
-
-    assert finished.state in {RunState.APPROVED, RunState.CHANGES_REQUESTED}
-    assert fetches == [snapshot.locator.url, snapshot.locator.url]
-    result_path = (
-        resolve_evidence_path(runs_directory, job.id) / 'iterations/000001/result.json'
-    )
-    result = json.loads(result_path.read_text(encoding='utf-8'))
-    assert result['source_digest'] == snapshot.digest
-    records = invocation_records(runs_directory, job.id)
-    assert len(records) == 1
-    assert records[0]['role'] == 'issue_reviewer'
-    assert records[0]['runtime'] == LIVE_CLAUDE.identifier
-    assert records[0]['conclusion'] == 'succeeded'
-    assert records[0]['effective_models']
-    assert records[0]['effective_model_status'] == 'reported'
-    assert store.list_issue_actions(job.id) == ()
-    audit = verified_audit(store, job.id, runs_directory)
-    evidence = cast('list[dict[str, object]]', audit['evidence'])
-    assert any(
-        item['evidence_type'] == 'issue_feedback' and item['status'] == 'verified'
-        for item in evidence
+    assert_issue_scenario(
+        tmp_path,
+        LIVE_CLAUDE,
+        attempt_timeout=LIVE_TIMEOUT_SECONDS,
+        monkeypatch=monkeypatch,
     )
