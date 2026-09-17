@@ -41,6 +41,10 @@ from agent_orchestra.manifests import adapter_arguments
 from agent_orchestra.models import Finding, Review, Severity, Verdict
 from agent_orchestra.reports import render_review
 from agent_orchestra.runtime_metadata import (
+    PROVIDER_BUDGET_EXHAUSTED,
+    PROVIDER_EXECUTION_FAILED,
+    STRUCTURED_OUTPUT_EXHAUSTED,
+    TURN_LIMIT_EXHAUSTED,
     child_process_environment,
     reviewer_process_environment,
     write_runtime_metadata,
@@ -62,6 +66,28 @@ class ClaudeCodeReviewerError(AdapterError):
 CLAUDE_CODE_NOT_FOUND = 'claude executable not found'
 CLAUDE_CODE_TIMEOUT = 'claude-code review timed out'
 MISSING_STRUCTURED_OUTPUT = 'claude-code response has no structured_output object'
+CLAUDE_STRUCTURED_OUTPUT_EXHAUSTED = 'error_max_structured_output_retries'
+CLAUDE_TURN_LIMIT_EXHAUSTED = 'error_max_turns'
+CLAUDE_BUDGET_EXHAUSTED = 'error_max_budget_usd'
+CLAUDE_EXECUTION_FAILED = 'error_during_execution'
+CLAUDE_FAILURES = {
+    CLAUDE_STRUCTURED_OUTPUT_EXHAUSTED: (
+        STRUCTURED_OUTPUT_EXHAUSTED,
+        'claude-code exhausted structured-output retries',
+    ),
+    CLAUDE_TURN_LIMIT_EXHAUSTED: (
+        TURN_LIMIT_EXHAUSTED,
+        'claude-code exhausted its turn limit',
+    ),
+    CLAUDE_BUDGET_EXHAUSTED: (
+        PROVIDER_BUDGET_EXHAUSTED,
+        'claude-code exhausted its budget limit',
+    ),
+    CLAUDE_EXECUTION_FAILED: (
+        PROVIDER_EXECUTION_FAILED,
+        'claude-code failed during execution',
+    ),
+}
 REVIEWER_SKILL_MISSING = (
     'agent-orchestra-reviewer skill is not installed; run '
     '`agent-orchestra skills install --agent claude-code '
@@ -163,7 +189,11 @@ Agent-orchestra verifies digest identity before and after review. The reviewed
 worktree is read-only. Transient validation files and tool caches may be written
 only beneath `{temporary_directory}`; do not use them as workflow evidence.
 Agent-orchestra persists the result. When shell inspection is needed, use only
-the pre-approved Git commands or `mise run tests`.
+the pre-approved Git commands. Network access and project validation commands
+are unavailable in this reviewer environment. Do not attempt network commands
+such as `curl`; do not run `mise trust`, install dependencies, or change
+configuration. Record any check that requires those capabilities in
+`verification_gaps`.
 
 Review request:
 {json.dumps(request, indent=2)}
@@ -215,6 +245,47 @@ def _effective_models(output: dict[str, Any]) -> tuple[str, ...]:
     return tuple(model for model in usage if isinstance(model, str) and model)
 
 
+def _claude_failure(output: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Classify one documented Claude result failure with safe diagnostics."""
+
+    subtype = output.get('subtype')
+    if not isinstance(subtype, str):
+        return None, None
+    classified = CLAUDE_FAILURES.get(subtype)
+    if classified is None:
+        return None, None
+    failure_code, message = classified
+    errors = output.get('errors')
+    details = (
+        tuple(item for item in errors if isinstance(item, str) and item)
+        if isinstance(errors, list)
+        else ()
+    )
+    if details:
+        message = f'{message}: {"; ".join(details)}'
+    diagnostics: list[str] = []
+    turns = output.get('num_turns')
+    if type(turns) is int and turns >= 0:
+        diagnostics.append(f'num_turns={turns}')
+    cost = output.get('total_cost_usd')
+    if isinstance(cost, int | float) and not isinstance(cost, bool) and cost >= 0:
+        diagnostics.append(f'total_cost_usd={cost}')
+    denials = output.get('permission_denials')
+    if isinstance(denials, list):
+        tools = tuple(
+            item['tool_name']
+            for item in denials
+            if isinstance(item, dict)
+            and isinstance(item.get('tool_name'), str)
+            and item['tool_name']
+        )
+        if tools:
+            diagnostics.append(f'permission_denials={",".join(dict.fromkeys(tools))}')
+    if diagnostics:
+        message = f'{message}; {"; ".join(diagnostics)}'
+    return failure_code, message
+
+
 def _output_with_runtime_metadata(stdout: str) -> dict[str, Any] | None:
     """Parse a Claude Code envelope and report any model identities it contains."""
 
@@ -224,7 +295,12 @@ def _output_with_runtime_metadata(stdout: str) -> dict[str, Any] | None:
         return None
     if not isinstance(output, dict):
         return None
-    write_runtime_metadata(_effective_models(output))
+    failure_code, failure_message = _claude_failure(output)
+    write_runtime_metadata(
+        _effective_models(output),
+        failure_code=failure_code,
+        failure_message=failure_message,
+    )
     return output
 
 
@@ -273,7 +349,6 @@ def _execute_claude_code_reviewer(
             'Bash(git rev-parse HEAD)',
             'Bash(git diff --no-ext-diff --binary HEAD)',
             'Bash(git ls-files --others --exclude-standard)',
-            'Bash(mise run tests)',
         ]
         if model:
             command.extend(['--model', model])
@@ -293,6 +368,10 @@ def _execute_claude_code_reviewer(
             ) from error
     output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
+        if output is not None:
+            _, failure_message = _claude_failure(output)
+            if failure_message is not None:
+                raise ClaudeCodeReviewerError(failure_message)
         diagnostic = completed.stderr.strip() or completed.stdout.strip()
         raise ClaudeCodeReviewerError(
             f'claude-code failed with code {completed.returncode}: {diagnostic}'

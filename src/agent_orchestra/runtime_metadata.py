@@ -17,6 +17,17 @@ if TYPE_CHECKING:
     from agent_orchestra.adapter.registry import RuntimeRegistry
 
 RUNTIME_METADATA_ENV = 'AGENT_ORCHESTRA_RUNTIME_METADATA_PATH'
+PROVIDER_EXECUTION_FAILED = 'provider_execution_failed'
+PROVIDER_BUDGET_EXHAUSTED = 'provider_budget_exhausted'
+STRUCTURED_OUTPUT_EXHAUSTED = 'structured_output_exhausted'
+TURN_LIMIT_EXHAUSTED = 'turn_limit_exhausted'
+RETRYABLE_REVIEW_FAILURES = frozenset(
+    {
+        PROVIDER_BUDGET_EXHAUSTED,
+        STRUCTURED_OUTPUT_EXHAUSTED,
+        TURN_LIMIT_EXHAUSTED,
+    }
+)
 
 
 class RuntimeMetadataError(AgentOrchestraError):
@@ -30,6 +41,8 @@ class RuntimeMetadata:
     effective_models: tuple[str, ...] = ()
     effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
     timed_out: bool = False
+    failure_code: str | None = None
+    failure_message: str | None = None
 
 
 def child_process_environment(**overrides: str) -> dict[str, str]:
@@ -61,15 +74,21 @@ def reviewer_process_environment(
     return child_process_environment(**values)
 
 
-def write_runtime_metadata(models: tuple[str, ...], *, timed_out: bool = False) -> None:
-    """Write effective model identities and bounding outcome to the given path."""
+def write_runtime_metadata(
+    models: tuple[str, ...],
+    *,
+    timed_out: bool = False,
+    failure_code: str | None = None,
+    failure_message: str | None = None,
+) -> None:
+    """Write model identity and adapter failure metadata to the given path."""
 
     value = os.environ.get(RUNTIME_METADATA_ENV)
     if value is None:
         return
     path = Path(value)
     document = {
-        'schema_version': 2,
+        'schema_version': 3,
         'effective_models': list(dict.fromkeys(models)),
         'status': (
             EffectiveModelStatus.REPORTED
@@ -77,6 +96,8 @@ def write_runtime_metadata(models: tuple[str, ...], *, timed_out: bool = False) 
             else EffectiveModelStatus.UNAVAILABLE
         ).value,
         'timed_out': timed_out,
+        'failure_code': failure_code,
+        'failure_message': failure_message,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
@@ -100,25 +121,42 @@ def read_runtime_metadata(path: Path) -> RuntimeMetadata:
         raise RuntimeMetadataError(f'invalid runtime metadata: {error}') from error
     finally:
         path.unlink(missing_ok=True)
-    if not isinstance(document, dict) or set(document) != {
+    if not isinstance(document, dict):
+        message = 'invalid runtime metadata fields'
+        raise RuntimeMetadataError(message)
+    schema_version = document.get('schema_version')
+    expected_fields = {
         'schema_version',
         'effective_models',
         'status',
         'timed_out',
-    }:
+    }
+    if schema_version == 3:
+        expected_fields.update({'failure_code', 'failure_message'})
+    if schema_version not in {2, 3} or set(document) != expected_fields:
         message = 'invalid runtime metadata fields'
         raise RuntimeMetadataError(message)
     models = document['effective_models']
     status = document['status']
     timed_out = document['timed_out']
+    failure_code = document.get('failure_code')
+    failure_message = document.get('failure_message')
     if (
-        document['schema_version'] != 2
-        or not isinstance(models, list)
+        not isinstance(models, list)
         or not all(isinstance(model, str) and model for model in models)
         or len(models) != len(set(models))
         or status not in EffectiveModelStatus.values()
         or (status == EffectiveModelStatus.REPORTED) != bool(models)
         or type(timed_out) is not bool
+        or (failure_code is None) != (failure_message is None)
+        or (
+            failure_code is not None
+            and (not isinstance(failure_code, str) or not failure_code)
+        )
+        or (
+            failure_message is not None
+            and (not isinstance(failure_message, str) or not failure_message)
+        )
     ):
         message = 'invalid runtime metadata values'
         raise RuntimeMetadataError(message)
@@ -126,6 +164,8 @@ def read_runtime_metadata(path: Path) -> RuntimeMetadata:
         effective_models=tuple(models),
         effective_model_status=EffectiveModelStatus(status),
         timed_out=timed_out,
+        failure_code=failure_code,
+        failure_message=failure_message,
     )
 
 
@@ -135,6 +175,8 @@ def exception_runtime_metadata(error: BaseException) -> RuntimeMetadata:
     models = getattr(error, 'effective_models', ())
     status = getattr(error, 'effective_model_status', 'unavailable')
     timed_out = getattr(error, 'timed_out', False)
+    failure_code = getattr(error, 'failure_code', None)
+    failure_message = getattr(error, 'failure_message', None)
     if type(timed_out) is not bool:
         timed_out = False
     if (
@@ -143,11 +185,19 @@ def exception_runtime_metadata(error: BaseException) -> RuntimeMetadata:
         and len(models) == len(set(models))
         and status in EffectiveModelStatus.values()
         and (status == EffectiveModelStatus.REPORTED) == bool(models)
+        and (failure_code is None) == (failure_message is None)
+        and (failure_code is None or (isinstance(failure_code, str) and failure_code))
+        and (
+            failure_message is None
+            or (isinstance(failure_message, str) and failure_message)
+        )
     ):
         return RuntimeMetadata(
             effective_models=tuple(models),
             effective_model_status=EffectiveModelStatus(status),
             timed_out=timed_out,
+            failure_code=failure_code,
+            failure_message=failure_message,
         )
     return RuntimeMetadata(timed_out=timed_out)
 

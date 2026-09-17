@@ -76,6 +76,8 @@ class AgentResult:
     effective_models: tuple[str, ...] = ()
     effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
     timed_out: bool = False
+    failure_code: str | None = None
+    failure_message: str | None = None
 
 
 class AgentAdapter(Protocol):
@@ -180,6 +182,8 @@ class CommandAgentAdapter:
                 effective_models=metadata.effective_models,
                 effective_model_status=metadata.effective_model_status,
                 timed_out=getattr(error, 'timed_out', False) or metadata.timed_out,
+                failure_code=metadata.failure_code,
+                failure_message=metadata.failure_message,
             )
             raise
         metadata = self._consume_runtime_metadata(request.runtime_metadata_path)
@@ -192,4 +196,6 @@ class CommandAgentAdapter:
             effective_models=metadata.effective_models,
             effective_model_status=metadata.effective_model_status,
             timed_out=metadata.timed_out,
+            failure_code=metadata.failure_code,
+            failure_message=metadata.failure_message,
         )

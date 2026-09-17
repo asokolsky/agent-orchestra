@@ -232,6 +232,7 @@ def test_adapter_profiles_render_dynamic_values(tmp_path: Path) -> None:
     assert codex[codex.index('--output-last-message') + 1] == 'r'
     assert claude[claude.index('--settings') + 1] == '{}'
     assert claude[claude.index('--mcp-config') + 1] == '{"mcpServers":{}}'
+    assert claude[claude.index('--permission-mode') + 1] == 'dontAsk'
 
 
 def test_issue_reviewer_assignment_comes_from_packaged_data() -> None:

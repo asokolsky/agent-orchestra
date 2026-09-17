@@ -84,3 +84,5 @@ class ReviewerDispatchResult:
 
     decision: ReviewerDecision
     message_id: str | None
+    failure_code: str | None = None
+    failure_message: str | None = None

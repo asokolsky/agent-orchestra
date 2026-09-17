@@ -125,7 +125,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
 
         monkeypatch.setattr('agent_orchestra.adapter.codex.run_streaming_process', run)
         invoke: Callable[..., None] = run_codex_reviewer
-    else:
+    elif runtime == 'claude-code':
         monkeypatch.setattr(
             'agent_orchestra.adapter.claude_code.skill_destination',
             lambda *_args, **_kwargs: skill,
@@ -149,6 +149,8 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
             'agent_orchestra.adapter.claude_code.run_streaming_process', run
         )
         invoke = run_claude_code_reviewer
+    else:
+        raise AssertionError(f'unsupported runtime: {runtime}')
 
     invoke(request, response, model='runtime-model')
 
@@ -167,7 +169,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
         assert 'sandbox_workspace_write.exclude_tmpdir_env_var=true' in command
         assert 'sandbox_workspace_write.network_access=false' in command
         assert str(worktree) in str(kwargs['input'])
-    else:
+    elif runtime == 'claude-code':
         assert command[command.index('--permission-mode') + 1] == 'dontAsk'
         assert kwargs['cwd'] == worktree
         settings = json.loads(command[command.index('--settings') + 1])
@@ -176,7 +178,9 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
         assert temporary.parent == response.parent
         assert filesystem['denyWrite'] == [str(worktree)]
         assert environment['TMPDIR'] == str(temporary)
-        assert 'Bash(mise run tests)' in command
+        assert 'Bash(mise run tests)' not in command
+    else:
+        raise AssertionError(f'unsupported runtime: {runtime}')
     assert environment['PYTHONDONTWRITEBYTECODE'] == '1'
     assert environment['PYTEST_ADDOPTS'] == '-p no:cacheprovider'
     assert RUNTIME_METADATA_ENV not in environment
@@ -212,12 +216,16 @@ def test_reviewer_adapters_report_stable_execution_failures(
     skill = tmp_path / 'skills/agent-orchestra-reviewer'
     skill.mkdir(parents=True)
     (skill / 'SKILL.md').write_text('review instructions\n')
-    module = (
-        'agent_orchestra.adapter.codex'
-        if runtime == 'codex'
-        else 'agent_orchestra.adapter.claude_code'
-    )
-    executable = 'codex' if runtime == 'codex' else 'claude'
+    if runtime == 'codex':
+        module = 'agent_orchestra.adapter.codex'
+        executable = 'codex'
+        invoke = run_codex_reviewer
+    elif runtime == 'claude-code':
+        module = 'agent_orchestra.adapter.claude_code'
+        executable = 'claude'
+        invoke = run_claude_code_reviewer
+    else:
+        raise AssertionError(f'unsupported runtime: {runtime}')
     monkeypatch.setattr(f'{module}.skill_destination', lambda *_args: skill)
     monkeypatch.setattr(
         f'{module}.shutil.which',
@@ -233,10 +241,12 @@ def test_reviewer_adapters_report_stable_execution_failures(
             return subprocess.CompletedProcess(command, 9, stdout='', stderr='failed')
         if runtime == 'claude-code':
             return subprocess.CompletedProcess(command, 0, stdout='not-json', stderr='')
-        return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+        elif runtime == 'codex':
+            return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+        else:
+            raise AssertionError(f'unsupported runtime: {runtime}')
 
     monkeypatch.setattr(f'{module}.run_streaming_process', fail)
-    invoke = run_codex_reviewer if runtime == 'codex' else run_claude_code_reviewer
 
     with pytest.raises(AdapterError, match=expected):
         invoke(request, tmp_path / 'run/response.json')

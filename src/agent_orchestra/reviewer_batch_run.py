@@ -1298,7 +1298,10 @@ def _execute_reviewer_dispatch(
             'rejected_review_artifact',
         )
         return ReviewerDispatchResult(
-            ReviewerDecision(dispatch.reviewer_id, 'incomplete'), None
+            ReviewerDecision(dispatch.reviewer_id, 'incomplete'),
+            None,
+            completed.failure_code,
+            completed.failure_message,
         )
 
     if artifact_path.is_file():
@@ -1389,9 +1392,17 @@ def _finish_reviewer_batch(
     if decision.incomplete_reviewers:
         interrupted = transition(review_round.reviewing, RunState.INTERRUPTED)
         context.store.update(interrupted, expected_state=RunState.REVIEWING)
-        raise WorkerError(
-            REVIEWER_BATCH_INCOMPLETE, code=REVIEWER_BATCH_INCOMPLETE_CODE
+        diagnostics = tuple(
+            f'{result.decision.reviewer_id}: '
+            f'{result.failure_message or result.failure_code}'
+            for result in results
+            if result.decision.outcome == 'incomplete'
+            and (result.failure_message is not None or result.failure_code is not None)
         )
+        message = REVIEWER_BATCH_INCOMPLETE
+        if diagnostics:
+            message = f'{message}: {"; ".join(diagnostics)}'
+        raise WorkerError(message, code=REVIEWER_BATCH_INCOMPLETE_CODE)
     run_directory = prepare_run_evidence_directory(
         context.runs_directory, str(review_round.run.id)
     )

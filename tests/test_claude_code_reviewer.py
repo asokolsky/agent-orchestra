@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -127,6 +129,7 @@ def test_claude_code_reviewer_is_read_only_and_writes_protocol_files(
     assert '--print' in command
     assert command[command.index('--permission-mode') + 1] == 'dontAsk'
     assert 'Bash(git diff --no-ext-diff --binary HEAD)' in command
+    assert 'Bash(mise run tests)' not in command
     assert '--output' not in command
     assert command[command.index('--setting-sources') + 1] == ''
     assert command[command.index('--mcp-config') + 1] == '{"mcpServers":{}}'
@@ -142,7 +145,11 @@ def test_claude_code_reviewer_is_read_only_and_writes_protocol_files(
     environment = kwargs['env']
     assert isinstance(environment, dict)
     assert environment['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'] == '1'
-    assert '/agent-orchestra-reviewer' in str(kwargs['input'])
+    prompt = str(kwargs['input'])
+    assert '/agent-orchestra-reviewer' in prompt
+    assert 'Network access and project validation commands' in prompt
+    assert 'network commands\nsuch as `curl`' in prompt
+    assert 'do not run `mise trust`' in prompt
     assert json.loads(response.read_text())['payload']['verdict'] == 'approved'
     assert artifact.is_file()
 
@@ -206,6 +213,151 @@ def test_claude_code_reviewer_reports_models_before_nonzero_exit(
         effective_models=('claude-sonnet-4-6',),
         effective_model_status=EffectiveModelStatus.REPORTED,
     )
+
+
+def test_claude_code_reviewer_reports_structured_output_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preserve Claude's actionable structured-output failure classification."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'run/messages/request.json'
+    metadata = tmp_path / 'run/runtime.json'
+    _write_request(request, worktree, tmp_path / 'run/artifacts/review.md')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(metadata))
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.run_streaming_process',
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=json.dumps(
+                {
+                    'subtype': 'error_max_structured_output_retries',
+                    'errors': [
+                        'Failed to provide valid structured output after 5 attempts'
+                    ],
+                    'num_turns': 22,
+                    'total_cost_usd': 0.48,
+                    'permission_denials': [{'tool_name': 'Bash'}],
+                    'modelUsage': {'claude-sonnet': {'inputTokens': 10}},
+                }
+            ),
+            stderr='permission mode forced to default',
+        ),
+    )
+
+    with pytest.raises(
+        ClaudeCodeReviewerError, match='exhausted structured-output retries'
+    ):
+        run_claude_code_reviewer(request, tmp_path / 'run/result.json')
+
+    assert read_runtime_metadata(metadata) == RuntimeMetadata(
+        effective_models=('claude-sonnet',),
+        effective_model_status=EffectiveModelStatus.REPORTED,
+        failure_code='structured_output_exhausted',
+        failure_message=(
+            'claude-code exhausted structured-output retries: '
+            'Failed to provide valid structured output after 5 attempts; '
+            'num_turns=22; total_cost_usd=0.48; permission_denials=Bash'
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ('subtype', 'failure_code', 'failure_message'),
+    [
+        (
+            'error_max_turns',
+            'turn_limit_exhausted',
+            'claude-code exhausted its turn limit',
+        ),
+        (
+            'error_max_budget_usd',
+            'provider_budget_exhausted',
+            'claude-code exhausted its budget limit',
+        ),
+        (
+            'error_during_execution',
+            'provider_execution_failed',
+            'claude-code failed during execution',
+        ),
+    ],
+)
+def test_claude_code_reviewer_classifies_documented_failures(
+    subtype: str,
+    failure_code: str,
+    failure_message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Map each documented nonzero result subtype to stable metadata."""
+
+    worktree = tmp_path / 'repo'
+    worktree.mkdir()
+    request = tmp_path / 'run/messages/request.json'
+    metadata = tmp_path / 'run/runtime.json'
+    _write_request(request, worktree, tmp_path / 'run/artifacts/review.md')
+    monkeypatch.setenv(RUNTIME_METADATA_ENV, str(metadata))
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.shutil.which', lambda _: '/bin/claude'
+    )
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.claude_code.run_streaming_process',
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=json.dumps({'subtype': subtype, 'num_turns': 22}),
+            stderr='',
+        ),
+    )
+
+    with pytest.raises(ClaudeCodeReviewerError, match=failure_message):
+        run_claude_code_reviewer(request, tmp_path / 'run/result.json')
+
+    assert read_runtime_metadata(metadata) == RuntimeMetadata(
+        failure_code=failure_code,
+        failure_message=f'{failure_message}; num_turns=22',
+    )
+
+
+@pytest.mark.skipif(shutil.which('claude') is None, reason='claude is not installed')
+def test_claude_cli_reports_effective_permission_mode_under_env_scrub() -> None:
+    """Pin the CLI's effective reviewer mode under subprocess hardening."""
+
+    executable = shutil.which('claude')
+    assert executable is not None
+    environment = os.environ.copy()
+    environment['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'] = '1'
+    completed = subprocess.run(
+        [
+            executable,
+            '--init-only',
+            '--no-session-persistence',
+            '--setting-sources',
+            '',
+            '--strict-mcp-config',
+            '--mcp-config',
+            '{"mcpServers":{}}',
+            '--permission-mode',
+            'dontAsk',
+            '--tools',
+            'Read',
+            '--allowedTools',
+            'Read',
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0
+    assert 'Permission mode forced to default' in completed.stderr
 
 
 def test_claude_code_reviewer_reports_models_before_schema_validation(
