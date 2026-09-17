@@ -191,7 +191,9 @@ by another process.
 - Treat committing and publishing as separate, explicit authorization gates.
 - Preserve worktrees and changes that the orchestrator does not own.
 - Make every workflow transition durable and resumable.
-- Separate agent roles from the runtimes that execute them.
+- Separate agent roles from the runtimes that execute them; the
+  [OpenAI Agents API runtime decision](openai-agents-api.md) applies this
+  boundary to one proposed backend.
 - Grant capabilities by registered role and fail closed for unknown roles.
 - Give a value that several functions need an owner rather than a parameter.
 

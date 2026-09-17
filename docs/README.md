@@ -7,6 +7,7 @@
 | [Concepts](concepts.md) | The vocabulary: jobs, tasks, attempts, roles, runtimes, adapters, capabilities. | A term in another document is unfamiliar. |
 | [Workflows](workflows.md) | The state machine, its transitions, and the recovery paths. | You need to know what a state means or how a stopped job resumes. |
 | [Design](design.md) | Why the tool is built this way, and the contracts it keeps. | You are changing the tool, or need the rationale behind a constraint. |
+| [OpenAI Agents API runtime decision](openai-agents-api.md) | Why the Agents API is not a registered runtime. | You are evaluating that API as an execution backend. |
 
 ## Role contracts
 
@@ -25,7 +26,8 @@ Each fact has one home, so that it can be corrected in one place:
 - **How to do something** is in the primer.
 - **What an option does** is in the CLI reference.
 - **What a word means** is in concepts.
-- **Why a decision was made** is in design.
+- **Why a decision was made** is in design or a focused decision document
+  indexed above.
 
 The repository [README](../README.md) is an overview and a set of pointers. It
 does not restate any of the above.
