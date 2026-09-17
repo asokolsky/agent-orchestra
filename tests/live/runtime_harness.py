@@ -280,7 +280,6 @@ def assert_review_cycle_messages(
         assert finding_ids
         dispositions = handoff['payload']['dispositions']
         assert {item['finding_id'] for item in dispositions} == finding_ids
-        assert all(item['disposition'] == 'addressed' for item in dispositions)
 
     expected_roles = ['reviewer']
     for _handoff in handoffs:

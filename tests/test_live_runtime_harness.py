@@ -10,7 +10,7 @@ from tests.live.runtime_harness import assert_review_cycle_messages
 
 
 def _review_documents(
-    verdicts: tuple[str, ...], *, validation: tuple[dict[str, str], ...] = ()
+    verdicts: tuple[str, ...], *, disposition: str = 'addressed'
 ) -> tuple[
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
@@ -56,10 +56,9 @@ def _review_documents(
                 'dispositions': [
                     {
                         'finding_id': f'finding-{index}',
-                        'disposition': 'addressed',
+                        'disposition': disposition,
                     }
-                ],
-                'validation': list(validation),
+                ]
             },
         }
         for index in range(len(verdicts) - 1)
@@ -71,8 +70,7 @@ def test_review_cycle_accepts_three_iterations() -> None:
     """Use first and last semantics when remediation needs another round."""
 
     documents = _review_documents(
-        ('changes_requested', 'changes_requested', 'approved'),
-        validation=({'command': 'python -m unittest', 'outcome': 'passed'},),
+        ('changes_requested', 'changes_requested', 'approved')
     )
 
     assert assert_review_cycle_messages(*documents) == (
@@ -84,10 +82,13 @@ def test_review_cycle_accepts_three_iterations() -> None:
     )
 
 
-def test_review_cycle_accepts_empty_developer_validation() -> None:
-    """Permit the schema-valid empty developer validation list."""
+@pytest.mark.parametrize('disposition', ['rejected', 'blocked'])
+def test_review_cycle_accepts_non_addressed_disposition(disposition: str) -> None:
+    """Permit every disposition defined by the developer role contract."""
 
-    documents = _review_documents(('changes_requested', 'approved'))
+    documents = _review_documents(
+        ('changes_requested', 'approved'), disposition=disposition
+    )
 
     assert assert_review_cycle_messages(*documents) == (
         'reviewer',
