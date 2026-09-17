@@ -6,7 +6,10 @@ from typing import Any
 
 import pytest
 
-from tests.live.runtime_harness import assert_review_cycle_messages
+from tests.live.runtime_harness import (
+    assert_consecutive_review_digests_change,
+    assert_review_cycle_messages,
+)
 
 
 def _review_documents(
@@ -107,3 +110,26 @@ def test_review_cycle_rejects_mismatched_developer_handoff() -> None:
 
     with pytest.raises(AssertionError):
         assert_review_cycle_messages(requests, results, remediation_requests, handoffs)
+
+
+def test_review_digests_must_change_between_consecutive_rounds() -> None:
+    """Reject a re-review request bound to the pre-remediation digest."""
+
+    requests, _results, _remediation_requests, _handoffs = _review_documents(
+        ('changes_requested', 'approved')
+    )
+    requests[1]['scope']['diff_digest'] = requests[0]['scope']['diff_digest']
+
+    with pytest.raises(AssertionError):
+        assert_consecutive_review_digests_change(requests)
+
+
+def test_review_digests_may_return_to_an_earlier_value() -> None:
+    """Enforce pairwise changes without requiring global digest uniqueness."""
+
+    requests, _results, _remediation_requests, _handoffs = _review_documents(
+        ('changes_requested', 'changes_requested', 'approved')
+    )
+    requests[2]['scope']['diff_digest'] = requests[0]['scope']['diff_digest']
+
+    assert_consecutive_review_digests_change(requests)

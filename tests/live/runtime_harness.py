@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from hashlib import sha256
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, cast
 
 from agent_orchestra.audit import build_audit_document
@@ -287,6 +288,15 @@ def assert_review_cycle_messages(
     return tuple(expected_roles)
 
 
+def assert_consecutive_review_digests_change(
+    requests: tuple[dict[str, Any], ...],
+) -> None:
+    """Require every remediation round to produce a new review digest."""
+
+    digests = tuple(request['scope']['diff_digest'] for request in requests)
+    assert all(previous != current for previous, current in pairwise(digests))
+
+
 def assert_local_scenario(scenario: LocalScenario, runtime: LiveRuntime) -> None:
     """Verify the shared review, remediation, approval, and evidence contract."""
 
@@ -322,6 +332,7 @@ def assert_local_scenario(scenario: LocalScenario, runtime: LiveRuntime) -> None
     expected_roles = assert_review_cycle_messages(
         requests, results, remediation_requests, handoffs
     )
+    assert_consecutive_review_digests_change(requests)
 
     records = invocation_records(scenario.runs_directory, scenario.job_id)
     assert tuple(record['role'] for record in records) == expected_roles
