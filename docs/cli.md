@@ -1011,7 +1011,13 @@ complete provider envelope remains in the invocation stdout log. This avoids
 adding Claude-specific fields to the shared invocation schema while keeping the
 operator-facing failure actionable.
 
-### Opt-in live Claude verification
+### Opt-in live runtime verification
+
+Authenticated runtime checks are separate from the ordinary suite. Use the
+runtime-specific command below after changing an adapter or after installing,
+upgrading, authenticating, or repairing its CLI.
+
+#### Claude Code
 
 Run the authenticated Claude integration suite after installing or upgrading
 Claude Code, changing an adapter, or repairing local authentication:
@@ -1031,8 +1037,9 @@ developer, and issue-reviewer adapters. The source-code scenario uses a
 temporary Git repository containing one deterministic defect and stops at
 `awaiting_commit_authorization`; the issue-review scenario uses an immutable
 local provider stub. Both use an external temporary database and evidence root,
-require `audit --verify` to report `verified`, and perform no commit, push,
-provider read, or provider write.
+require `audit --verify` to report `verified`, and perform no commit, push, or
+provider write. The issue scenario replaces both provider reads with the
+immutable local stub, so it performs no external provider access.
 
 This opt-in command starts at least seven Claude sessions and may start more if a
 review needs another remediation round. Those sessions consume the configured
@@ -1048,6 +1055,49 @@ nonzero runtime exit, malformed structured output, missing model metadata, or
 unverified evidence fails instead of skipping. Set
 `AGENT_ORCHESTRA_LIVE_CLAUDE_MODEL` to request a specific model; otherwise the
 installed CLI chooses its configured default.
+
+#### OpenAI Codex
+
+Install both Codex role skills, confirm the CLI login, and run the dedicated
+suite:
+
+```shell
+agent-orchestra skills install --agent codex \
+  --skill agent-orchestra-reviewer \
+  --skill agent-orchestra-developer
+codex login status
+mise run test-live-codex
+```
+
+The command requires `codex` on `PATH`, a usable non-interactive login, and
+both installed source-code role skills. Preflight reports the CLI version and
+invokes each skill through its production role profile with structured output;
+it fails if either installed skill cannot supply its own metadata without a
+shell read. The shared source-code scenario then exercises the real reviewer,
+developer, and second reviewer against a deterministic defect and stops at
+`awaiting_commit_authorization`. The shared issue scenario uses an immutable
+local provider stub and the real issue-reviewer adapter. Both scenarios use an
+external temporary database and evidence root, require `audit --verify` to
+report `verified`, and perform no commit, push, or provider write. The issue
+scenario replaces both provider reads with the immutable local stub, so it
+performs no external provider access.
+
+The command starts at least six Codex sessions and may start more if a review
+needs another remediation round. Those sessions consume the authenticated
+account's quota and may incur usage charges. Each adapter attempt is bounded to
+five minutes, and the local workflow permits at most three review iterations.
+
+Ordinary `mise run tests` discovers the Codex live module but skips it with the
+reason `set AGENT_ORCHESTRA_LIVE_CODEX=1 to run live Codex checks`; it does not
+invoke the installed CLI and needs no credentials, network access, or usage
+cost. `mise run test-live-codex` sets the opt-in, so a missing executable,
+failed login, unavailable or uninvokable skill, sandbox or structured-output
+failure, timeout, nonzero runtime exit, incorrect effective-model status, or
+unverified evidence fails instead of skipping. Set
+`AGENT_ORCHESTRA_LIVE_CODEX_MODEL` to request a specific model; otherwise the
+installed CLI chooses its configured default. Codex currently does not expose
+effective model identity in its machine-readable result, so the suite requires
+`effective_model_status: "unavailable"` and an empty effective-model list.
 
 ### Custom reviewer command
 

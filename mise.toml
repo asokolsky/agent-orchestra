@@ -85,3 +85,9 @@ description = "Run opt-in integration checks against the authenticated Claude CL
 run = [
     'AGENT_ORCHESTRA_LIVE_CLAUDE=1 uv run pytest -vv -s -p no:xdist tests/live/test_claude_integration.py',
 ]
+
+[tasks.test-live-codex]
+description = "Run opt-in integration checks against the authenticated Codex CLI"
+run = [
+    'AGENT_ORCHESTRA_LIVE_CODEX=1 uv run pytest -vv -s -p no:xdist tests/live/test_codex_integration.py',
+]

@@ -54,6 +54,7 @@ addopts = "-q"
 testpaths = ["tests"]
 markers = [
     "live_claude: opt-in tests that invoke an installed authenticated Claude CLI",
+    "live_codex: opt-in tests that invoke an installed authenticated Codex CLI",
 ]
 
 [tool.ruff]
