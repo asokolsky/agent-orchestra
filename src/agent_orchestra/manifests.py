@@ -50,6 +50,7 @@ EVIDENCE_TYPES = (
     'issue_snapshot',
     'issue_review_request',
     'issue_review_result',
+    'issue_feedback',
     'review_request',
     'review_result',
     'remediation_request',

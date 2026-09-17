@@ -6,7 +6,7 @@ import sys
 from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
@@ -14,7 +14,7 @@ from agent_orchestra import issue_review
 from agent_orchestra.adapter.base import IssueReviewerAdapter, IssueReviewExecution
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
-from agent_orchestra.audit import _canonical_evidence_type
+from agent_orchestra.audit import _canonical_evidence_type, build_audit_document
 from agent_orchestra.cli import main
 from agent_orchestra.evidence import resolve_evidence_path
 from agent_orchestra.invocations import InvocationEvidenceStore
@@ -250,6 +250,22 @@ def test_run_issue_review_persists_result_and_feedback(
         'invocations/000001-issue-reviewer-attempt-0001.json',
         'logs/000001-issue-reviewer-attempt-0001.stderr.log',
         'logs/000001-issue-reviewer-attempt-0001.stdout.log',
+    }
+    audit = build_audit_document(
+        finished,
+        store.list_transitions(job.id),
+        store.list_issue_actions(job.id),
+        runs,
+        verify=True,
+    )
+    assert audit['result'] == 'verified'
+    audit_evidence = cast('list[dict[str, object]]', audit['evidence'])
+    assert {
+        item['evidence_type'] for item in audit_evidence if item['status'] == 'verified'
+    } >= {
+        'issue_feedback',
+        'issue_review_request',
+        'issue_review_result',
     }
 
 

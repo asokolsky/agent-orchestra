@@ -16,6 +16,10 @@ pattern = "iterations/\\d{6}/request\\.json"
 template = "iterations/{ordinal:06d}/result.json"
 pattern = "iterations/\\d{6}/result\\.json"
 
+[evidence.issue_feedback]
+template = "iterations/{ordinal:06d}/feedback.md"
+pattern = "iterations/\\d{6}/feedback\\.md"
+
 [evidence.review_request]
 template = "messages/{ordinal:06d}-review-request.json"
 reviewer_template = "messages/{ordinal:06d}-{reviewer_id}-review-request.json"

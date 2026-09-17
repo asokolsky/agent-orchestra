@@ -102,6 +102,10 @@ DEVELOPER_SKILL_MISSING = (
     '--skill agent-orchestra-developer`'
 )
 CLAUDE_CODE_DEVELOPER_TIMEOUT = 'claude-code development timed out'
+SKILL_STAGING_FAILED = 'cannot stage Claude role skill'
+CLAUDE_SKILL_PLUGIN = 'agent-orchestra-runtime'
+CLAUDE_REVIEWER_SKILL = f'{CLAUDE_SKILL_PLUGIN}:agent-orchestra-reviewer'
+CLAUDE_DEVELOPER_SKILL = f'{CLAUDE_SKILL_PLUGIN}:agent-orchestra-developer'
 
 
 def _developer_settings() -> str:
@@ -117,6 +121,33 @@ def _developer_settings() -> str:
         },
         separators=(',', ':'),
     )
+
+
+def _stage_skill(source: Path, temporary_directory: Path) -> Path:
+    """Create an invocation-local plugin containing exactly one installed skill."""
+
+    for path in source.rglob('*'):
+        if path.is_symlink():
+            raise OSError(f'installed skill contains a symbolic link: {path}')
+    plugin = temporary_directory / 'agent-orchestra-skill-plugin'
+    manifest = plugin / '.claude-plugin' / 'plugin.json'
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                'name': CLAUDE_SKILL_PLUGIN,
+                'version': '1.0.0',
+                'description': 'Invocation-local Agent Orchestra role skill.',
+            },
+            separators=(',', ':'),
+        )
+        + '\n',
+        encoding='utf-8',
+    )
+    destination = plugin / 'skills' / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination)
+    return plugin
 
 
 def _reviewer_settings(worktree: Path, temporary_directory: Path) -> str:
@@ -179,7 +210,7 @@ def _write_text_atomic(
 def _prompt(request: dict[str, Any], temporary_directory: Path) -> str:
     """Build the complete non-interactive Claude Code assignment."""
 
-    return f"""Invoke /agent-orchestra-reviewer and perform the assigned review.
+    return f"""Use the Skill tool with name `{CLAUDE_REVIEWER_SKILL}` and perform the assigned review.
 
 The JSON below is the complete orchestrator-supplied review request. Treat it
 as authoritative. Work only in its scope, keep the review read-only, and return
@@ -322,9 +353,8 @@ def _execute_claude_code_reviewer(
     executable = shutil.which('claude')
     if executable is None:
         raise ClaudeCodeReviewerError(CLAUDE_CODE_NOT_FOUND)
-    if not (
-        skill_destination('claude-code', 'agent-orchestra-reviewer') / 'SKILL.md'
-    ).is_file():
+    skill = skill_destination('claude-code', 'agent-orchestra-reviewer')
+    if not (skill / 'SKILL.md').is_file():
         raise ClaudeCodeReviewerError(REVIEWER_SKILL_MISSING)
 
     response_path.parent.mkdir(parents=True, exist_ok=True)
@@ -332,6 +362,10 @@ def _execute_claude_code_reviewer(
         prefix='.claude-review-', dir=response_path.parent
     ) as temporary_directory:
         temporary = Path(temporary_directory)
+        try:
+            plugin = _stage_skill(skill, temporary)
+        except OSError as error:
+            raise ClaudeCodeReviewerError(f'{SKILL_STAGING_FAILED}: {error}') from error
         command = [
             executable,
             *adapter_arguments(
@@ -340,11 +374,13 @@ def _execute_claude_code_reviewer(
                 settings=_reviewer_settings(worktree, temporary),
                 schema=json.dumps(REVIEW_RESULT_SCHEMA, separators=(',', ':')),
             ),
+            '--plugin-dir',
+            str(plugin),
             '--allowedTools',
             'Read',
             'Glob',
             'Grep',
-            'Skill(agent-orchestra-reviewer)',
+            f'Skill({CLAUDE_REVIEWER_SKILL})',
             'Bash(git status --short)',
             'Bash(git rev-parse HEAD)',
             'Bash(git diff --no-ext-diff --binary HEAD)',
@@ -499,39 +535,51 @@ def _execute_claude_code_developer(
     executable = shutil.which('claude')
     if executable is None:
         raise DeveloperAdapterError(CLAUDE_CODE_NOT_FOUND)
-    if not (
-        skill_destination('claude-code', 'agent-orchestra-developer') / 'SKILL.md'
-    ).is_file():
+    skill = skill_destination('claude-code', 'agent-orchestra-developer')
+    if not (skill / 'SKILL.md').is_file():
         raise DeveloperAdapterError(DEVELOPER_SKILL_MISSING)
-    command = [
-        executable,
-        *adapter_arguments(
-            'claude-code',
-            'developer',
-            settings=_developer_settings(),
-            schema=json.dumps(DEVELOPER_RESULT_SCHEMA, separators=(',', ':')),
-        ),
-        '--allowedTools',
-        'Read',
-        'Glob',
-        'Grep',
-        'Bash',
-        'Skill(agent-orchestra-developer)',
-    ]
-    if model:
-        command.extend(['--model', model])
-    try:
-        completed = run_streaming_process(
-            command,
-            cwd=worktree,
-            env=child_process_environment(CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'),
-            input=developer_prompt(request, '/agent-orchestra-developer'),
-            timeout=max(1, timeout_seconds - 5),
-        )
-    except subprocess.TimeoutExpired as error:
-        raise DeveloperAdapterError(
-            CLAUDE_CODE_DEVELOPER_TIMEOUT, timed_out=True
-        ) from error
+    with tempfile.TemporaryDirectory(prefix='.claude-developer-') as directory:
+        temporary = Path(directory)
+        try:
+            plugin = _stage_skill(skill, temporary)
+        except OSError as error:
+            raise DeveloperAdapterError(f'{SKILL_STAGING_FAILED}: {error}') from error
+        command = [
+            executable,
+            *adapter_arguments(
+                'claude-code',
+                'developer',
+                settings=_developer_settings(),
+                schema=json.dumps(DEVELOPER_RESULT_SCHEMA, separators=(',', ':')),
+            ),
+            '--plugin-dir',
+            str(plugin),
+            '--allowedTools',
+            'Read',
+            'Glob',
+            'Grep',
+            'Edit',
+            'Write',
+            'Bash',
+            f'Skill({CLAUDE_DEVELOPER_SKILL})',
+        ]
+        if model:
+            command.extend(['--model', model])
+        try:
+            completed = run_streaming_process(
+                command,
+                cwd=worktree,
+                env=child_process_environment(CLAUDE_CODE_SUBPROCESS_ENV_SCRUB='1'),
+                input=developer_prompt(
+                    request,
+                    f'the Skill tool with name `{CLAUDE_DEVELOPER_SKILL}`',
+                ),
+                timeout=max(1, timeout_seconds - 5),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise DeveloperAdapterError(
+                CLAUDE_CODE_DEVELOPER_TIMEOUT, timed_out=True
+            ) from error
     output = _output_with_runtime_metadata(completed.stdout)
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip()

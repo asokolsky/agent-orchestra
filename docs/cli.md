@@ -999,12 +999,55 @@ headless mode, while the environment scrub is responsible for any effective
 override. The reviewer sandbox, narrowed tool list, and explicit allowed-tool
 rules remain the enforcement boundary.
 
+The developer profile separately pre-approves `Edit` and `Write`. This is
+required because the same environment hardening makes `default` the effective
+mode; the Claude sandbox still confines those tools to the assigned worktree
+and the invocation-owned directory containing the staged role skill.
+
 Known nonzero Claude result subtypes are translated into provider-neutral
 runtime metadata. Its structured failure message retains safe diagnostics when
 present: turn count, total estimated cost, and the names of denied tools. The
 complete provider envelope remains in the invocation stdout log. This avoids
 adding Claude-specific fields to the shared invocation schema while keeping the
 operator-facing failure actionable.
+
+### Opt-in live Claude verification
+
+Run the authenticated Claude integration suite after installing or upgrading
+Claude Code, changing an adapter, or repairing local authentication:
+
+```shell
+agent-orchestra skills install --agent claude-code \
+  --skill agent-orchestra-reviewer \
+  --skill agent-orchestra-developer
+claude auth status
+mise run test-live-claude
+```
+
+The command requires `claude` on `PATH`, a usable non-interactive login, and
+both installed source-code role skills. It reports the CLI version, proves that
+Claude can invoke both role skills, then exercises the real reviewer,
+developer, and issue-reviewer adapters. The source-code scenario uses a
+temporary Git repository containing one deterministic defect and stops at
+`awaiting_commit_authorization`; the issue-review scenario uses an immutable
+local provider stub. Both use an external temporary database and evidence root,
+require `audit --verify` to report `verified`, and perform no commit, push,
+provider read, or provider write.
+
+This opt-in command starts at least seven Claude sessions and may start more if a
+review needs another remediation round. Those sessions consume the configured
+Claude account's quota and may incur usage charges. Each adapter attempt is
+bounded to four minutes, and the local workflow permits at most three review
+iterations.
+
+Ordinary `mise run tests` discovers these tests but skips them with the reason
+`set AGENT_ORCHESTRA_LIVE_CLAUDE=1 to run live Claude checks`; it needs no
+credentials or network access. `mise run test-live-claude` sets that opt-in, so
+a missing executable, failed authentication, unavailable skill, timeout,
+nonzero runtime exit, malformed structured output, missing model metadata, or
+unverified evidence fails instead of skipping. Set
+`AGENT_ORCHESTRA_LIVE_CLAUDE_MODEL` to request a specific model; otherwise the
+installed CLI chooses its configured default.
 
 ### Custom reviewer command
 

@@ -443,12 +443,16 @@ Runtime profiles are the strongest case. They carry the exact arguments that
 bound every agent this tool launches: the Codex reviewer profile sets
 `sandbox_workspace_write.network_access=false` and excludes `/tmp` and
 `TMPDIR`, and the Claude Code reviewer profile sets `--strict-mcp-config` with
-an empty `mcpServers` object and a fixed `--tools` list. Loading those from a
-writable path would let a TOML edit grant an agent network access, filesystem
-write, or arbitrary MCP servers. The profiles also pass `--ignore-user-config`
-and `--setting-sources ""` precisely so ambient user configuration cannot reach
-the agent; making the profiles themselves user-configurable would reintroduce
-the exposure those flags exist to remove.
+an empty `mcpServers` object and a fixed `--tools` list. The Claude adapter
+copies only the required installed role skill into an invocation-owned
+temporary plugin and exposes that plugin with `--plugin-dir`;
+`--setting-sources ""` otherwise prevents Claude from discovering the personal
+skill. Loading profiles from a writable path would let a TOML edit
+grant an agent network access, filesystem write, or arbitrary MCP servers. The
+profiles also pass `--ignore-user-config` and `--setting-sources ""` precisely
+so ambient user configuration cannot reach the agent; making the profiles
+themselves user-configurable would reintroduce the exposure those flags exist
+to remove.
 
 The evidence manifest is a contract with data that already exists. Its
 templates and audit recognition patterns are two halves of one naming

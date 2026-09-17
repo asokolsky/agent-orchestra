@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -30,10 +28,6 @@ def run_claude_code_reviewer(
     """Invoke the concrete Claude Code reviewer adapter."""
 
     ClaudeCodeReviewerAdapter(model).execute(request, response)
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _write_request(path: Path, worktree: Path, artifact: Path) -> None:
@@ -111,6 +105,10 @@ def test_claude_code_reviewer_is_read_only_and_writes_protocol_files(
 
         observed['command'] = command
         observed['kwargs'] = kwargs
+        skill_root = Path(command[command.index('--plugin-dir') + 1])
+        observed['skill_root'] = skill_root
+        assert (skill_root / 'skills/agent-orchestra-reviewer/SKILL.md').is_file()
+        assert (skill_root / '.claude-plugin/plugin.json').is_file()
         stdout = json.dumps({'structured_output': _approved_result()})
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr='')
 
@@ -137,7 +135,9 @@ def test_claude_code_reviewer_is_read_only_and_writes_protocol_files(
     assert settings['sandbox']['filesystem']['denyWrite'] == [str(worktree.resolve())]
     assert settings['sandbox']['failIfUnavailable'] is True
     assert settings['sandbox']['allowUnsandboxedCommands'] is False
-    assert '--add-dir' not in command
+    skill_root = observed['skill_root']
+    assert isinstance(skill_root, Path)
+    assert not skill_root.exists()
     assert command[command.index('--model') + 1] == 'sonnet'
     kwargs = observed['kwargs']
     assert isinstance(kwargs, dict)
@@ -146,7 +146,10 @@ def test_claude_code_reviewer_is_read_only_and_writes_protocol_files(
     assert isinstance(environment, dict)
     assert environment['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'] == '1'
     prompt = str(kwargs['input'])
-    assert '/agent-orchestra-reviewer' in prompt
+    assert (
+        'Skill tool with name '
+        '`agent-orchestra-runtime:agent-orchestra-reviewer`' in prompt
+    )
     assert 'Network access and project validation commands' in prompt
     assert 'network commands\nsuch as `curl`' in prompt
     assert 'do not run `mise trust`' in prompt
@@ -322,42 +325,6 @@ def test_claude_code_reviewer_classifies_documented_failures(
         failure_code=failure_code,
         failure_message=f'{failure_message}; num_turns=22',
     )
-
-
-@pytest.mark.skipif(shutil.which('claude') is None, reason='claude is not installed')
-def test_claude_cli_reports_effective_permission_mode_under_env_scrub() -> None:
-    """Pin the CLI's effective reviewer mode under subprocess hardening."""
-
-    executable = shutil.which('claude')
-    assert executable is not None
-    environment = os.environ.copy()
-    environment['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'] = '1'
-    completed = subprocess.run(
-        [
-            executable,
-            '--init-only',
-            '--no-session-persistence',
-            '--setting-sources',
-            '',
-            '--strict-mcp-config',
-            '--mcp-config',
-            '{"mcpServers":{}}',
-            '--permission-mode',
-            'dontAsk',
-            '--tools',
-            'Read',
-            '--allowedTools',
-            'Read',
-        ],
-        check=False,
-        capture_output=True,
-        env=environment,
-        text=True,
-        timeout=30,
-    )
-
-    assert completed.returncode == 0
-    assert 'Permission mode forced to default' in completed.stderr
 
 
 def test_claude_code_reviewer_reports_models_before_schema_validation(

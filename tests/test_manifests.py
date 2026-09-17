@@ -69,6 +69,16 @@ def test_review_batch_result_is_canonical_evidence() -> None:
     assert evidence_ordinal('review_batch_result', path) == 3
 
 
+def test_issue_feedback_is_canonical_evidence() -> None:
+    """Render and recognize generated issue-review feedback."""
+
+    path = evidence_path('issue_feedback', ordinal=2)
+
+    assert path == 'iterations/000002/feedback.md'
+    assert canonical_evidence_type(path) == 'issue_feedback'
+    assert evidence_ordinal('issue_feedback', path) == 2
+
+
 @pytest.fixture(autouse=True)
 def clear_manifest_cache() -> None:
     """Keep loader substitutions isolated while production callers reuse manifests."""

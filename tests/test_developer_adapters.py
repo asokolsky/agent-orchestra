@@ -305,6 +305,10 @@ def test_claude_developer_confines_writes_to_primary_working_directory(
 
         observed['command'] = command
         observed['kwargs'] = kwargs
+        skill_root = Path(command[command.index('--plugin-dir') + 1])
+        observed['skill_root'] = skill_root
+        assert (skill_root / 'skills/agent-orchestra-developer/SKILL.md').is_file()
+        assert (skill_root / '.claude-plugin/plugin.json').is_file()
         return subprocess.CompletedProcess(
             command,
             0,
@@ -331,71 +335,21 @@ def test_claude_developer_confines_writes_to_primary_working_directory(
     }
     assert '--strict-mcp-config' in command
     assert command[command.index('--mcp-config') + 1] == '{"mcpServers":{}}'
-    assert '--add-dir' not in command
+    skill_root = observed['skill_root']
+    assert isinstance(skill_root, Path)
+    assert not skill_root.exists()
     assert 'additionalDirectories' not in settings
     assert 'allowWrite' not in json.dumps(settings)
     assert command[command.index('--tools') + 1] != 'default'
     assert 'Edit(/)' not in command
+    allowed_tools = command[command.index('--allowedTools') + 1 :]
+    assert 'Edit' in allowed_tools
+    assert 'Write' in allowed_tools
     kwargs = observed['kwargs']
     assert isinstance(kwargs, dict)
     environment = kwargs['env']
     assert isinstance(environment, dict)
     assert environment['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'] == '1'
-
-
-UNAVAILABLE_CLI_OUTPUT = 'requires remote managed settings to load'
-
-
-@pytest.mark.skipif(shutil.which('claude') is None, reason='claude is not installed')
-def test_claude_cli_accepts_isolation_options() -> None:
-    """Validate isolation options through a non-interactive Claude session."""
-
-    executable = shutil.which('claude')
-    assert executable is not None
-
-    def invoke(mcp_configuration: str) -> subprocess.CompletedProcess[str]:
-        """Start a session for configuration validation."""
-
-        return subprocess.run(
-            [
-                executable,
-                '--print',
-                '--no-session-persistence',
-                '--setting-sources',
-                '',
-                '--settings',
-                json.dumps(
-                    {
-                        'sandbox': {
-                            'enabled': True,
-                            'failIfUnavailable': True,
-                            'allowUnsandboxedCommands': False,
-                        }
-                    }
-                ),
-                '--strict-mcp-config',
-                '--mcp-config',
-                mcp_configuration,
-            ],
-            check=False,
-            capture_output=True,
-            input='Reply with OK.',
-            text=True,
-            timeout=30,
-        )
-
-    valid = invoke('{"mcpServers":{}}')
-    valid_output = valid.stdout + valid.stderr
-    # A CLI that cannot load organization-managed settings refuses before
-    # reaching any isolation option, which says nothing about this project.
-    # Skip that environment; every other refusal still fails the test.
-    if UNAVAILABLE_CLI_OUTPUT in valid_output:
-        pytest.skip('claude cannot load organization-managed settings here')
-    assert 'Invalid MCP configuration' not in valid_output
-
-    invalid = invoke('{}')
-    invalid_output = invalid.stdout + invalid.stderr
-    assert 'Invalid MCP configuration' in invalid_output
 
 
 @pytest.mark.parametrize('runtime', ['codex', 'claude-code'])
