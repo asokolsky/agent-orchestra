@@ -52,6 +52,9 @@ agent_orchestra = ["py.typed", "manifest/*.toml"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+    "live_claude: opt-in tests that invoke an installed authenticated Claude CLI",
+]
 
 [tool.ruff]
 line-length = 88

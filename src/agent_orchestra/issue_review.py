@@ -455,9 +455,7 @@ def run_issue_review(
             raise IssueReviewError(message)
         feedback_path = _evidence_path(
             job_directory,
-            'iterations',
-            f'{job.iteration:06d}',
-            'feedback.md',
+            *Path(evidence_path('issue_feedback', ordinal=job.iteration)).parts,
         )
         if not feedback_path.is_file():
             message = 'stored issue review feedback is incomplete'
@@ -598,7 +596,8 @@ def run_issue_review(
         _write_text(
             job_directory,
             _evidence_path(
-                job_directory, 'iterations', f'{iteration:06d}', 'feedback.md'
+                job_directory,
+                *Path(evidence_path('issue_feedback', ordinal=iteration)).parts,
             ),
             _render_feedback(result_document),
             evidence_type='issue_feedback',
@@ -718,7 +717,8 @@ def _publish_issue_feedback_locked(
     root = runs_directory.expanduser().resolve()
     job_directory = _job_directory(root, job.id)
     feedback_path = _evidence_path(
-        job_directory, 'iterations', f'{job.iteration:06d}', 'feedback.md'
+        job_directory,
+        *Path(evidence_path('issue_feedback', ordinal=job.iteration)).parts,
     )
     try:
         body = feedback_path.read_text(encoding='utf-8')

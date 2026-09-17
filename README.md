@@ -161,6 +161,11 @@ substituting `mise run format-check` for `mise run format` so a branch is
 verified rather than rewritten. Run `mise run format-check` locally to see what
 CI will see.
 
+Authenticated runtime checks are deliberately separate from the ordinary test
+suite. After installing the Claude role skills, run `mise run test-live-claude`;
+see [Opt-in live Claude verification](docs/cli.md#opt-in-live-claude-verification)
+for prerequisites, cost, isolation, and failure semantics.
+
 `mise run tests` distributes the suite across one worker per available CPU,
 which takes it from about a minute to about fifteen seconds. Parallel workers
 interleave their output, so use `mise run tests-serial` when reading a single
