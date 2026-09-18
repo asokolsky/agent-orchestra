@@ -426,14 +426,14 @@ def _add_execution_commands(
         '--developer-agent',
         type=_runtime_argument(runtimes, RuntimeRole.DEVELOPER),
         choices=runtimes.identifiers(RuntimeRole.DEVELOPER),
-        default=runtimes.default(RuntimeRole.DEVELOPER).identifier,
+        default=cast('str', effective.developer_runtime.value),
     )
     run.add_argument('--developer-model')
     run.add_argument(
         '--reviewer-agent',
         type=_runtime_argument(runtimes, RuntimeRole.REVIEWER),
         choices=runtimes.identifiers(RuntimeRole.REVIEWER),
-        default=runtimes.default(RuntimeRole.REVIEWER).identifier,
+        default=cast('str', effective.reviewer_runtime.value),
     )
     run.add_argument('--reviewer-model')
     run.add_argument(
@@ -1723,41 +1723,36 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
             file=sys.stderr,
         )
         return 2
+    default_developer = cast('str', args.settings.developer_runtime.value)
+    default_reviewer = cast('str', args.settings.reviewer_runtime.value)
     if args.reviewer_set and (
-        args.reviewer_model
-        or args.reviewer_agent
-        != args.runtime_registry.default(RuntimeRole.REVIEWER).identifier
+        args.reviewer_model or args.reviewer_agent != default_reviewer
     ):
         print(
             'error: --reviewer-set cannot be combined with single-reviewer options',
             file=sys.stderr,
         )
         return 2
-    # Selection is judged by value, not by whether the option was typed: the
-    # parser applies these defaults itself, and recording provision instead
-    # collides with the contract that it does. Passing a default explicitly is
-    # therefore indistinguishable from omitting it, and is allowed, since it
-    # selects nothing that a review-only run would have to ignore.
+    # Selection is judged against the effective configured value, not whether
+    # the option was typed: argparse does not retain that provenance. Passing
+    # the effective default explicitly is therefore indistinguishable from
+    # omitting it and selects nothing that a review-only run would ignore.
     developer_selected = (
         args.developer_model
-        or args.developer_agent
-        != args.runtime_registry.default(RuntimeRole.DEVELOPER).identifier
+        or args.developer_agent != default_developer
         or args.developer_timeout != DEFAULT_DEVELOPER_TIMEOUT
     )
     # The custom-command conflict has always covered the agent and model only.
     # Widening it to the timeout here would reject combinations that work today.
     developer_runtime_selected = (
-        args.developer_model
-        or args.developer_agent
-        != args.runtime_registry.default(RuntimeRole.DEVELOPER).identifier
+        args.developer_model or args.developer_agent != default_developer
     )
     conflict: str | None = None
     if args.no_remediation and developer_selected:
         conflict = 'developer options cannot be combined with --no-remediation'
     elif args.reviewer_command and (
         args.reviewer_model
-        or args.reviewer_agent
-        != args.runtime_registry.default(RuntimeRole.REVIEWER).identifier
+        or args.reviewer_agent != default_reviewer
         or developer_runtime_selected
     ):
         conflict = (
@@ -2030,6 +2025,14 @@ def _config_show(
                 'retention.job_evidence_days': {
                     'value': settings.job_evidence_days.value,
                     'source': settings.job_evidence_days.source,
+                },
+                'defaults.developer_runtime': {
+                    'value': settings.developer_runtime.value,
+                    'source': settings.developer_runtime.source,
+                },
+                'defaults.reviewer_runtime': {
+                    'value': settings.reviewer_runtime.value,
+                    'source': settings.reviewer_runtime.source,
                 },
                 'reviewer_sets': {
                     'value': [

@@ -7,10 +7,34 @@ from typing import TYPE_CHECKING
 import pytest
 
 from agent_orchestra import cli
+from agent_orchestra.cli import main
+from agent_orchestra.store import JobStore
+from tests.cli_helpers import CliRunContext, initialize_git_repo
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+
+@pytest.fixture
+def enqueued_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> CliRunContext:
+    """Create and enqueue one changed worktree for a CLI test."""
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    initialize_git_repo(repo)
+    (repo / 'tracked.txt').write_text('changed\n')
+    database = tmp_path / 'state.db'
+    assert main(['--database', str(database), 'enqueue-local', str(repo)]) == 0
+    capsys.readouterr()
+    store = JobStore(database)
+    return CliRunContext(
+        repo=repo,
+        database=database,
+        store=store,
+        run=store.list_runs()[0],
+        runs_directory=tmp_path / 'runs',
+    )
 
 
 @pytest.fixture(scope='session', autouse=True)
