@@ -60,7 +60,7 @@ markers = [
 
 [tool.ruff]
 line-length = 88
-extend-exclude = ["tests/data"]
+extend-exclude = ["tests/data/live_runtime"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -88,4 +88,4 @@ quote-style = "single"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
-exclude = ["^tests/data/"]
+exclude = ["^tests/data/live_runtime/"]

@@ -127,6 +127,10 @@ runs_directory = "~/.local/state/agent-orchestra/runs"
 [retention]
 job_evidence_days = 90
 
+[defaults]
+developer_runtime = "codex"
+reviewer_runtime = "claude-code"
+
 [reviewer_sets.default]
 members = [
   { id = "codex", runtime = "codex", model = "gpt-5.6" },
@@ -136,7 +140,9 @@ members = [
 
 Precedence is command-line option, settings file, then built-in default.
 Environment variables select the XDG location but do not override individual
-values.
+values. Runtime defaults apply to `run`, must name a registered runtime that
+supports the corresponding role, and can be overridden with `--developer-agent`
+or `--reviewer-agent`.
 
 ### `config`
 
@@ -896,9 +902,9 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. Bounds remediation rounds, so it has no effect when no developer can be dispatched. |
 | `--reviewer-set NAME` | unset | Run every required reviewer in this configured set as one batch, instead of a single reviewer. See [Reviewer sets](#reviewer-sets). |
 | `--no-remediation` | off | Review once and stop, without dispatching a developer. Rejected when a developer option selects anything other than its default, since no developer can run. |
-| `--developer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for development remediation. |
+| `--developer-agent {codex,claude-code}` | Configured `defaults.developer_runtime`, otherwise `codex` | Built-in runtime selected for development remediation. |
 | `--developer-model MODEL` | Runtime default | Optional model passed to the developer adapter. |
-| `--reviewer-agent {codex,claude-code}` | `codex` | Built-in runtime selected for review. |
+| `--reviewer-agent {codex,claude-code}` | Configured `defaults.reviewer_runtime`, otherwise `codex` | Built-in runtime selected for review. |
 | `--reviewer-model MODEL` | Runtime default | Optional model passed to the reviewer adapter. |
 | `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | External evidence root; timestamp-shaped job IDs are stored under internal `YYYY/MM/DD` shards. |
 
@@ -915,7 +921,7 @@ read-only review, and after remediation. Approval stops at
 Examples:
 
 ```shell
-# Use the default Codex developer and reviewer adapters.
+# Use the configured developer and reviewer adapters.
 mise agent-orchestra -- run "$JOB_ID" \
   --objective "Review the queued implementation"
 

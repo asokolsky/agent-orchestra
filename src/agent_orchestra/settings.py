@@ -23,9 +23,9 @@ class SettingsError(AgentOrchestraError):
 
 @dataclass(frozen=True, slots=True)
 class Setting:
-    """One effective setting and the source that supplied it."""
+    """One effective value and whether it came from `built_in` or the `file`."""
 
-    value: Path | int
+    value: Path | int | str
     source: str
 
 
@@ -49,12 +49,14 @@ class ReviewerSet:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Effective storage and retention settings."""
+    """Every global setting resolved from the built-in defaults and the file."""
 
     path: Path
     database: Setting
     runs_directory: Setting
     job_evidence_days: Setting
+    developer_runtime: Setting
+    reviewer_runtime: Setting
     reviewer_sets: tuple[ReviewerSet, ...]
 
 
@@ -71,6 +73,23 @@ def _path_value(value: object, field: str) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise SettingsError(f'{field} must be a non-empty string')
     return Path(value).expanduser()
+
+
+def _runtime_default(
+    value: object,
+    field: str,
+    role: RuntimeRole,
+    registry: RuntimeRegistry,
+) -> Setting:
+    """Validate one configured role default against the runtime registry."""
+
+    if not isinstance(value, str):
+        raise SettingsError(f'{field} must be a string')
+    try:
+        registry.require(value, role)
+    except RuntimeRegistryError as error:
+        raise SettingsError(f'{field}: {error}') from error
+    return Setting(value, 'file')
 
 
 def _reviewer_sets(value: object, registry: RuntimeRegistry) -> tuple[ReviewerSet, ...]:
@@ -161,9 +180,25 @@ def load_settings(
         'built_in',
     )
     days = Setting(90, 'built_in')
+    developer_runtime = Setting(
+        runtime_registry.default(RuntimeRole.DEVELOPER).identifier,
+        'built_in',
+    )
+    reviewer_runtime = Setting(
+        runtime_registry.default(RuntimeRole.REVIEWER).identifier,
+        'built_in',
+    )
     reviewer_sets: tuple[ReviewerSet, ...] = ()
     if not selected.exists():
-        return Settings(selected, database, runs, days, reviewer_sets)
+        return Settings(
+            path=selected,
+            database=database,
+            runs_directory=runs,
+            job_evidence_days=days,
+            developer_runtime=developer_runtime,
+            reviewer_runtime=reviewer_runtime,
+            reviewer_sets=reviewer_sets,
+        )
     if not selected.is_file() or selected.is_symlink():
         raise SettingsError(f'settings path is not a regular file: {selected}')
     try:
@@ -173,17 +208,25 @@ def load_settings(
     if not isinstance(document, dict) or set(document) - {
         'storage',
         'retention',
+        'defaults',
         'reviewer_sets',
     }:
         message = 'settings contain unknown top-level fields'
         raise SettingsError(message)
     storage = document.get('storage', {})
     retention = document.get('retention', {})
+    defaults = document.get('defaults', {})
     if not isinstance(storage, dict) or set(storage) - {'database', 'runs_directory'}:
         message = 'storage settings contain unknown fields'
         raise SettingsError(message)
     if not isinstance(retention, dict) or set(retention) - {'job_evidence_days'}:
         message = 'retention settings contain unknown fields'
+        raise SettingsError(message)
+    if not isinstance(defaults, dict) or set(defaults) - {
+        'developer_runtime',
+        'reviewer_runtime',
+    }:
+        message = 'default settings contain unknown fields'
         raise SettingsError(message)
     if 'database' in storage:
         database = Setting(_path_value(storage['database'], 'storage.database'), 'file')
@@ -197,6 +240,28 @@ def load_settings(
             message = 'retention.job_evidence_days must be a positive integer'
             raise SettingsError(message)
         days = Setting(value, 'file')
+    if 'developer_runtime' in defaults:
+        developer_runtime = _runtime_default(
+            defaults['developer_runtime'],
+            'defaults.developer_runtime',
+            RuntimeRole.DEVELOPER,
+            runtime_registry,
+        )
+    if 'reviewer_runtime' in defaults:
+        reviewer_runtime = _runtime_default(
+            defaults['reviewer_runtime'],
+            'defaults.reviewer_runtime',
+            RuntimeRole.REVIEWER,
+            runtime_registry,
+        )
     if 'reviewer_sets' in document:
         reviewer_sets = _reviewer_sets(document['reviewer_sets'], runtime_registry)
-    return Settings(selected, database, runs, days, reviewer_sets)
+    return Settings(
+        path=selected,
+        database=database,
+        runs_directory=runs,
+        job_evidence_days=days,
+        developer_runtime=developer_runtime,
+        reviewer_runtime=reviewer_runtime,
+        reviewer_sets=reviewer_sets,
+    )

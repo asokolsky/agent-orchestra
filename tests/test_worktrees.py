@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 from agent_orchestra.worktrees import WorktreeStatus, worktree_status
-from tests.test_cli import add_linked_worktree, initialize_git_repo
+from tests.cli_helpers import add_linked_worktree, initialize_git_repo
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -6,13 +6,14 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import pytest
+
 from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY, RuntimeRegistry
 from agent_orchestra.cli import build_parser, main
+from agent_orchestra.settings import SettingsError, load_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def test_config_show_reports_file_values_and_cli_precedence(
@@ -30,6 +31,9 @@ def test_config_show_reports_file_values_and_cli_precedence(
         'database = "configured.db"\n'
         'runs_directory = "configured-runs"\n\n'
         '[retention]\njob_evidence_days = 45\n'
+        '\n[defaults]\n'
+        'developer_runtime = "claude-code"\n'
+        'reviewer_runtime = "codex"\n'
         '\n[reviewer_sets.security]\n'
         'members = [\n'
         '  { id = "primary", runtime = "codex", model = "gpt-5.6" },\n'
@@ -60,6 +64,14 @@ def test_config_show_reports_file_values_and_cli_precedence(
         'value': 45,
         'source': 'file',
     }
+    assert document['settings']['defaults.developer_runtime'] == {
+        'value': 'claude-code',
+        'source': 'file',
+    }
+    assert document['settings']['defaults.reviewer_runtime'] == {
+        'value': 'codex',
+        'source': 'file',
+    }
     assert document['settings']['reviewer_sets'] == {
         'value': [
             {
@@ -88,6 +100,28 @@ def test_config_show_reports_file_values_and_cli_precedence(
     assert not (tmp_path / 'override.db').exists()
 
 
+def test_config_show_reports_built_in_runtime_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Expose the registry defaults when the settings file is absent."""
+
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
+
+    assert main(['config', 'show']) == 0
+
+    settings = json.loads(capsys.readouterr().out)['settings']
+    assert settings['defaults.developer_runtime'] == {
+        'value': 'codex',
+        'source': 'built_in',
+    }
+    assert settings['defaults.reviewer_runtime'] == {
+        'value': 'codex',
+        'source': 'built_in',
+    }
+
+
 def test_invalid_settings_fail_closed_without_creating_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -106,6 +140,68 @@ def test_invalid_settings_fail_closed_without_creating_state(
     document = json.loads(capsys.readouterr().out)
     assert document['error']['code'] == 'invalid_settings'
     assert config.read_text() == '[retention]\njob_evidence_days = 0\n'
+
+
+@pytest.mark.parametrize(
+    ('configured', 'expected_message'),
+    [
+        (
+            '[defaults]\nreviewer_runtime = "missing"\n',
+            'defaults.reviewer_runtime: runtime_unknown: missing',
+        ),
+        (
+            '[defaults]\ndeveloper_runtime = 1\n',
+            'defaults.developer_runtime must be a string',
+        ),
+        (
+            '[defaults]\nunknown = "codex"\n',
+            'default settings contain unknown fields',
+        ),
+    ],
+)
+def test_runtime_defaults_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    configured: str,
+    expected_message: str,
+) -> None:
+    """Reject unknown, mistyped, and unsupported default settings."""
+
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text(configured)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+
+    assert main(['config', 'show']) == 2
+
+    document = json.loads(capsys.readouterr().out)
+    assert document['error']['code'] == 'invalid_settings'
+    assert document['error']['message'].endswith(expected_message)
+
+
+def test_runtime_defaults_require_role_capability(tmp_path: Path) -> None:
+    """Reject a registered runtime that cannot perform the configured role."""
+
+    config = tmp_path / 'config.toml'
+    config.write_text('[defaults]\ndeveloper_runtime = "reviewer-only"\n')
+    codex = DEFAULT_RUNTIME_REGISTRY.require('codex')
+    reviewer_only = replace(
+        codex,
+        identifier='reviewer-only',
+        developer_adapter=None,
+    )
+    registry = RuntimeRegistry((codex, reviewer_only))
+
+    with pytest.raises(
+        SettingsError,
+        match=(
+            r'defaults\.developer_runtime: runtime_role_unsupported: '
+            'reviewer-only does not support developer'
+        ),
+    ):
+        load_settings(config, runtime_registry=registry)
 
 
 def test_reviewer_sets_reject_duplicate_member_ids(
