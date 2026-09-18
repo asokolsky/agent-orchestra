@@ -222,6 +222,19 @@ imports could be identified inside or outside the repository. A deprecation shim
 would have preserved a path nothing used. Were any of those conditions to change, a
 removal of this kind would warrant a transition period instead.
 
+### Runtime independence is observed, not enforced
+
+Developer and reviewer runtime selection is unconstrained: an operator may use
+the same runtime for both roles or choose different runtimes. Every attempt
+persists its runtime and agent vendor as evidence, so the exercised choice is
+auditable after the fact rather than required before execution.
+
+The guarantee Agent Orchestra provides is a verifiable record of what actually
+happened. A mandatory runtime-pairing rule would be weaker: it would constrain
+configuration without itself proving which processes ran, and it would prevent
+legitimate single-runtime use. Cross-runtime review is therefore an operator
+choice recorded by the evidence contract, not a workflow invariant.
+
 ## Collaborators and value types
 
 Two kinds of object carry state, and the difference decides where new code goes.
