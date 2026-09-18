@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from agent_orchestra import cli as cli_module
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.evidence import resolve_evidence_path
 from agent_orchestra.models import (
     IssueJob,
@@ -23,8 +24,10 @@ from agent_orchestra.stats_review import (
     build_stats_document,
     parse_since,
     read_job_events,
+    read_job_runtimes,
 )
 from agent_orchestra.store import JobStore, PersistedEnumError, UnreadableJob
+from tests.test_job_views import add_attempt
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -198,7 +201,12 @@ def write_batch(
 
 
 def write_handoff(
-    directory: Path, *, sequence: int, dispositions: list[str], at: datetime
+    directory: Path,
+    *,
+    sequence: int,
+    dispositions: list[str],
+    at: datetime,
+    finding_ids: list[str] | None = None,
 ) -> None:
     """Write one developer handoff carrying finding dispositions."""
 
@@ -221,7 +229,13 @@ def write_handoff(
             'files_changed': ['src/example.py'],
             'validation': [],
             'dispositions': [
-                {'finding_id': f'f{index}', 'disposition': value, 'rationale': 'r'}
+                {
+                    'finding_id': (
+                        finding_ids[index] if finding_ids is not None else f'f{index}'
+                    ),
+                    'disposition': value,
+                    'rationale': 'r',
+                }
                 for index, value in enumerate(dispositions)
             ],
             'remaining_risks': [],
@@ -436,6 +450,256 @@ def test_dispositions_inside_the_window_are_counted(tmp_path: Path) -> None:
     }
 
 
+def test_runtime_dimensions_group_reviews_findings_and_job_relationship(
+    tmp_path: Path,
+) -> None:
+    """Attribute review work and cross-runtime remediation from attempts."""
+
+    job, directory = make_job(tmp_path, 'runtime-dimensions')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='changes_requested',
+        at=START + timedelta(hours=1),
+        findings=2,
+    )
+    write_handoff(
+        directory,
+        sequence=4,
+        dispositions=['addressed', 'rejected'],
+        at=START + timedelta(hours=2),
+    )
+    add_attempt(
+        job,
+        directory,
+        sequence=2,
+        iteration=1,
+        agent_vendor='anthropic',
+        requested_model='sonnet',
+        runtime='claude-code',
+    )
+    add_attempt(
+        job,
+        directory,
+        sequence=4,
+        iteration=1,
+        role=RuntimeRole.DEVELOPER,
+        runtime='codex',
+    )
+
+    document = report(tmp_path, [job])
+
+    assert document['runtimes']['reviewers']['available'] == {
+        'claude-code': {
+            'reviews': {
+                'approved': 0,
+                'changes_requested': 1,
+                'blocked': 0,
+            },
+            'findings': {
+                'raised': 2,
+                'addressed': 1,
+                'rejected': 1,
+                'blocked': 0,
+            },
+        }
+    }
+    assert document['runtimes']['jobs'] == {
+        'same_runtime': 0,
+        'cross_runtime': 1,
+        'unavailable': 0,
+        'details': [
+            {
+                'job_id': str(job.id),
+                'relationship': 'cross_runtime',
+                'reviewer_runtimes': ['claude-code'],
+                'developer_runtimes': ['codex'],
+            }
+        ],
+    }
+
+
+def test_runtime_dimensions_report_legacy_evidence_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Keep legacy reviews readable while marking missing role runtimes."""
+
+    job, directory = make_job(tmp_path, 'legacy-runtime')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='approved',
+        at=START + timedelta(hours=1),
+    )
+
+    document = report(tmp_path, [job])
+
+    assert document['reviews']['approved'] == 1
+    assert document['runtimes']['reviewers']['unavailable']['reviews'] == {
+        'approved': 1,
+        'changes_requested': 0,
+        'blocked': 0,
+    }
+    assert document['runtimes']['jobs']['unavailable'] == 1
+
+
+def test_runtime_dimensions_keep_damaged_invocations_local_to_one_job(
+    tmp_path: Path,
+) -> None:
+    """Degrade one runtime dimension without losing other jobs or verdicts."""
+
+    damaged, damaged_directory = make_job(tmp_path, 'damaged-runtime')
+    healthy, healthy_directory = make_job(tmp_path, 'healthy-runtime')
+    for _job, directory in (
+        (damaged, damaged_directory),
+        (healthy, healthy_directory),
+    ):
+        write_review(
+            directory,
+            sequence=2,
+            iteration=1,
+            verdict='approved',
+            at=START + timedelta(hours=1),
+        )
+    invocations = damaged_directory / 'invocations'
+    invocations.mkdir()
+    (invocations / 'broken.json').write_text('{ broken', encoding='utf-8')
+    add_attempt(healthy, healthy_directory, sequence=2, iteration=1)
+    add_attempt(
+        healthy,
+        healthy_directory,
+        sequence=4,
+        iteration=1,
+        role=RuntimeRole.DEVELOPER,
+    )
+
+    document = report(tmp_path, [damaged, healthy])
+
+    assert document['reviews']['approved'] == 2
+    assert (
+        document['runtimes']['reviewers']['available']['codex']['reviews']['approved']
+        == 1
+    )
+    assert document['runtimes']['reviewers']['unavailable']['reviews']['approved'] == 1
+    assert document['runtimes']['jobs']['same_runtime'] == 1
+    assert document['runtimes']['jobs']['unavailable'] == 1
+
+
+def test_job_runtime_relationship_detects_a_runtime_change_between_attempts(
+    tmp_path: Path,
+) -> None:
+    """Classify any mixed reviewer/developer runtime history as cross-runtime."""
+
+    job, directory = make_job(tmp_path, 'runtime-changed')
+    write_review(
+        directory,
+        sequence=2,
+        iteration=1,
+        verdict='approved',
+        at=START + timedelta(hours=1),
+    )
+    add_attempt(job, directory, sequence=2, iteration=1, runtime='codex')
+    add_attempt(
+        job,
+        directory,
+        sequence=4,
+        iteration=1,
+        role=RuntimeRole.DEVELOPER,
+        runtime='codex',
+    )
+    add_attempt(
+        job,
+        directory,
+        sequence=6,
+        iteration=2,
+        role=RuntimeRole.DEVELOPER,
+        runtime='claude-code',
+    )
+
+    document = report(tmp_path, [job])
+
+    assert document['runtimes']['jobs']['same_runtime'] == 0
+    assert document['runtimes']['jobs']['cross_runtime'] == 1
+
+
+def test_reviewer_set_runtime_dimensions_use_member_outcomes(
+    tmp_path: Path,
+) -> None:
+    """Group each reviewer-set member without inflating aggregate reviews."""
+
+    job, directory = make_job(tmp_path, 'runtime-batch')
+    at = START + timedelta(hours=1)
+    for reviewer_id, runtime in (
+        ('security', 'codex'),
+        ('portability', 'claude-code'),
+    ):
+        write_review(
+            directory,
+            sequence=2,
+            iteration=1,
+            verdict='changes_requested',
+            at=at,
+            findings=2 if reviewer_id == 'portability' else 1,
+            reviewer_id=reviewer_id,
+        )
+        add_attempt(
+            job,
+            directory,
+            sequence=2,
+            iteration=1,
+            reviewer_id=reviewer_id,
+            runtime=runtime,
+        )
+    write_batch(directory, iteration=1, verdict='changes_requested', findings=3)
+    write_handoff(
+        directory,
+        sequence=4,
+        dispositions=['addressed', 'blocked'],
+        finding_ids=['security:f0', 'portability:f1'],
+        at=START + timedelta(hours=2),
+    )
+    add_attempt(
+        job,
+        directory,
+        sequence=4,
+        iteration=1,
+        role=RuntimeRole.DEVELOPER,
+        runtime='codex',
+    )
+
+    document = report(tmp_path, [job])
+
+    assert document['reviews']['changes_requested'] == 1
+    by_runtime = document['runtimes']['reviewers']['available']
+    assert by_runtime['codex']['reviews']['changes_requested'] == 1
+    assert by_runtime['codex']['findings']['addressed'] == 1
+    assert by_runtime['claude-code']['reviews']['changes_requested'] == 1
+    assert by_runtime['claude-code']['findings']['blocked'] == 1
+    assert document['runtimes']['jobs']['cross_runtime'] == 1
+
+
+def test_read_job_runtimes_returns_audit_attempt_identity(tmp_path: Path) -> None:
+    """Read the runtime identity already persisted for audit attempts."""
+
+    job, directory = make_job(tmp_path, 'attempt-identity')
+    add_attempt(
+        job,
+        directory,
+        sequence=2,
+        iteration=1,
+        agent_vendor='anthropic',
+        requested_model='sonnet',
+        runtime='claude-code',
+    )
+
+    runtimes = read_job_runtimes(tmp_path / 'runs', str(job.id))
+
+    assert runtimes.readable
+    assert runtimes.reviewers == {(1, None): 'claude-code'}
+
+
 def test_unreadable_evidence_is_reported_not_dropped(tmp_path: Path) -> None:
     """List a reviewed job whose evidence yields no history as unavailable."""
 
@@ -463,6 +727,14 @@ def test_unreadable_evidence_is_reported_not_dropped(tmp_path: Path) -> None:
         sum(document['jobs'].values()) + document['unavailable']['count']
         == (document['jobs_total'])
     )
+    runtime_jobs = document['runtimes']['jobs']
+    assert (
+        runtime_jobs['same_runtime']
+        + runtime_jobs['cross_runtime']
+        + runtime_jobs['unavailable']
+        == document['jobs_total']
+    )
+    assert len(runtime_jobs['details']) == document['jobs_total']
 
 
 def test_jobs_and_unavailable_reconcile_against_jobs_total(tmp_path: Path) -> None:
