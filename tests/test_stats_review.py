@@ -509,14 +509,11 @@ def test_runtime_dimensions_group_reviews_findings_and_job_relationship(
         'same_runtime': 0,
         'cross_runtime': 1,
         'unavailable': 0,
-        'details': [
-            {
-                'job_id': str(job.id),
-                'relationship': 'cross_runtime',
-                'reviewer_runtimes': ['claude-code'],
-                'developer_runtimes': ['codex'],
-            }
-        ],
+    }
+    assert document['runtimes']['job_ids'] == {
+        'same_runtime': [],
+        'cross_runtime': [str(job.id)],
+        'unavailable': [],
     }
 
 
@@ -728,13 +725,12 @@ def test_unreadable_evidence_is_reported_not_dropped(tmp_path: Path) -> None:
         == (document['jobs_total'])
     )
     runtime_jobs = document['runtimes']['jobs']
-    assert (
-        runtime_jobs['same_runtime']
-        + runtime_jobs['cross_runtime']
-        + runtime_jobs['unavailable']
-        == document['jobs_total']
+    runtime_job_ids = document['runtimes']['job_ids']
+    assert sum(runtime_jobs.values()) == document['jobs_total']
+    assert all(
+        len(runtime_job_ids[relationship]) == count
+        for relationship, count in runtime_jobs.items()
     )
-    assert len(runtime_jobs['details']) == document['jobs_total']
 
 
 def test_jobs_and_unavailable_reconcile_against_jobs_total(tmp_path: Path) -> None:

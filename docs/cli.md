@@ -803,21 +803,12 @@ starts, and the resolved interval is reported back:
     "jobs": {
       "same_runtime": 1,
       "cross_runtime": 1,
-      "unavailable": 0,
-      "details": [
-        {
-          "job_id": "20260910T090000Z-a7f3c921",
-          "relationship": "same_runtime",
-          "reviewer_runtimes": ["codex"],
-          "developer_runtimes": ["codex"]
-        },
-        {
-          "job_id": "20260911T090000Z-b8e4d032",
-          "relationship": "cross_runtime",
-          "reviewer_runtimes": ["claude-code"],
-          "developer_runtimes": ["codex"]
-        }
-      ]
+      "unavailable": 0
+    },
+    "job_ids": {
+      "same_runtime": ["20260910T090000Z-a7f3c921"],
+      "cross_runtime": ["20260911T090000Z-b8e4d032"],
+      "unavailable": []
     }
   },
   "unavailable": {"count": 0, "job_ids": [], "reasons": {}},
@@ -836,7 +827,8 @@ starts, and the resolved interval is reported back:
 | `findings.addressed` / `rejected` / `blocked` | Integer | Developer disposition events recorded in the window. |
 | `runtimes.reviewers.available` | Object | Reviewer verdicts and finding outcomes grouped by the runtime recorded on the corresponding reviewer attempt. |
 | `runtimes.reviewers.unavailable` | Object | The same counts when legacy, missing, or unreadable invocation evidence cannot identify the reviewer runtime. |
-| `runtimes.jobs` | Object | Counts and per-job details for `same_runtime`, `cross_runtime`, and `unavailable` reviewer/developer runtime relationships. |
+| `runtimes.jobs` | Object | Counts for `same_runtime`, `cross_runtime`, and `unavailable` reviewer/developer runtime relationships. |
+| `runtimes.job_ids` | Object | Bare job-ID lists grouped by the same three runtime relationships. |
 | `unavailable` | Object | Jobs with in-window activity that could not be placed: neither their evidence nor durable state yielded a verdict to classify them by. Counted per stable error code. |
 
 `jobs` values plus `unavailable.count` equal `jobs_total`. `reviews` values do
@@ -873,10 +865,11 @@ Each included job is `same_runtime` only when all recorded reviewer and
 developer attempts used one runtime. It is `cross_runtime` when both roles are
 known and more than one runtime appears, including jobs whose runtime changed
 between iterations. It is `unavailable` when either role has no usable
-invocation identity. The three counts sum to `jobs_total`; `details` lists the
-sorted runtime sets used for each classification. Legacy messages remain part
-of the ordinary review and finding totals even when their older or missing
-invocation evidence places the new dimensions under `unavailable`.
+invocation identity. `sum(runtimes.jobs.values())` therefore equals
+`jobs_total`, and each `runtimes.job_ids` list contains the jobs behind its
+corresponding count. Legacy messages remain part of the ordinary review and
+finding totals even when their older or missing invocation evidence places the
+new dimensions under `unavailable`.
 
 Issue-readiness jobs are excluded. `ready` and a source-code `approved` are
 different protocols, so counting them together would report a number that means

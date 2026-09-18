@@ -1014,7 +1014,9 @@ def build_stats_document(
         'cross_runtime': 0,
         'unavailable': 0,
     }
-    pairing_jobs: list[dict[str, object]] = []
+    pairing_job_ids: dict[str, list[str]] = {
+        relationship: [] for relationship in pairing_counts
+    }
     for job_id in counted_job_ids:
         runtime_evidence = runtimes_for(job_id)
         reviewer_runtimes = frozenset(runtime_evidence.reviewers.values())
@@ -1030,14 +1032,7 @@ def build_stats_document(
         else:
             relationship = 'cross_runtime'
         pairing_counts[relationship] += 1
-        pairing_jobs.append(
-            {
-                'job_id': job_id,
-                'relationship': relationship,
-                'reviewer_runtimes': sorted(reviewer_runtimes),
-                'developer_runtimes': sorted(developer_runtimes),
-            }
-        )
+        pairing_job_ids[relationship].append(job_id)
 
     return {
         'window': {
@@ -1058,7 +1053,8 @@ def build_stats_document(
                 },
                 'unavailable': unavailable_runtime_counts,
             },
-            'jobs': pairing_counts | {'details': pairing_jobs},
+            'jobs': pairing_counts,
+            'job_ids': pairing_job_ids,
         },
         'unavailable': {
             'count': len(unavailable_ids),
