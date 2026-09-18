@@ -29,6 +29,10 @@ from agent_orchestra.evidence import (
     WorkerError,
     resolve_evidence_path,
 )
+from agent_orchestra.invocations import (
+    InvocationEvidenceError,
+    InvocationEvidenceStore,
+)
 from agent_orchestra.manifests import (
     canonical_evidence_type,
     evidence_ordinal,
@@ -138,6 +142,28 @@ class ReviewEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewSource:
+    """
+    One reviewer result that contributed to a review decision.
+
+    `ReviewEvent` counts decisions and this counts the reviewers behind them, so
+    a set of three that reaches one verdict yields one event and three sources.
+    `reviewer_id` is None for a single-reviewer job, whose one result is both.
+
+    Findings are carried as identities rather than as a count because each
+    disposition is attributed back to the reviewer that raised it. A set
+    member's identities are namespaced `{reviewer_id}:{finding_id}` to match the
+    handoff, since independent reviewers may choose the same identifier; a lone
+    reviewer has no such collision and its findings stay bare.
+    """
+
+    iteration: int
+    reviewer_id: str | None
+    verdict: str
+    finding_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DispositionEvent:
     """
     One developer disposition of a reviewer finding.
@@ -148,6 +174,8 @@ class DispositionEvent:
     """
 
     job_id: str
+    iteration: int
+    finding_id: str
     disposition: str
     occurred_at: datetime
 
@@ -186,7 +214,52 @@ class JobEvents:
     reviews: tuple[ReviewEvent, ...]
     dispositions: tuple[DispositionEvent, ...]
     aggregates: tuple[AggregateReview, ...] = ()
+    review_sources: tuple[ReviewSource, ...] = ()
     readable: bool = field(kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class MemberReview:
+    """
+    One member result held until the aggregate that cites it is read.
+
+    Member results are written before the aggregate and so are met first. Each
+    is parked here under its canonical path and claimed later by the aggregate
+    that names it, which is also what stops an unrelated result of the same
+    iteration from being folded into a decision it took no part in.
+
+    Findings are kept as identities rather than as a count because both readers
+    of this can be served from identities and only one can be served from a
+    count: the aggregate needs how many were raised, and the runtime breakdown
+    needs which reviewer raised each one.
+    """
+
+    occurred_at: datetime
+    verdict: str
+    finding_ids: tuple[str, ...]
+    reviewer_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class JobRuntimes:
+    """
+    Role runtimes recovered from one job's invocation evidence.
+
+    Reviewers are keyed by iteration and reviewer ID because a set may pair a
+    different runtime with each member, and because the same member may be
+    answered by different runtimes in different iterations. The key holds None
+    for a single-reviewer job, matching `ReviewSource`.
+
+    A slot whose attempts disagree is dropped rather than resolved, and
+    `readable` goes False with it, so the report says the pairing is unknown
+    instead of naming one of two runtimes arbitrarily. `developers` is a set
+    for the same reason it is not keyed: remediation may move between runtimes
+    across iterations, and the pairing question asks only which ones appeared.
+    """
+
+    reviewers: dict[tuple[int, str | None], str]
+    developers: frozenset[str]
+    readable: bool
 
 
 def _parse_timestamp(value: object) -> datetime | None:
@@ -406,11 +479,12 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
     batches, batches_complete = _batch_documents(evidence_root, job_id)
     readable = messages_complete and batches_complete
 
-    members: dict[int, dict[str, tuple[datetime, int | None]]] = {}
+    members: dict[int, dict[str, MemberReview]] = {}
     seen_identities: set[str] = set()
     reviews: list[ReviewEvent] = []
     dispositions: list[DispositionEvent] = []
     aggregates: list[AggregateReview] = []
+    review_sources: list[ReviewSource] = []
 
     for message_type, relative, document in messages:
         occurred_at = _parse_timestamp(document.get('created_at'))
@@ -441,20 +515,35 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
                 readable = False
                 continue
             member_findings = payload.get('findings')
-            # A member whose findings array is missing or malformed has an
-            # unknown count, not a count of zero. Recording it as None keeps a
-            # schema-1 aggregate that cites it from understating what was
-            # raised.
-            members.setdefault(iteration, {})[relative] = (
-                occurred_at,
-                len(member_findings) if isinstance(member_findings, list) else None,
+            # Every identity is present and every entry is well formed: the
+            # review-result schema makes `findings` a required array whose
+            # entries each carry a required `finding_id`, and only documents
+            # that validated against it reach here. Retaining the identities
+            # rather than the count they imply is what later lets a disposition
+            # be attributed to the reviewer that raised the finding.
+            reviewer_id = _member_reviewer(relative)
+            finding_ids = (
+                tuple(
+                    str(item['finding_id'])
+                    for item in member_findings
+                    if isinstance(item, dict)
+                    and isinstance(item.get('finding_id'), str)
+                )
+                if isinstance(member_findings, list)
+                else ()
+            )
+            verdict = payload.get('verdict')
+            members.setdefault(iteration, {})[relative] = MemberReview(
+                occurred_at=occurred_at,
+                verdict=str(verdict),
+                finding_ids=finding_ids,
+                reviewer_id=reviewer_id,
             )
             # A member of a reviewer set is never a review by itself. Counting
             # one when its aggregate is missing or pruned would turn a single
             # decision into as many reviews as the set had members.
-            if _member_reviewer(relative) is not None:
+            if reviewer_id is not None:
                 continue
-            verdict = payload.get('verdict')
             findings = payload.get('findings')
             if verdict not in VERDICTS or not isinstance(findings, list):
                 readable = False
@@ -462,6 +551,7 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
             reviews.append(
                 ReviewEvent(job_id, iteration, verdict, occurred_at, len(findings))
             )
+            review_sources.append(ReviewSource(iteration, None, verdict, finding_ids))
         elif message_type == 'developer_handoff':
             entries = payload.get('dispositions')
             if _handoff_relative(document) != relative:
@@ -474,9 +564,18 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
                 disposition = (
                     entry.get('disposition') if isinstance(entry, dict) else None
                 )
-                if disposition in DISPOSITIONS:
+                finding_id = (
+                    entry.get('finding_id') if isinstance(entry, dict) else None
+                )
+                if (
+                    disposition in DISPOSITIONS
+                    and isinstance(finding_id, str)
+                    and iteration is not None
+                ):
                     dispositions.append(
-                        DispositionEvent(job_id, disposition, occurred_at)
+                        DispositionEvent(
+                            job_id, iteration, finding_id, disposition, occurred_at
+                        )
                     )
                 else:
                     readable = False
@@ -510,13 +609,76 @@ def read_job_events(evidence_root: Path, job_id: str) -> JobEvents:
                 iteration,
                 verdict,
                 raised,
-                max((moment for moment, _ in present.values()), default=None),
+                max((member.occurred_at for member in present.values()), default=None),
             )
         )
+        reviewers = document.get('reviewers')
+        if not isinstance(reviewers, list):
+            readable = False
+            continue
+        for reviewer in reviewers:
+            if not isinstance(reviewer, dict):
+                readable = False
+                continue
+            reviewer_id = reviewer.get('reviewer_id')
+            outcome = reviewer.get('outcome')
+            result_path = reviewer.get('result_path')
+            if not isinstance(reviewer_id, str) or not isinstance(outcome, str):
+                readable = False
+                continue
+            member = present.get(result_path) if isinstance(result_path, str) else None
+            source_ids = member.finding_ids if member is not None else ()
+            review_sources.append(
+                ReviewSource(
+                    iteration,
+                    reviewer_id,
+                    outcome,
+                    tuple(f'{reviewer_id}:{finding_id}' for finding_id in source_ids),
+                )
+            )
 
     return JobEvents(
-        tuple(reviews), tuple(dispositions), tuple(aggregates), readable=readable
+        tuple(reviews),
+        tuple(dispositions),
+        tuple(aggregates),
+        tuple(review_sources),
+        readable=readable,
     )
+
+
+def read_job_runtimes(evidence_root: Path, job_id: str) -> JobRuntimes:
+    """
+    Read which runtime answered each role from one job's invocation records.
+
+    Nothing here raises, for the same reason `read_job_events` does not. A job
+    whose evidence predates invocation records, has been pruned since, or is
+    damaged has none to offer, and none of those is a reason to abandon the
+    window. Each returns an unreadable result that the report presents as an
+    unknown pairing rather than as an absent one.
+    """
+
+    try:
+        job_directory = resolve_evidence_path(evidence_root, job_id)
+        records = InvocationEvidenceStore(job_directory).read_all(job_id)
+    except InvocationEvidenceError, EvidencePathError, OSError, ValueError:
+        return JobRuntimes(reviewers={}, developers=frozenset(), readable=False)
+
+    reviewer_values: dict[tuple[int, str | None], set[str]] = {}
+    developers: set[str] = set()
+    for record in records:
+        if record.role == 'reviewer':
+            reviewer_values.setdefault(
+                (record.iteration, record.reviewer_id), set()
+            ).add(record.runtime)
+        elif record.role == 'developer':
+            developers.add(record.runtime)
+    readable = all(len(values) == 1 for values in reviewer_values.values())
+    reviewers = {
+        key: next(iter(values))
+        for key, values in reviewer_values.items()
+        if len(values) == 1
+    }
+    return JobRuntimes(reviewers, frozenset(developers), readable)
 
 
 def _member_reviewer(relative: str) -> str | None:
@@ -540,7 +702,7 @@ def _member_reviewer(relative: str) -> str | None:
 
 
 def _aggregate_findings(
-    document: Mapping[str, Any], members: Iterable[tuple[datetime, int | None]]
+    document: Mapping[str, Any], members: Iterable[MemberReview]
 ) -> int | None:
     """
     Return how many findings one aggregate raised, or None when unusable.
@@ -554,10 +716,7 @@ def _aggregate_findings(
     if document.get('schema_version') == 1:
         if findings is not None:
             return None
-        counts = [count for _, count in members]
-        if any(count is None for count in counts):
-            return None
-        return sum(count for count in counts if count is not None)
+        return sum(len(member.finding_ids) for member in members)
     return len(findings) if isinstance(findings, list) else None
 
 
@@ -719,6 +878,9 @@ def build_stats_document(
     durable_counts: dict[str, str] = {}
     review_counts = dict.fromkeys(VERDICTS, 0)
     finding_counts = {'raised': 0} | dict.fromkeys(DISPOSITIONS, 0)
+    reviewer_runtime_counts: dict[str, dict[str, dict[str, int]]] = {}
+    unavailable_runtime_counts = _empty_runtime_counts()
+    runtime_cache: dict[str, JobRuntimes] = {}
     unavailable_ids: list[str] = []
     unavailable_reasons: dict[str, int] = {}
 
@@ -727,6 +889,13 @@ def build_stats_document(
 
         unavailable_ids.append(job_id)
         unavailable_reasons[code] = unavailable_reasons.get(code, 0) + 1
+
+    def runtimes_for(job_id: str) -> JobRuntimes:
+        """Read one job's role runtimes at most once."""
+
+        if job_id not in runtime_cache:
+            runtime_cache[job_id] = read_job_runtimes(evidence_root, job_id)
+        return runtime_cache[job_id]
 
     for run in runs:
         job_id = run.job_id if isinstance(run, UnreadableJob) else str(run.id)
@@ -746,6 +915,7 @@ def build_stats_document(
                 report_unavailable(job_id, run.error.code)
             continue
         events = read_job_events(evidence_root, job_id)
+        runtime_evidence = runtimes_for(job_id)
         # A reviewer-set decision is dated by the transition that left review,
         # which is when it actually completed. Its member results were written
         # before that, so preferring them could place a verdict in a window it
@@ -768,10 +938,41 @@ def build_stats_document(
         for review in in_window:
             review_counts[review.verdict] += 1
             finding_counts['raised'] += review.findings
+        review_moments = {review.iteration: review.occurred_at for review in dated}
+        finding_runtimes: dict[tuple[int, str], str | None] = {}
+        for source in events.review_sources:
+            runtime = runtime_evidence.reviewers.get(
+                (source.iteration, source.reviewer_id)
+            )
+            for finding_id in source.finding_ids:
+                finding_runtimes[(source.iteration, finding_id)] = runtime
+            moment = review_moments.get(source.iteration)
+            if (
+                source.verdict not in VERDICTS
+                or moment is None
+                or not start <= moment < end
+            ):
+                continue
+            counts = (
+                reviewer_runtime_counts.setdefault(runtime, _empty_runtime_counts())
+                if runtime is not None
+                else unavailable_runtime_counts
+            )
+            counts['reviews'][source.verdict] += 1
+            counts['findings']['raised'] += len(source.finding_ids)
         contributed = bool(in_window)
         for disposition in events.dispositions:
             if start <= disposition.occurred_at < end:
                 finding_counts[disposition.disposition] += 1
+                runtime = finding_runtimes.get(
+                    (disposition.iteration, disposition.finding_id)
+                )
+                counts = (
+                    reviewer_runtime_counts.setdefault(runtime, _empty_runtime_counts())
+                    if runtime is not None
+                    else unavailable_runtime_counts
+                )
+                counts['findings'][disposition.disposition] += 1
                 contributed = True
         if contributed:
             # A job is classified by its standing, which is its latest verdict
@@ -807,6 +1008,32 @@ def build_stats_document(
         latest = max(reviews, key=lambda review: (review.occurred_at, review.iteration))
         job_counts[latest.verdict] += 1
 
+    counted_job_ids = sorted({*job_verdicts, *durable_counts, *unavailable_ids})
+    pairing_counts = {
+        'same_runtime': 0,
+        'cross_runtime': 0,
+        'unavailable': 0,
+    }
+    pairing_job_ids: dict[str, list[str]] = {
+        relationship: [] for relationship in pairing_counts
+    }
+    for job_id in counted_job_ids:
+        runtime_evidence = runtimes_for(job_id)
+        reviewer_runtimes = frozenset(runtime_evidence.reviewers.values())
+        developer_runtimes = runtime_evidence.developers
+        if (
+            not runtime_evidence.readable
+            or not reviewer_runtimes
+            or not developer_runtimes
+        ):
+            relationship = 'unavailable'
+        elif len(reviewer_runtimes | developer_runtimes) == 1:
+            relationship = 'same_runtime'
+        else:
+            relationship = 'cross_runtime'
+        pairing_counts[relationship] += 1
+        pairing_job_ids[relationship].append(job_id)
+
     return {
         'window': {
             'since': since,
@@ -818,11 +1045,31 @@ def build_stats_document(
         'jobs': job_counts,
         'reviews': review_counts,
         'findings': finding_counts,
+        'runtimes': {
+            'reviewers': {
+                'available': {
+                    runtime: reviewer_runtime_counts[runtime]
+                    for runtime in sorted(reviewer_runtime_counts)
+                },
+                'unavailable': unavailable_runtime_counts,
+            },
+            'jobs': pairing_counts,
+            'job_ids': pairing_job_ids,
+        },
         'unavailable': {
             'count': len(unavailable_ids),
             'job_ids': sorted(unavailable_ids),
             'reasons': unavailable_reasons,
         },
+    }
+
+
+def _empty_runtime_counts() -> dict[str, dict[str, int]]:
+    """Return an independent zeroed reviewer-runtime counter set."""
+
+    return {
+        'reviews': dict.fromkeys(VERDICTS, 0),
+        'findings': {'raised': 0} | dict.fromkeys(DISPOSITIONS, 0),
     }
 
 

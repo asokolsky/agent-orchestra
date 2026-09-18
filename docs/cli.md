@@ -705,7 +705,7 @@ appear as `in_progress` until their invocation completes.
 | `job` | Object | Scenario-specific identity, immutable scope, state, and timestamps. |
 | `transitions` | Array | Ordered SQLite state history with the scope digest and optional reason at each transition. |
 | `operations` | Array | Commit authorization, commit, publish authorization, and publication views derived from transitions. |
-| `tasks` | Array | Ordered roles and attempts; stream paths are included but stream contents are not. |
+| `tasks` | Array | Ordered roles and attempts; each attempt names its runtime, agent vendor, and requested model. Stream paths are included but stream contents are not. |
 | `evidence` | Array | Job-relative type, path, size, recorded digest, finalization time, and verification status. |
 | `integrity` | Object | Integrity schema and nullable `backfilled_at` provenance marker. |
 | `history` | Array | Canonical message and issue-iteration summaries, including findings, dispositions, and validation outcomes. |
@@ -779,10 +779,38 @@ starts, and the resolved interval is reported back:
     "end": "2026-09-12T12:00:00Z",
     "timezone": "UTC"
   },
-  "jobs_total": 7,
-  "jobs": {"approved": 3, "changes_requested": 4, "blocked": 0},
-  "reviews": {"approved": 3, "changes_requested": 10, "blocked": 0},
-  "findings": {"raised": 21, "addressed": 18, "rejected": 0, "blocked": 0},
+  "jobs_total": 2,
+  "jobs": {"approved": 1, "changes_requested": 1, "blocked": 0},
+  "reviews": {"approved": 1, "changes_requested": 1, "blocked": 0},
+  "findings": {"raised": 2, "addressed": 2, "rejected": 0, "blocked": 0},
+  "runtimes": {
+    "reviewers": {
+      "available": {
+        "claude-code": {
+          "reviews": {"approved": 0, "changes_requested": 1, "blocked": 0},
+          "findings": {"raised": 2, "addressed": 2, "rejected": 0, "blocked": 0}
+        },
+        "codex": {
+          "reviews": {"approved": 1, "changes_requested": 0, "blocked": 0},
+          "findings": {"raised": 0, "addressed": 0, "rejected": 0, "blocked": 0}
+        }
+      },
+      "unavailable": {
+        "reviews": {"approved": 0, "changes_requested": 0, "blocked": 0},
+        "findings": {"raised": 0, "addressed": 0, "rejected": 0, "blocked": 0}
+      }
+    },
+    "jobs": {
+      "same_runtime": 1,
+      "cross_runtime": 1,
+      "unavailable": 0
+    },
+    "job_ids": {
+      "same_runtime": ["20260910T090000Z-a7f3c921"],
+      "cross_runtime": ["20260911T090000Z-b8e4d032"],
+      "unavailable": []
+    }
+  },
   "unavailable": {"count": 0, "job_ids": [], "reasons": {}},
   "error": null
 }
@@ -797,6 +825,10 @@ starts, and the resolved interval is reported back:
 | `reviews` | Object | Verdict events in the window, one per review round. |
 | `findings.raised` | Integer | Findings belonging to those in-window review events. |
 | `findings.addressed` / `rejected` / `blocked` | Integer | Developer disposition events recorded in the window. |
+| `runtimes.reviewers.available` | Object | Reviewer verdicts and finding outcomes grouped by the runtime recorded on the corresponding reviewer attempt. |
+| `runtimes.reviewers.unavailable` | Object | The same counts when legacy, missing, or unreadable invocation evidence cannot identify the reviewer runtime. |
+| `runtimes.jobs` | Object | Counts for `same_runtime`, `cross_runtime`, and `unavailable` reviewer/developer runtime relationships. |
+| `runtimes.job_ids` | Object | Bare job-ID lists grouped by the same three runtime relationships. |
 | `unavailable` | Object | Jobs with in-window activity that could not be placed: neither their evidence nor durable state yielded a verdict to classify them by. Counted per stable error code. |
 
 `jobs` values plus `unavailable.count` equal `jobs_total`. `reviews` values do
@@ -821,6 +853,23 @@ A reviewer set's decision is dated by the transition that recorded it, not by
 its member results, which are written before aggregation completes. A batch
 whose last member returns just before the window ends and whose decision lands
 just after it belongs to the later window.
+
+The runtime breakdown preserves that distinction. The top-level `reviews`
+object counts one aggregate reviewer-set decision, while
+`runtimes.reviewers` counts each member verdict under the runtime that produced
+it. A finding disposition is attributed to the runtime that raised its finding.
+Consequently, reviewer-runtime verdict totals can exceed top-level review
+totals when reviewer sets are used.
+
+Each included job is `same_runtime` only when all recorded reviewer and
+developer attempts used one runtime. It is `cross_runtime` when both roles are
+known and more than one runtime appears, including jobs whose runtime changed
+between iterations. It is `unavailable` when either role has no usable
+invocation identity. `sum(runtimes.jobs.values())` therefore equals
+`jobs_total`, and each `runtimes.job_ids` list contains the jobs behind its
+corresponding count. Legacy messages remain part of the ordinary review and
+finding totals even when their older or missing invocation evidence places the
+new dimensions under `unavailable`.
 
 Issue-readiness jobs are excluded. `ready` and a source-code `approved` are
 different protocols, so counting them together would report a number that means

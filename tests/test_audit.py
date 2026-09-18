@@ -463,6 +463,9 @@ def test_audit_attempt_publishes_its_declared_key_set(
     for attempt in attempts:
         declared = [field for field in AUDIT_ATTEMPT_FIELDS if field in attempt]
         assert list(attempt) == [*declared, 'streams']
+        assert attempt['agent_vendor'] == 'openai'
+        assert attempt['requested_model'] == 'gpt-test'
+        assert attempt['runtime'] == 'codex'
 
 
 def test_verify_active_attempt_marks_streams_in_progress(

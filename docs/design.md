@@ -671,9 +671,26 @@ and the nested `schema_version` collided with the document's own version under
 one key. Version 14 advanced from 13 for the conditional reviewer identity in
 task and attempt history.
 
+Audit version 15 already publishes `agent_vendor`, `requested_model`, and
+`runtime` for every attempt it lists. Those fields are selected explicitly from
+the invocation record by the shared attempt projection. Making that established
+identity visible in the reporting documentation does not change the audit
+shape, so it does not advance the schema under the public-document policy.
+
 Both attempt documents name the record fields they publish and the fields they
 withhold, so a field added to the invocation record joins neither document until
 someone decides it should. The CLI attempt vocabulary is unchanged.
+
+Review statistics derive their runtime dimension from those same invocation
+records. Each reviewer verdict and later finding disposition is joined to the
+reviewer's attempt by iteration and reviewer identity. Reviewer-set members are
+reported separately in this dimension even though their aggregate remains one
+top-level review. A job is same-runtime only when every known reviewer and
+developer attempt names one shared runtime, cross-runtime when both roles are
+known and their combined runtime set has more than one member, and unavailable
+when either role cannot be recovered. Invocation damage is isolated to that
+job's runtime dimension and does not discard its otherwise-readable review
+history or interrupt the report.
 
 Invocation record schema 5 defines `reviewer_id` for source-code reviewer tasks.
 The reviewer identity and path builder uses durable task IDs of
