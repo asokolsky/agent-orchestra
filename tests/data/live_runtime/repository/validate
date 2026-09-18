@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+case "$0" in
+    /*) fixture_directory=${0%/*} ;;
+    */*) fixture_directory=$PWD/${0%/*} ;;
+    *) fixture_directory=$PWD ;;
+esac
+
+exec "$fixture_directory/.runtime/python" "$@"

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import pairwise
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agent_orchestra.audit import build_audit_document
@@ -20,9 +22,18 @@ from agent_orchestra.models import IssueJob, Run, RunState
 from agent_orchestra.store import JobStore
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
+
+
+# The fixture owns its validation command instead of naming an interpreter. A
+# runtime's sandbox need not put this suite's interpreter on PATH, and `python`
+# there may be absent or be a different build, so a repository-relative wrapper
+# is the only spelling that means the same thing to every runtime. It is also
+# what makes the command an exact string: the harness can require the developer
+# to report this and only this, rather than trusting it to describe whatever it
+# happened to run.
+LIVE_VALIDATION_COMMAND = './validate -m unittest'
+LIVE_FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / 'data' / 'live_runtime'
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,44 +119,29 @@ def git(repository: Path, *arguments: str) -> str:
 
 
 def create_defective_repository(root: Path) -> Path:
-    """Create a committed Python fixture and introduce one obvious regression."""
+    """
+    Copy the committed Python fixture and introduce one obvious regression.
+
+    The fixture is checked in rather than written here so that its sources stay
+    readable, lintable, and diffable as ordinary files. Its `.runtime/python`
+    symlink is created per repository and left untracked, because it points at
+    whichever interpreter is running this suite and so is neither portable nor
+    committable; `./validate` resolves it relative to its own location.
+    """
 
     repository = root / 'repository'
-    repository.mkdir()
+    shutil.copytree(LIVE_FIXTURE_DIRECTORY / 'repository', repository)
+    runtime_directory = repository / '.runtime'
+    runtime_directory.mkdir()
+    (runtime_directory / 'python').symlink_to(sys.executable)
     git(repository, 'init', '--initial-branch=main')
     git(repository, 'config', 'user.name', 'Agent Orchestra Live Test')
     git(repository, 'config', 'user.email', 'live-test@example.invalid')
-    (repository / '.gitignore').write_text(
-        '__pycache__/\n.pytest_cache/\n', encoding='utf-8'
-    )
-    (repository / 'calculator.py').write_text(
-        '"""Small deterministic live-runtime fixture."""\n\n'
-        'def add(left: int, right: int) -> int:\n'
-        '    """Return the sum of two integers."""\n\n'
-        '    raise NotImplementedError\n',
-        encoding='utf-8',
-    )
-    (repository / 'test_calculator.py').write_text(
-        '"""Tests for the live-runtime fixture."""\n\n'
-        'import unittest\n\n'
-        'from calculator import add\n\n\n'
-        'class CalculatorTest(unittest.TestCase):\n'
-        '    """Exercise the public calculator behavior."""\n\n'
-        '    def test_add_returns_sum(self) -> None:\n'
-        '        """Addition must not subtract the right operand."""\n\n'
-        '        self.assertEqual(add(2, 3), 5)\n\n\n'
-        'if __name__ == "__main__":\n'
-        '    unittest.main()\n',
-        encoding='utf-8',
-    )
-    git(repository, 'add', '.gitignore', 'calculator.py', 'test_calculator.py')
+    git(repository, 'add', '.')
     git(repository, 'commit', '-m', 'test: create live runtime fixture')
-    (repository / 'calculator.py').write_text(
-        '"""Small deterministic live-runtime fixture."""\n\n'
-        'def add(left: int, right: int) -> int:\n'
-        '    """Return the sum of two integers."""\n\n'
-        '    return left - right\n',
-        encoding='utf-8',
+    shutil.copy2(
+        LIVE_FIXTURE_DIRECTORY / 'changes' / 'calculator.py',
+        repository / 'calculator.py',
     )
     return repository
 
@@ -189,9 +185,12 @@ def run_local_scenario(
         '--objective',
         (
             'Review the changed calculator implementation. The public add function '
-            'must perform arithmetic addition and pass `python -m unittest`. Identify '
-            'the behavioral defect, request its smallest correction, and after '
-            'remediation approve only when the implementation returns the sum.'
+            f'must perform arithmetic addition and pass `{LIVE_VALIDATION_COMMAND}`. '
+            'Identify the behavioral defect, request its smallest correction, and '
+            f'after remediation approve only when the developer ran exactly '
+            f'`{LIVE_VALIDATION_COMMAND}`, reported that command with outcome '
+            '`passed` in the handoff validation, and the implementation returns the '
+            'sum.'
         ),
         '--runs-directory',
         str(runs_directory),
@@ -256,8 +255,18 @@ def assert_review_cycle_messages(
     results: tuple[dict[str, Any], ...],
     remediation_requests: tuple[dict[str, Any], ...],
     handoffs: tuple[dict[str, Any], ...],
+    *,
+    required_validation_command: str | None = None,
 ) -> tuple[str, ...]:
-    """Verify a variable-length review cycle and return its expected role order."""
+    """
+    Verify a variable-length review cycle and return its expected role order.
+
+    `required_validation_command` makes every remediation prove it ran the
+    fixture's own validation and reported it as passed. Requiring that exact
+    string is what keeps the check independent of how a runtime chooses to
+    describe its work; asserting only that some validation passed would be
+    satisfied by whatever the developer decided to run and report.
+    """
 
     assert len(requests) == len(results)
     assert len(results) >= 2
@@ -281,6 +290,12 @@ def assert_review_cycle_messages(
         assert finding_ids
         dispositions = handoff['payload']['dispositions']
         assert {item['finding_id'] for item in dispositions} == finding_ids
+        if required_validation_command is not None:
+            assert any(
+                item['command'] == required_validation_command
+                and item['outcome'] == 'passed'
+                for item in handoff['payload']['validation']
+            )
 
     expected_roles = ['reviewer']
     for _handoff in handoffs:
@@ -310,7 +325,7 @@ def assert_local_scenario(scenario: LocalScenario, runtime: LiveRuntime) -> None
         encoding='utf-8'
     )
     tests = run_command(
-        [sys.executable, '-m', 'unittest'],
+        ['./validate', '-m', 'unittest'],
         cwd=scenario.repository,
         timeout=30,
     )
@@ -330,7 +345,11 @@ def assert_local_scenario(scenario: LocalScenario, runtime: LiveRuntime) -> None
         sorted((job_directory / 'messages').glob('*-developer-handoff.json'))
     )
     expected_roles = assert_review_cycle_messages(
-        requests, results, remediation_requests, handoffs
+        requests,
+        results,
+        remediation_requests,
+        handoffs,
+        required_validation_command=LIVE_VALIDATION_COMMAND,
     )
     assert_consecutive_review_digests_change(requests)
 
