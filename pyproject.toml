@@ -52,6 +52,7 @@ agent_orchestra = ["py.typed", "manifest/*.toml"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+norecursedirs = ["tests/data"]
 markers = [
     "live_claude: opt-in tests that invoke an installed authenticated Claude CLI",
     "live_codex: opt-in tests that invoke an installed authenticated Codex CLI",
@@ -59,6 +60,7 @@ markers = [
 
 [tool.ruff]
 line-length = 88
+extend-exclude = ["tests/data"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -86,3 +88,4 @@ quote-style = "single"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+exclude = ["^tests/data/"]
