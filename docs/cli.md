@@ -1072,6 +1072,27 @@ Authenticated runtime checks are separate from the ordinary suite. Use the
 runtime-specific command below after changing an adapter or after installing,
 upgrading, authenticating, or repairing its CLI.
 
+Each live suite now starts with a capability bench derived from the default
+runtime registry. It checks that the runtime's live expectations still agree
+with the registry and packaged command manifest:
+
+- every registered runtime has a live description;
+- every declared role has a loadable adapter and a matching command profile;
+- the command profiles use exactly the declared placeholders;
+- runtime-metadata reporting matches the expected machine-readable result; and
+- the declared skill home resolves to the installer's destination.
+
+The reviewer, developer, and issue-reviewer scenarios then exercise those
+adapters with the installed CLI. That is the part that proves the commands run,
+the roles complete their smallest safe workflows, and runtime metadata agrees
+with observed output.
+
+Ordinary `mise run tests` remains offline. It checks registry coverage and the
+packaged declarations, including a deterministic incorrect definition that
+must identify the exact mismatched capability. It does not prove that a vendor
+CLI is installed, authenticated, or behaviorally compatible; only the opt-in
+live command can do that.
+
 #### Claude Code
 
 Run the authenticated Claude integration suite after installing or upgrading

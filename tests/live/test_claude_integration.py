@@ -15,13 +15,14 @@ from agent_orchestra.adapter.claude_code import (
     _developer_settings,
     _stage_skill,
 )
-from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import child_process_environment
 from agent_orchestra.skill_install import skill_destination
 from tests.live.runtime_harness import (
     LiveRuntime,
     assert_issue_scenario,
     assert_local_scenario,
+    assert_runtime_capabilities,
+    live_runtime,
     require_success,
     run_command,
     run_local_scenario,
@@ -31,14 +32,7 @@ if TYPE_CHECKING:
     import subprocess
     from pathlib import Path
 
-LIVE_CLAUDE = LiveRuntime(
-    identifier='claude-code',
-    executable='claude',
-    opt_in_environment='AGENT_ORCHESTRA_LIVE_CLAUDE',
-    model_environment='AGENT_ORCHESTRA_LIVE_CLAUDE_MODEL',
-    skill_names=('agent-orchestra-reviewer', 'agent-orchestra-developer'),
-    effective_model_status=EffectiveModelStatus.REPORTED,
-)
+LIVE_CLAUDE: LiveRuntime = live_runtime('claude-code')
 LIVE_TIMEOUT_SECONDS = 240
 SKIP_REASON = 'set AGENT_ORCHESTRA_LIVE_CLAUDE=1 to run live Claude checks'
 
@@ -213,6 +207,7 @@ def _probe_cli_isolation(executable: str, temporary: Path) -> None:
 def claude_preflight(tmp_path_factory: pytest.TempPathFactory) -> str:
     """Require an installed, authenticated CLI and an invokable role skill."""
 
+    assert_runtime_capabilities(LIVE_CLAUDE)
     executable = shutil.which(LIVE_CLAUDE.executable)
     if executable is None:
         pytest.fail('claude executable not found on PATH')
