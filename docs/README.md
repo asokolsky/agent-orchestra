@@ -10,6 +10,7 @@
 | [OpenAI Agents API runtime decision](openai-agents-api.md) | Why the Agents API is not a registered runtime. | You are evaluating that API as an execution backend. |
 | [Subagent role publication decision](subagent-role-publication.md) | Why role skills are not also published as vendor subagents. | You are evaluating another role-content install target. |
 | [Omnigent comparison](omnigent-comparison.md) | What a larger meta-harness validates, what it does differently, and which lessons this project adopts. | You are evaluating the project's differentiation or a lesson from Omnigent. |
+| [Release guide](releasing.md) | How the package version, release tag, verification, and PyPI publication fit together. | You are preparing or troubleshooting a release. |
 
 ## Role contracts
 

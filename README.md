@@ -44,6 +44,35 @@ project tasks. `uv` manages the virtual environment and dependencies, runs the
 Python tools, and builds the source and wheel distributions. Ruff provides
 formatting and linting, mypy checks types, and pytest runs the test suite.
 
+## Installation
+
+Agent Orchestra currently requires Python 3.14. Install the published CLI with
+[`uv`](https://docs.astral.sh/uv/guides/tools/):
+
+```shell
+uv tool install py-agent-orchestra
+agent-orchestra --version
+```
+
+[`pipx`](https://pipx.pypa.io/) is an equivalent option:
+
+```shell
+pipx install py-agent-orchestra
+```
+
+The PyPI project is named `py-agent-orchestra`; it installs the
+`agent-orchestra` command. Then install the bundled developer and reviewer
+skills for Codex and Claude Code:
+
+```shell
+agent-orchestra skills install \
+  --skill agent-orchestra-developer \
+  --skill agent-orchestra-reviewer
+```
+
+The [primer](docs/primer.md) continues from here. If you want to change Agent
+Orchestra itself, use the source-checkout steps under [Development](#development).
+
 Provider diagnostics, built-in runtime arguments, and canonical evidence names
 are declared in versioned TOML files under
 `src/agent_orchestra/manifest/`. These files ship in both distribution formats
@@ -156,6 +185,7 @@ mise run lint
 mise run mypy
 mise run tests
 mise run build
+mise run verify-dist
 git diff --check
 ```
 

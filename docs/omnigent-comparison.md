@@ -118,7 +118,7 @@ use mise.
 
 Agent Orchestra can already be built and installed as a Python package. The
 next step is to publish that package to PyPI so you can run
-`uv tool install agent-orchestra` without cloning the repo.
+`uv tool install py-agent-orchestra` without cloning the repo.
 [Issue #153](https://github.com/asokolsky/agent-orchestra/issues/153) tracks
 that work.
 

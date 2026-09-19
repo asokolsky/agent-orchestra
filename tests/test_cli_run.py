@@ -214,7 +214,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     } <= indexed_paths
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'job_id': str(enqueued_run.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -240,7 +240,7 @@ def test_run_dispatches_review_and_awaits_commit_authorization(
     # rather than CLI_SCHEMA_VERSION.
     assert audit['schema_version'] == AUDIT_SCHEMA_VERSION
     assert audit['schema_version'] != cli.CLI_SCHEMA_VERSION
-    assert audit['agent_orchestra_version'] == version('agent-orchestra')
+    assert audit['agent_orchestra_version'] == version('py-agent-orchestra')
 
 
 def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
@@ -897,7 +897,7 @@ def test_resume_validation_required_continues_same_run(
     ]
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'job_id': str(context.run.id),
         'state': 'awaiting_commit_authorization',
         'error': None,
@@ -1614,7 +1614,7 @@ def test_run_missing_database_is_json(
     assert captured.err == ''
     assert json.loads(captured.out) == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'job_id': 'job-1',
         'error': {
             'code': 'state_database_not_found',

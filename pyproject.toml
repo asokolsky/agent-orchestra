@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agent-orchestra"
+name = "py-agent-orchestra"
 version = "0.1.0"
 description = "A lightweight local workflow orchestrator for development and review agents."
 readme = "README.md"
@@ -12,6 +12,22 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Alex Sokolsky" }]
 dependencies = ["pydantic>=2.12,<3"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/asokolsky/agent-orchestra"
+Documentation = "https://github.com/asokolsky/agent-orchestra/tree/main/docs"
+Issues = "https://github.com/asokolsky/agent-orchestra/issues"
+Repository = "https://github.com/asokolsky/agent-orchestra"
 
 [project.scripts]
 agent-orchestra = "agent_orchestra.cli:main"
@@ -35,6 +51,7 @@ default-groups = ["dev"]
 [tool.setuptools]
 package-dir = { "" = "src" }
 packages = ["agent_orchestra", "agent_orchestra.adapter"]
+include-package-data = false
 
 [tool.setuptools.package-data]
 agent_orchestra = ["py.typed", "manifest/*.toml"]
