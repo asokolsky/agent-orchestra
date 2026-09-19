@@ -2,7 +2,7 @@
 
 Agents are good.  Collaborating agents are even better.
 Claude has
-[sub-agents](https://code.claude.com/docs/en/sub-agents) 
+[sub-agents](https://code.claude.com/docs/en/sub-agents)
 and OpenAI has
 [subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 But... How about combining the agents from different vendors?
@@ -10,6 +10,9 @@ But... How about combining the agents from different vendors?
 [`agent-orchestra`](docs/cli.md) is a local CLI for coordinating coding agents.
 Each agent gets a role and an assigned Git worktree. Workflow state and review
 artifacts stay outside that worktree.
+
+What do you get after the agents finish? An approval tied to one exact diff,
+schema-validated responses, and evidence you can inspect later.
 
 Use an isolated linked worktree for development and an exact-head detached
 worktree for remote review.
