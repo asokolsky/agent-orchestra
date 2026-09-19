@@ -197,6 +197,8 @@ def test_command_adapter_ignores_non_utf8_runtime_metadata(
     assert result.stdout == 'done'
     assert result.effective_models == ()
     assert result.effective_model_status == 'unavailable'
+    assert result.usage_status == 'unavailable'
+    assert result.usage is None
     assert not metadata_path.exists()
 
 

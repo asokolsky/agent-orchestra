@@ -1175,6 +1175,8 @@ def _execute_reviewer_dispatch(
                 timed_out=True,
                 effective_models=metadata.effective_models,
                 effective_model_status=metadata.effective_model_status,
+                usage_status=metadata.usage_status,
+                usage=metadata.usage,
             ),
             run_directory=run_directory,
         )
@@ -1279,6 +1281,8 @@ def _execute_reviewer_dispatch(
                 finished_at=finished_at,
                 effective_models=completed.effective_models,
                 effective_model_status=completed.effective_model_status,
+                usage_status=completed.usage_status,
+                usage=completed.usage,
             ),
             run_directory=run_directory,
             lifecycle=AttemptLifecycle(
@@ -1349,6 +1353,8 @@ def _execute_reviewer_dispatch(
             finished_at=finished_at,
             effective_models=completed.effective_models,
             effective_model_status=completed.effective_model_status,
+            usage_status=completed.usage_status,
+            usage=completed.usage,
         ),
         run_directory=run_directory,
         lifecycle=AttemptLifecycle(

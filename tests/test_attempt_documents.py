@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import pytest
 
@@ -21,6 +21,7 @@ from agent_orchestra.invocations import (
     EffectiveModelStatus,
     InvocationRecord,
 )
+from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageStatus, UsageValues
 
 
 def _record(*, reviewer_id: str | None = None) -> InvocationRecord:
@@ -121,3 +122,44 @@ def test_tuple_values_project_as_json_ready_lists() -> None:
     attempt = project_attempt(_record(), AUDIT_ATTEMPT_FIELDS)
 
     assert attempt['effective_models'] == ['model-a']
+
+
+def test_audit_attempt_projects_structured_usage() -> None:
+    """Expose exactly the structured usage stored with the attempt."""
+
+    record = replace(
+        _record(),
+        schema_version=6,
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(
+            totals=UsageValues(input_tokens=10, total_cost_usd=0.02),
+            models=(ModelUsage(model='model-a', values=UsageValues(input_tokens=8)),),
+        ),
+    )
+
+    attempt = project_attempt(record, AUDIT_ATTEMPT_FIELDS)
+
+    assert attempt['usage_status'] == 'reported'
+    assert attempt['usage'] == {
+        'schema_version': 1,
+        'turn_count': None,
+        'totals': {
+            'input_tokens': 10,
+            'output_tokens': None,
+            'cache_creation_input_tokens': None,
+            'cache_read_input_tokens': None,
+            'total_cost_usd': 0.02,
+        },
+        'models': [
+            {
+                'model': 'model-a',
+                'values': {
+                    'input_tokens': 8,
+                    'output_tokens': None,
+                    'cache_creation_input_tokens': None,
+                    'cache_read_input_tokens': None,
+                    'total_cost_usd': None,
+                },
+            }
+        ],
+    }

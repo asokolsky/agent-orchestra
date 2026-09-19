@@ -273,7 +273,16 @@ def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
     invocation = json.loads(
         (run_directory / 'invocations/000001-reviewer.json').read_text()
     )
-    assert invocation['schema_version'] == 4
+    assert invocation['schema_version'] == 6
+    assert invocation['usage_status'] == 'reported'
+    assert invocation['usage']['turn_count'] == 2
+    assert invocation['usage']['totals'] == {
+        'input_tokens': 100,
+        'output_tokens': 20,
+        'cache_creation_input_tokens': None,
+        'cache_read_input_tokens': 40,
+        'total_cost_usd': 0.25,
+    }
     assert invocation['task_id'] == f'{context.run.id}:000001-reviewer'
     assert invocation['invocation_id'] == (
         f'{context.run.id}:000001-reviewer:attempt-0001'

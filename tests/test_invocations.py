@@ -30,6 +30,7 @@ from agent_orchestra.invocations import (
     validate_attempt_record,
 )
 from agent_orchestra.models import RunState
+from agent_orchestra.usage import RuntimeUsage, UsageStatus, UsageValues
 
 
 def _fail_test(message: str) -> Never:
@@ -113,6 +114,8 @@ def test_schema_5_record_round_trip_preserves_reviewer_id(tmp_path: Path) -> Non
     [loaded] = InvocationEvidenceStore(job_directory).read_all('run')
     assert loaded.reviewer_id == 'security'
     assert loaded.task_id == 'run:000001-reviewer-security'
+    assert loaded.usage_status == 'unavailable'
+    assert loaded.usage is None
     with pytest.raises(InvocationEvidenceError, match='requires reviewer_id'):
         validate_attempt_record(replace(reviewer_attempt(), reviewer_id=None))
     with pytest.raises(InvocationEvidenceError, match='only reviewer'):
@@ -123,6 +126,30 @@ def test_schema_5_record_round_trip_preserves_reviewer_id(tmp_path: Path) -> Non
                 task_id='run:000001-developer',
             )
         )
+
+
+def test_schema_6_round_trip_preserves_reported_usage(tmp_path: Path) -> None:
+    """Persist structured usage with one current-schema attempt."""
+
+    job_directory = tmp_path / 'run'
+    record = replace(
+        pending_attempt(),
+        schema_version=6,
+        stdout_path='logs/000001-reviewer.stdout.log',
+        stderr_path='logs/000001-reviewer.stderr.log',
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(
+            turn_count=2,
+            totals=UsageValues(input_tokens=10, total_cost_usd=0.04),
+        ),
+    )
+    path = job_directory / 'invocations/000001-reviewer.json'
+
+    _write_record_unindexed(path, record)
+
+    [loaded] = InvocationEvidenceStore(job_directory).read_all('run')
+    assert loaded.usage_status is UsageStatus.REPORTED
+    assert loaded.usage == record.usage
 
 
 def test_attempt_transitions_through_validation_to_success() -> None:
@@ -680,6 +707,8 @@ def test_read_records_rejects_duplicate_task_attempts(tmp_path: Path) -> None:
     )
     serialized = asdict(record)
     serialized.pop('reviewer_id')
+    serialized.pop('usage_status')
+    serialized.pop('usage')
     document = json.dumps(serialized)
     (manifests / 'first.json').write_text(document)
     (manifests / 'second.json').write_text(document)

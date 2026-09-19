@@ -52,10 +52,25 @@ def main(arguments: list[str]) -> None:
         metadata_path.write_text(
             json.dumps(
                 {
-                    'schema_version': 2,
+                    'schema_version': 4,
                     'effective_models': ['claude-primary', 'claude-fallback'],
                     'status': 'reported',
                     'timed_out': False,
+                    'failure_code': None,
+                    'failure_message': None,
+                    'usage_status': 'reported',
+                    'usage': {
+                        'schema_version': 1,
+                        'turn_count': 2,
+                        'totals': {
+                            'input_tokens': 100,
+                            'output_tokens': 20,
+                            'cache_creation_input_tokens': None,
+                            'cache_read_input_tokens': 40,
+                            'total_cost_usd': 0.25,
+                        },
+                        'models': [],
+                    },
                 }
             )
         )

@@ -20,6 +20,7 @@ from agent_orchestra.runtime_metadata import (
     RuntimeMetadata,
     read_runtime_metadata,
 )
+from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageStatus, UsageValues
 
 
 def run_claude_code_reviewer(
@@ -215,6 +216,15 @@ def test_claude_code_reviewer_reports_models_before_nonzero_exit(
     assert read_runtime_metadata(metadata) == RuntimeMetadata(
         effective_models=('claude-sonnet-4-6',),
         effective_model_status=EffectiveModelStatus.REPORTED,
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(
+            models=(
+                ModelUsage(
+                    model='claude-sonnet-4-6',
+                    values=UsageValues(input_tokens=10),
+                ),
+            )
+        ),
     )
 
 
@@ -266,6 +276,17 @@ def test_claude_code_reviewer_reports_structured_output_exhaustion(
             'claude-code exhausted structured-output retries: '
             'Failed to provide valid structured output after 5 attempts; '
             'num_turns=22; total_cost_usd=0.48; permission_denials=Bash'
+        ),
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(
+            turn_count=22,
+            totals=UsageValues(total_cost_usd=0.48),
+            models=(
+                ModelUsage(
+                    model='claude-sonnet',
+                    values=UsageValues(input_tokens=10),
+                ),
+            ),
         ),
     )
 
@@ -324,6 +345,8 @@ def test_claude_code_reviewer_classifies_documented_failures(
     assert read_runtime_metadata(metadata) == RuntimeMetadata(
         failure_code=failure_code,
         failure_message=f'{failure_message}; num_turns=22',
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(turn_count=22),
     )
 
 
@@ -362,6 +385,15 @@ def test_claude_code_reviewer_reports_models_before_schema_validation(
     assert read_runtime_metadata(metadata) == RuntimeMetadata(
         effective_models=('claude-sonnet-4-6',),
         effective_model_status=EffectiveModelStatus.REPORTED,
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(
+            models=(
+                ModelUsage(
+                    model='claude-sonnet-4-6',
+                    values=UsageValues(input_tokens=10),
+                ),
+            )
+        ),
     )
 
 

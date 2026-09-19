@@ -41,6 +41,7 @@ from agent_orchestra.reviewer_paths import (
     reviewer_task_id,
     validate_reviewer_id,
 )
+from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageStatus, UsageValues
 
 INVOCATION_DIRECTORY_ESCAPE = 'invocation directory escapes the run directory'
 INVOCATION_RECORD_ESCAPE = 'invocation record escapes the run directory'
@@ -153,6 +154,8 @@ class InvocationRecord:
     response_received_at: str | None = None
     validation_started_at: str | None = None
     reviewer_id: str | None = None
+    usage_status: UsageStatus = UsageStatus.UNAVAILABLE
+    usage: RuntimeUsage | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -187,7 +190,7 @@ class AttemptIdentity:
     def schema_version(self) -> int:
         """Return the record schema this attempt's identity requires."""
 
-        return 5 if self.reviewer_id is not None else 4
+        return 6
 
     @property
     def task_id(self) -> str:
@@ -249,6 +252,8 @@ class ProcessOutcome:
     finished_at: str | None = None
     effective_models: tuple[str, ...] = ()
     effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
+    usage_status: UsageStatus = UsageStatus.UNAVAILABLE
+    usage: RuntimeUsage | None = None
 
     @property
     def derived_conclusion(self) -> AttemptConclusion:
@@ -367,6 +372,115 @@ def _parsed_timestamp(value: str, field: str) -> datetime:
     return parsed
 
 
+def _valid_usage_values(values: UsageValues) -> bool:
+    """Return whether one usage scope contains only usable reported values."""
+
+    token_values = (
+        values.input_tokens,
+        values.output_tokens,
+        values.cache_creation_input_tokens,
+        values.cache_read_input_tokens,
+    )
+    return (
+        any(value is not None for value in (*token_values, values.total_cost_usd))
+        and all(
+            value is None or (type(value) is int and value >= 0)
+            for value in token_values
+        )
+        and (
+            values.total_cost_usd is None
+            or (
+                type(values.total_cost_usd) is float
+                and values.total_cost_usd >= 0
+                and values.total_cost_usd < float('inf')
+            )
+        )
+    )
+
+
+def validate_runtime_usage(usage: RuntimeUsage) -> None:
+    """Validate the versioned, adapter-neutral usage representation."""
+
+    if type(usage.schema_version) is not int or usage.schema_version != 1:
+        _fail('unsupported runtime usage schema')
+    if usage.turn_count is not None and (
+        type(usage.turn_count) is not int or usage.turn_count < 0
+    ):
+        _fail('invalid runtime usage turn_count')
+    if usage.totals is not None and not _valid_usage_values(usage.totals):
+        _fail('invalid runtime usage totals')
+    if any(
+        not isinstance(item, ModelUsage)
+        or not isinstance(item.model, str)
+        or not item.model
+        or not _valid_usage_values(item.values)
+        for item in usage.models
+    ):
+        _fail('invalid runtime model usage')
+    if len(usage.models) != len({item.model for item in usage.models}):
+        _fail('runtime usage models must be unique')
+    if usage.turn_count is None and usage.totals is None and not usage.models:
+        _fail('reported runtime usage must contain a value')
+
+
+def usage_document(usage: RuntimeUsage) -> dict[str, object]:
+    """Render one usage value with stable JSON collection types."""
+
+    validate_runtime_usage(usage)
+    return {
+        'schema_version': usage.schema_version,
+        'turn_count': usage.turn_count,
+        'totals': asdict(usage.totals) if usage.totals is not None else None,
+        'models': [
+            {'model': item.model, 'values': asdict(item.values)}
+            for item in usage.models
+        ],
+    }
+
+
+def runtime_usage_from_document(document: object) -> RuntimeUsage:
+    """Decode one strict runtime usage document."""
+
+    if not isinstance(document, dict) or set(document) != {
+        'schema_version',
+        'turn_count',
+        'totals',
+        'models',
+    }:
+        _fail('invalid runtime usage fields')
+    totals_document = document['totals']
+    value_fields = set(UsageValues.__dataclass_fields__)
+    if totals_document is not None and (
+        not isinstance(totals_document, dict) or set(totals_document) != value_fields
+    ):
+        _fail('invalid runtime usage totals')
+    models_document = document['models']
+    if not isinstance(models_document, list):
+        _fail('invalid runtime model usage')
+    models: list[ModelUsage] = []
+    for item in models_document:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {'model', 'values'}
+            or not isinstance(item['values'], dict)
+            or set(item['values']) != value_fields
+        ):
+            _fail('invalid runtime model usage')
+        models.append(
+            ModelUsage(model=item['model'], values=UsageValues(**item['values']))
+        )
+    usage = RuntimeUsage(
+        schema_version=document['schema_version'],
+        turn_count=document['turn_count'],
+        totals=(
+            UsageValues(**totals_document) if totals_document is not None else None
+        ),
+        models=tuple(models),
+    )
+    validate_runtime_usage(usage)
+    return usage
+
+
 def _valid_record_types(record: InvocationRecord) -> bool:
     """Return whether lifecycle fields have their exact primitive types."""
 
@@ -380,6 +494,8 @@ def _valid_record_types(record: InvocationRecord) -> bool:
         and isinstance(record.effective_models, (list, tuple))
         and all(isinstance(model, str) and model for model in record.effective_models)
         and isinstance(record.effective_model_status, str)
+        and isinstance(record.usage_status, str)
+        and (record.usage is None or isinstance(record.usage, RuntimeUsage))
         and isinstance(record.runtime, str)
         and type(record.iteration) is int
         and isinstance(record.started_at, str)
@@ -407,7 +523,7 @@ def _valid_record_types(record: InvocationRecord) -> bool:
 def validate_attempt_record(record: InvocationRecord) -> None:
     """Validate lifecycle, identity, and milestone consistency."""
 
-    if record.schema_version not in {4, 5}:
+    if record.schema_version not in {4, 5, 6}:
         _fail('unsupported invocation record schema')
     if record.schema_version == 4 and record.reviewer_id is not None:
         _fail('schema 4 invocation cannot contain reviewer_id')
@@ -416,6 +532,16 @@ def validate_attempt_record(record: InvocationRecord) -> None:
             _fail('schema 5 reviewer invocation requires reviewer_id')
         if record.role != 'reviewer' and record.reviewer_id is not None:
             _fail('only reviewer invocations can contain reviewer_id')
+    if record.schema_version in {4, 5} and (
+        record.usage_status is not UsageStatus.UNAVAILABLE or record.usage is not None
+    ):
+        _fail('legacy invocation schema cannot contain usage')
+    if (
+        record.schema_version == 6
+        and record.role != 'reviewer'
+        and record.reviewer_id is not None
+    ):
+        _fail('only reviewer invocations can contain reviewer_id')
     if not record.task_id:
         _fail('schema 4 invocation requires task_id')
     if not _valid_record_types(record):
@@ -424,6 +550,12 @@ def validate_attempt_record(record: InvocationRecord) -> None:
         _fail('invalid attempt role')
     if not isinstance(record.effective_model_status, EffectiveModelStatus):
         _fail('invalid effective_model_status')
+    if not isinstance(record.usage_status, UsageStatus):
+        _fail('invalid usage_status')
+    if (record.usage_status is UsageStatus.REPORTED) != (record.usage is not None):
+        _fail('usage_status contradicts usage')
+    if record.usage is not None:
+        validate_runtime_usage(record.usage)
     if not isinstance(record.status, AttemptStatus):
         _fail('invalid attempt status')
     if record.conclusion is not None and not isinstance(
@@ -610,8 +742,16 @@ def _validated_document(
 
     validate_attempt_record(record)
     document = _job_relative_streams(asdict(record), path.parent.parent)
+    document['usage'] = (
+        usage_document(record.usage) if record.usage is not None else None
+    )
     if record.schema_version == 4:
         document.pop('reviewer_id')
+        document.pop('usage_status')
+        document.pop('usage')
+    if record.schema_version == 5:
+        document.pop('usage_status')
+        document.pop('usage')
     new_record = not path.exists()
     if new_record and record.status != 'pending':
         _fail('new attempt must start pending')
@@ -787,15 +927,21 @@ class InvocationEvidenceStore:
             if not isinstance(document, dict):
                 _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
             schema_version = document.get('schema_version')
-            if schema_version not in {4, 5}:
+            if schema_version not in {4, 5, 6}:
                 _fail(f'unsupported invocation record schema in {path.name}')
             required = set(InvocationRecord.__dataclass_fields__)
+            if schema_version in {4, 5}:
+                required.remove('usage_status')
+                required.remove('usage')
             if schema_version == 4:
                 required.remove('reviewer_id')
             if set(document) != required:
                 _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
             if schema_version == 4:
                 document['reviewer_id'] = None
+            if schema_version in {4, 5}:
+                document['usage_status'] = UsageStatus.UNAVAILABLE
+                document['usage'] = None
 
             def fail_record(message: str, name: str = path.name) -> Never:
                 """Report one unreadable persisted field for this record."""
@@ -811,6 +957,11 @@ class InvocationEvidenceStore:
             document['effective_model_status'] = EffectiveModelStatus.decode(
                 document.get('effective_model_status'), fail=fail_record
             )
+            document['usage_status'] = UsageStatus.decode(
+                document.get('usage_status'), fail=fail_record
+            )
+            if document.get('usage') is not None:
+                document['usage'] = runtime_usage_from_document(document['usage'])
             if document.get('conclusion') is not None:
                 document['conclusion'] = AttemptConclusion.decode(
                     document['conclusion'], fail=fail_record
@@ -979,6 +1130,8 @@ def record_invocation(
             requested_model=attempt.agent.model,
             effective_models=outcome.effective_models,
             effective_model_status=outcome.effective_model_status,
+            usage_status=outcome.usage_status,
+            usage=outcome.usage,
             runtime=attempt.agent.runtime,
             iteration=attempt.iteration,
             started_at=outcome.started_at,

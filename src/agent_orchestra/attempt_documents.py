@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from agent_orchestra.invocations import usage_document
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -28,6 +30,8 @@ AUDIT_ATTEMPT_FIELDS: tuple[str, ...] = (
     'requested_model',
     'effective_models',
     'effective_model_status',
+    'usage_status',
+    'usage',
     'runtime',
     'iteration',
     'started_at',
@@ -93,6 +97,10 @@ CLI_WITHHELD_FIELDS: tuple[str, ...] = (
     'schema_version',
     'stdout_path',
     'stderr_path',
+    # Runtime usage is currently part of the audit evidence view, not the
+    # compact task-status vocabulary.
+    'usage_status',
+    'usage',
 )
 # The CLI renames the internal identifier to the documented public name.
 CLI_ATTEMPT_RENAMES: Mapping[str, str] = {'invocation_id': 'attempt_id'}
@@ -115,6 +123,8 @@ def project_attempt(
         value = getattr(record, field)
         if field in OMITTED_WHEN_NONE and value is None:
             continue
+        if field == 'usage' and value is not None:
+            value = usage_document(value)
         document[renamed.get(field, field)] = (
             list(value) if isinstance(value, tuple) else value
         )

@@ -98,7 +98,7 @@ def _complete_reviewer_invocation(
     return invocation_id
 
 
-def test_record_invocation_uses_distinct_reviewer_qualified_schema_5_paths(
+def test_record_invocation_uses_distinct_reviewer_qualified_schema_6_paths(
     tmp_path: Path,
 ) -> None:
     """Persist two same-sequence reviewer members without collisions."""
@@ -128,7 +128,7 @@ def test_record_invocation_uses_distinct_reviewer_qualified_schema_5_paths(
         assert (run_directory / 'invocations' / f'{stem}.json').is_file()
     records = InvocationEvidenceStore(tmp_path).read_all(str(run.id))
     assert len(records) == 2
-    assert {record.schema_version for record in records} == {5}
+    assert {record.schema_version for record in records} == {6}
     assert len({record.task_id for record in records}) == 2
     assert len({record.invocation_id for record in records}) == 2
     assert {record.reviewer_id for record in records} == {'security', 'performance'}

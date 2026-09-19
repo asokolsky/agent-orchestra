@@ -604,7 +604,7 @@ other.
 Strictness per version is not the same as reading only what this build wrote.
 Persisted evidence outlives the build that produced it, and a reader may accept
 more than one version: `InvocationEvidenceStore` accepts invocation records at
-schema 4 and 5, adapting a schema-4 record as it reads. Compatibility there is
+schemas 4, 5, and 6, adapting older records as it reads. Compatibility there is
 expressed by naming each version a reader accepts, not by tolerating unknown
 keys within one. Those documents carry no `agent_orchestra_version` because the
 version already identifies the shape, and the reader adapts per version rather
@@ -693,6 +693,11 @@ the invocation record by the shared attempt projection. Making that established
 identity visible in the reporting documentation does not change the audit
 shape, so it does not advance the schema under the public-document policy.
 
+Per-attempt `usage_status` and structured `usage` are also additive audit
+fields, so the audit document remains schema 15. The nested usage object has its
+own schema version because persisted invocation evidence validates an exact
+shape.
+
 Both attempt documents name the record fields they publish and the fields they
 withhold, so a field added to the invocation record joins neither document until
 someone decides it should. The CLI attempt vocabulary is unchanged.
@@ -715,6 +720,12 @@ message, artifact, stream, runtime sidecar, and temporary response path is
 qualified by the same stable ID. Fan-out dispatch will produce these records in
 a subsequent slice. Schema-4 records remain readable and retain the
 single-reviewer `{job_id}:{sequence:06d}-reviewer` form.
+
+Invocation record schema 6 adds `usage_status` and the nullable, versioned
+`usage` object. `reported` means the runtime supplied at least one usable value;
+`unavailable` means it did not. Aggregate attempt values and per-model values
+remain separate so partial model data cannot be mistaken for complete totals.
+Schema-4 and schema-5 records are adapted to unavailable usage when read.
 
 One reviewer execution plan resolves into one dispatch per required reviewer
 before any reviewer process starts. Each dispatch carries the member's frozen
