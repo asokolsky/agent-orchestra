@@ -71,22 +71,15 @@ flow.
 Alternatively, create the release from an up-to-date `main` checkout with:
 
 ```shell
-VERSION="$(
-  uv run python -c \
-    'from tools.release import project_version; print(project_version())'
-)"
-mise run verify-release-tag -- "v$VERSION"
-gh release create "v$VERSION" \
-  --repo asokolsky/agent-orchestra \
-  --target "$(git rev-parse HEAD)" \
-  --title "v$VERSION" \
-  --generate-notes
+./tools/create-release.sh
 ```
 
-The first command reads `project.version` from `pyproject.toml`, the source of
-truth used by the release checks. `gh release create` publishes immediately.
+The script reads `project.version` from `pyproject.toml`, verifies the matching
+tag, and creates the release at the current commit. See
+[`tools/README.md`](../tools/README.md) for its exact behavior. Creating the
+release publishes it immediately.
 
-Both clickops and the CLI start `.github/workflows/release.yml`. The workflow
+Both clickops and the script start `.github/workflows/release.yml`. The workflow
 rebuilds from the released tag, repeats the complete gate and distribution
 smoke test, and passes the verified files to a separate publish job.
 
