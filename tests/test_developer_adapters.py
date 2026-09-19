@@ -24,6 +24,7 @@ from agent_orchestra.runtime_metadata import (
     RuntimeMetadata,
     read_runtime_metadata,
 )
+from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageStatus, UsageValues
 
 
 def run_codex_developer(
@@ -456,6 +457,15 @@ def test_claude_developer_reports_models_before_nonzero_exit(
     assert read_runtime_metadata(metadata) == RuntimeMetadata(
         effective_models=('claude-sonnet-4-6',),
         effective_model_status=EffectiveModelStatus.REPORTED,
+        usage_status=UsageStatus.REPORTED,
+        usage=RuntimeUsage(
+            models=(
+                ModelUsage(
+                    model='claude-sonnet-4-6',
+                    values=UsageValues(input_tokens=10),
+                ),
+            )
+        ),
     )
 
 

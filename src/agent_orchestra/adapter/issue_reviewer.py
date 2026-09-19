@@ -8,6 +8,7 @@ from typing import Any
 from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.errors import AgentOrchestraError
 from agent_orchestra.manifests import role_assignment
+from agent_orchestra.usage import RuntimeUsage, UsageStatus
 
 
 class IssueReviewerError(AgentOrchestraError):
@@ -22,6 +23,9 @@ class IssueReviewerError(AgentOrchestraError):
         exit_code: int | None = None,
         timed_out: bool = False,
         interrupted: bool = False,
+        effective_models: tuple[str, ...] = (),
+        usage_status: UsageStatus = UsageStatus.UNAVAILABLE,
+        usage: RuntimeUsage | None = None,
     ) -> None:
         """Create a failure carrying any available process evidence."""
 
@@ -31,6 +35,9 @@ class IssueReviewerError(AgentOrchestraError):
         self.exit_code = exit_code
         self.timed_out = timed_out
         self.interrupted = interrupted
+        self.effective_models = effective_models
+        self.usage_status = usage_status
+        self.usage = usage
 
 
 def issue_review_prompt(request: dict[str, Any]) -> str:

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,7 @@ from agent_orchestra.schemas import (
     validate_review_result,
 )
 from agent_orchestra.skill_install import skill_destination
+from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageStatus, UsageValues
 
 
 class ClaudeCodeReviewerError(AdapterError):
@@ -276,6 +278,84 @@ def _effective_models(output: dict[str, Any]) -> tuple[str, ...]:
     return tuple(model for model in usage if isinstance(model, str) and model)
 
 
+def _token_count(value: object) -> int | None:
+    """Return one usable token count without accepting booleans or negatives."""
+
+    return value if type(value) is int and value >= 0 else None
+
+
+def _cost(value: object) -> float | None:
+    """Return one finite nonnegative reported cost."""
+
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    normalized = float(value)
+    return normalized if normalized >= 0 and math.isfinite(normalized) else None
+
+
+def _usage_values(document: dict[str, Any], *, camel_case: bool) -> UsageValues | None:
+    """Normalize the cross-runtime values from one Claude usage scope."""
+
+    input_name = 'inputTokens' if camel_case else 'input_tokens'
+    output_name = 'outputTokens' if camel_case else 'output_tokens'
+    creation_name = (
+        'cacheCreationInputTokens' if camel_case else 'cache_creation_input_tokens'
+    )
+    read_name = 'cacheReadInputTokens' if camel_case else 'cache_read_input_tokens'
+    cost_name = 'costUSD' if camel_case else 'total_cost_usd'
+    values = UsageValues(
+        input_tokens=_token_count(document.get(input_name)),
+        output_tokens=_token_count(document.get(output_name)),
+        cache_creation_input_tokens=_token_count(document.get(creation_name)),
+        cache_read_input_tokens=_token_count(document.get(read_name)),
+        total_cost_usd=_cost(document.get(cost_name)),
+    )
+    return (
+        values if any(value is not None for value in asdict(values).values()) else None
+    )
+
+
+def _runtime_usage(output: dict[str, Any]) -> RuntimeUsage | None:
+    """Normalize usable aggregate and per-model values from a Claude envelope."""
+
+    aggregate_document = output.get('usage')
+    totals = (
+        _usage_values(aggregate_document, camel_case=False)
+        if isinstance(aggregate_document, dict)
+        else None
+    )
+    total_cost = _cost(output.get('total_cost_usd'))
+    if total_cost is not None:
+        totals = UsageValues(
+            input_tokens=totals.input_tokens if totals is not None else None,
+            output_tokens=totals.output_tokens if totals is not None else None,
+            cache_creation_input_tokens=(
+                totals.cache_creation_input_tokens if totals is not None else None
+            ),
+            cache_read_input_tokens=(
+                totals.cache_read_input_tokens if totals is not None else None
+            ),
+            total_cost_usd=total_cost,
+        )
+    models: list[ModelUsage] = []
+    model_document = output.get('modelUsage')
+    if isinstance(model_document, dict):
+        for model, values_document in model_document.items():
+            if (
+                not isinstance(model, str)
+                or not model
+                or not isinstance(values_document, dict)
+            ):
+                continue
+            values = _usage_values(values_document, camel_case=True)
+            if values is not None:
+                models.append(ModelUsage(model=model, values=values))
+    turn_count = _token_count(output.get('num_turns'))
+    if turn_count is None and totals is None and not models:
+        return None
+    return RuntimeUsage(turn_count=turn_count, totals=totals, models=tuple(models))
+
+
 def _claude_failure(output: dict[str, Any]) -> tuple[str | None, str | None]:
     """Classify one documented Claude result failure with safe diagnostics."""
 
@@ -331,6 +411,7 @@ def _output_with_runtime_metadata(stdout: str) -> dict[str, Any] | None:
         _effective_models(output),
         failure_code=failure_code,
         failure_message=failure_message,
+        usage=_runtime_usage(output),
     )
     return output
 
@@ -493,6 +574,9 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
                     stderr=str(error.stderr or ''),
                     timed_out=True,
                 ) from error
+        output = _output_with_runtime_metadata(completed.stdout)
+        usage = _runtime_usage(output) if output is not None else None
+        models = _effective_models(output) if output is not None else ()
         if completed.returncode != 0:
             diagnostic = completed.stderr.strip() or completed.stdout.strip()
             message = f'claude-code issue review failed: {diagnostic}'
@@ -501,8 +585,14 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 exit_code=completed.returncode,
+                effective_models=models,
+                usage_status=(
+                    UsageStatus.REPORTED
+                    if usage is not None
+                    else UsageStatus.UNAVAILABLE
+                ),
+                usage=usage,
             )
-        output = _output_with_runtime_metadata(completed.stdout)
         if output is None or not isinstance(output.get('structured_output'), dict):
             message = 'claude-code returned no structured issue review'
             raise IssueReviewerError(
@@ -510,14 +600,25 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
                 stdout=completed.stdout,
                 stderr=completed.stderr,
                 exit_code=completed.returncode,
+                effective_models=models,
+                usage_status=(
+                    UsageStatus.REPORTED
+                    if usage is not None
+                    else UsageStatus.UNAVAILABLE
+                ),
+                usage=usage,
             )
         result: dict[str, Any] = output['structured_output']
         return IssueReviewExecution(
-            result,
-            completed.stdout,
-            completed.stderr,
-            completed.returncode,
-            _effective_models(output),
+            result=result,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+            effective_models=models,
+            usage_status=(
+                UsageStatus.REPORTED if usage is not None else UsageStatus.UNAVAILABLE
+            ),
+            usage=usage,
         )
 
 

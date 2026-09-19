@@ -55,6 +55,7 @@ from agent_orchestra.schemas import (
     SchemaValidationError,
     validate_issue_review_result,
 )
+from agent_orchestra.usage import UsageStatus
 
 if TYPE_CHECKING:
     from agent_orchestra.store import JobStore
@@ -271,7 +272,7 @@ def _start_invocation(
     _write_text(job_directory, stderr_path, '')
     task_id = f'{job.id}:{iteration:06d}-issue_reviewer'
     pending = InvocationRecord(
-        schema_version=4,
+        schema_version=6,
         run_id=job.id,
         task_id=task_id,
         invocation_id=f'{task_id}:attempt-{attempt:04d}',
@@ -355,11 +356,32 @@ def _finish_invocation(
             if reviewer_error is not None
             else None
         ),
-        effective_models=(execution.effective_models if execution is not None else ()),
+        effective_models=(
+            execution.effective_models
+            if execution is not None
+            else reviewer_error.effective_models
+            if reviewer_error is not None
+            else ()
+        ),
         effective_model_status=(
             EffectiveModelStatus.REPORTED
-            if execution is not None and execution.effective_models
+            if (execution is not None and execution.effective_models)
+            or (reviewer_error is not None and reviewer_error.effective_models)
             else EffectiveModelStatus.UNAVAILABLE
+        ),
+        usage_status=(
+            execution.usage_status
+            if execution is not None
+            else reviewer_error.usage_status
+            if reviewer_error is not None
+            else UsageStatus.UNAVAILABLE
+        ),
+        usage=(
+            execution.usage
+            if execution is not None
+            else reviewer_error.usage
+            if reviewer_error is not None
+            else None
         ),
     )
     InvocationEvidenceStore(job_directory).write(record_path, completed)

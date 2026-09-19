@@ -705,7 +705,7 @@ appear as `in_progress` until their invocation completes.
 | `job` | Object | Scenario-specific identity, immutable scope, state, and timestamps. |
 | `transitions` | Array | Ordered SQLite state history with the scope digest and optional reason at each transition. |
 | `operations` | Array | Commit authorization, commit, publish authorization, and publication views derived from transitions. |
-| `tasks` | Array | Ordered roles and attempts; each attempt names its runtime, agent vendor, and requested model. Stream paths are included but stream contents are not. |
+| `tasks` | Array | Ordered roles and attempts; each attempt names its runtime, agent vendor, requested model, and reported usage or explicit unavailable status. Stream paths are included but stream contents are not. |
 | `evidence` | Array | Job-relative type, path, size, recorded digest, finalization time, and verification status. |
 | `integrity` | Object | Integrity schema and nullable `backfilled_at` provenance marker. |
 | `history` | Array | Canonical message and issue-iteration summaries, including findings, dispositions, and validation outcomes. |
@@ -1046,6 +1046,23 @@ not report effective model identity; Codex records therefore use
 `effective_model_status: "unavailable"` without guessing from defaults or
 human-formatted output. Custom commands use the same explicit unknown state.
 
+Each invocation also records `usage_status`. Claude Code reports structured
+usage when its JSON result includes usable values; Codex and custom commands
+currently record `"unavailable"`. Reported usage keeps attempt totals separate
+from per-model values. Depending on what the runtime supplies, it may include:
+
+- turn count;
+- input and output token counts;
+- cache creation and cache read token counts;
+- total cost in US dollars.
+
+Invalid numbers are omitted instead of guessed or replaced.
+
+Usage is accounting evidence produced after an attempt. It is not a spending
+limit: Agent Orchestra does not estimate prices, stop a provider process when a
+threshold is reached, or claim that values from different vendors are directly
+comparable.
+
 Claude Code reviewer profiles request the documented `dontAsk` permission mode.
 With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, Claude Code's hardening currently
 reports the effective mode as `default`; an installed-CLI test pins that
@@ -1060,11 +1077,10 @@ mode; the Claude sandbox still confines those tools to the assigned worktree
 and the invocation-owned directory containing the staged role skill.
 
 Known nonzero Claude result subtypes are translated into provider-neutral
-runtime metadata. Its structured failure message retains safe diagnostics when
-present: turn count, total estimated cost, and the names of denied tools. The
-complete provider envelope remains in the invocation stdout log. This avoids
-adding Claude-specific fields to the shared invocation schema while keeping the
-operator-facing failure actionable.
+runtime metadata. Its structured failure message still retains safe diagnostics
+when present: turn count, total reported cost, and the names of denied tools.
+The complete provider envelope remains in the invocation stdout log, while the
+shared invocation record stores only the normalized usage fields.
 
 ### Opt-in live runtime verification
 

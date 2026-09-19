@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agent_orchestra.usage import RuntimeUsage, UsageStatus
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -35,6 +37,8 @@ class IssueReviewExecution:
     stderr: str
     exit_code: int
     effective_models: tuple[str, ...] = ()
+    usage_status: UsageStatus = UsageStatus.UNAVAILABLE
+    usage: RuntimeUsage | None = None
 
 
 class IssueReviewerAdapter(ABC):

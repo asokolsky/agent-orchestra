@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestra.adapter.claude_code import _effective_models
+from agent_orchestra.adapter.claude_code import _effective_models, _runtime_usage
 from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.runtime_metadata import (
     RUNTIME_METADATA_ENV,
@@ -17,6 +17,7 @@ from agent_orchestra.runtime_metadata import (
     reviewer_process_environment,
     write_runtime_metadata,
 )
+from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageValues
 
 
 def test_claude_model_usage_preserves_multiple_effective_models() -> None:
@@ -35,6 +36,75 @@ def test_claude_model_usage_preserves_multiple_effective_models() -> None:
     )
     assert _effective_models({}) == ()
     assert _effective_models({'modelUsage': []}) == ()
+
+
+def test_claude_usage_keeps_aggregate_and_model_scopes_separate() -> None:
+    """Preserve partial multi-model provenance without inventing one grand total."""
+
+    output = {
+        'num_turns': 3,
+        'total_cost_usd': 0.25,
+        'usage': {
+            'input_tokens': 100,
+            'output_tokens': 20,
+            'cache_read_input_tokens': 40,
+        },
+        'modelUsage': {
+            'claude-sonnet': {'inputTokens': 80, 'costUSD': 0.2},
+            'claude-haiku': {'outputTokens': 5},
+        },
+    }
+
+    assert _runtime_usage(output) == RuntimeUsage(
+        turn_count=3,
+        totals=UsageValues(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_input_tokens=40,
+            total_cost_usd=0.25,
+        ),
+        models=(
+            ModelUsage(
+                model='claude-sonnet',
+                values=UsageValues(input_tokens=80, total_cost_usd=0.2),
+            ),
+            ModelUsage(
+                model='claude-haiku',
+                values=UsageValues(output_tokens=5),
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    'output',
+    [
+        {'num_turns': True},
+        {'total_cost_usd': -0.1},
+        {'usage': {'input_tokens': False, 'output_tokens': -1}},
+        {'modelUsage': {'claude-sonnet': {'inputTokens': '10'}}},
+    ],
+)
+def test_claude_usage_rejects_unusable_vendor_values(
+    output: dict[str, object],
+) -> None:
+    """Treat malformed, boolean, and negative values as unavailable."""
+
+    assert _runtime_usage(output) is None
+
+
+def test_claude_usage_retains_valid_fields_from_a_partial_envelope() -> None:
+    """Keep valid fields without allowing malformed peers to poison or pad them."""
+
+    assert _runtime_usage(
+        {
+            'usage': {
+                'input_tokens': 12,
+                'output_tokens': True,
+                'cache_creation_input_tokens': -3,
+            }
+        }
+    ) == RuntimeUsage(totals=UsageValues(input_tokens=12))
 
 
 def test_reviewer_environment_confines_transient_outputs(
@@ -105,7 +175,7 @@ def test_runtime_metadata_round_trips_adapter_failure(
         failure_message='structured output failed after five attempts',
     )
 
-    assert json.loads(path.read_text())['schema_version'] == 3
+    assert json.loads(path.read_text())['schema_version'] == 4
     assert read_runtime_metadata(path) == RuntimeMetadata(
         effective_models=('claude-sonnet',),
         effective_model_status=EffectiveModelStatus.REPORTED,

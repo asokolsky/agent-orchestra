@@ -11,7 +11,13 @@ from uuid import uuid4
 
 from agent_orchestra.adapter.registry import RuntimeRegistryError
 from agent_orchestra.errors import AgentOrchestraError
-from agent_orchestra.invocations import EffectiveModelStatus, InvocationIdentity
+from agent_orchestra.invocations import (
+    EffectiveModelStatus,
+    InvocationIdentity,
+    runtime_usage_from_document,
+    usage_document,
+)
+from agent_orchestra.usage import RuntimeUsage, UsageStatus
 
 if TYPE_CHECKING:
     from agent_orchestra.adapter.registry import RuntimeRegistry
@@ -43,6 +49,8 @@ class RuntimeMetadata:
     timed_out: bool = False
     failure_code: str | None = None
     failure_message: str | None = None
+    usage_status: UsageStatus = UsageStatus.UNAVAILABLE
+    usage: RuntimeUsage | None = None
 
 
 def child_process_environment(**overrides: str) -> dict[str, str]:
@@ -80,6 +88,7 @@ def write_runtime_metadata(
     timed_out: bool = False,
     failure_code: str | None = None,
     failure_message: str | None = None,
+    usage: RuntimeUsage | None = None,
 ) -> None:
     """Write model identity and adapter failure metadata to the given path."""
 
@@ -88,7 +97,7 @@ def write_runtime_metadata(
         return
     path = Path(value)
     document = {
-        'schema_version': 3,
+        'schema_version': 4,
         'effective_models': list(dict.fromkeys(models)),
         'status': (
             EffectiveModelStatus.REPORTED
@@ -98,6 +107,10 @@ def write_runtime_metadata(
         'timed_out': timed_out,
         'failure_code': failure_code,
         'failure_message': failure_message,
+        'usage_status': (
+            UsageStatus.REPORTED if usage is not None else UsageStatus.UNAVAILABLE
+        ).value,
+        'usage': usage_document(usage) if usage is not None else None,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid4()}.tmp')
@@ -131,9 +144,11 @@ def read_runtime_metadata(path: Path) -> RuntimeMetadata:
         'status',
         'timed_out',
     }
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         expected_fields.update({'failure_code', 'failure_message'})
-    if schema_version not in {2, 3} or set(document) != expected_fields:
+    if schema_version == 4:
+        expected_fields.update({'usage_status', 'usage'})
+    if schema_version not in {2, 3, 4} or set(document) != expected_fields:
         message = 'invalid runtime metadata fields'
         raise RuntimeMetadataError(message)
     models = document['effective_models']
@@ -141,6 +156,8 @@ def read_runtime_metadata(path: Path) -> RuntimeMetadata:
     timed_out = document['timed_out']
     failure_code = document.get('failure_code')
     failure_message = document.get('failure_message')
+    usage_status = document.get('usage_status', UsageStatus.UNAVAILABLE)
+    usage_value = document.get('usage')
     if (
         not isinstance(models, list)
         or not all(isinstance(model, str) and model for model in models)
@@ -157,15 +174,29 @@ def read_runtime_metadata(path: Path) -> RuntimeMetadata:
             failure_message is not None
             and (not isinstance(failure_message, str) or not failure_message)
         )
+        or usage_status not in UsageStatus.values()
+        or (usage_status == UsageStatus.REPORTED) != (usage_value is not None)
     ):
         message = 'invalid runtime metadata values'
         raise RuntimeMetadataError(message)
+    try:
+        usage = (
+            runtime_usage_from_document(usage_value)
+            if usage_value is not None
+            else None
+        )
+    except AgentOrchestraError as error:
+        raise RuntimeMetadataError(
+            f'invalid runtime metadata values: {error}'
+        ) from error
     return RuntimeMetadata(
         effective_models=tuple(models),
         effective_model_status=EffectiveModelStatus(status),
         timed_out=timed_out,
         failure_code=failure_code,
         failure_message=failure_message,
+        usage_status=UsageStatus(usage_status),
+        usage=usage,
     )
 
 
@@ -177,6 +208,8 @@ def exception_runtime_metadata(error: BaseException) -> RuntimeMetadata:
     timed_out = getattr(error, 'timed_out', False)
     failure_code = getattr(error, 'failure_code', None)
     failure_message = getattr(error, 'failure_message', None)
+    usage_status = getattr(error, 'usage_status', UsageStatus.UNAVAILABLE)
+    usage = getattr(error, 'usage', None)
     if type(timed_out) is not bool:
         timed_out = False
     if (
@@ -191,6 +224,8 @@ def exception_runtime_metadata(error: BaseException) -> RuntimeMetadata:
             failure_message is None
             or (isinstance(failure_message, str) and failure_message)
         )
+        and usage_status in UsageStatus.values()
+        and (usage_status == UsageStatus.REPORTED) == isinstance(usage, RuntimeUsage)
     ):
         return RuntimeMetadata(
             effective_models=tuple(models),
@@ -198,6 +233,8 @@ def exception_runtime_metadata(error: BaseException) -> RuntimeMetadata:
             timed_out=timed_out,
             failure_code=failure_code,
             failure_message=failure_message,
+            usage_status=UsageStatus(usage_status),
+            usage=usage,
         )
     return RuntimeMetadata(timed_out=timed_out)
 

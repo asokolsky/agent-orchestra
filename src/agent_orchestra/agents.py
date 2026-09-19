@@ -15,6 +15,7 @@ from agent_orchestra.runtime_metadata import (
     RuntimeMetadataError,
     read_runtime_metadata,
 )
+from agent_orchestra.usage import RuntimeUsage, UsageStatus
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -75,6 +76,8 @@ class AgentResult:
     exit_code: int
     effective_models: tuple[str, ...] = ()
     effective_model_status: EffectiveModelStatus = EffectiveModelStatus.UNAVAILABLE
+    usage_status: UsageStatus = UsageStatus.UNAVAILABLE
+    usage: RuntimeUsage | None = None
     timed_out: bool = False
     failure_code: str | None = None
     failure_message: str | None = None
@@ -184,6 +187,8 @@ class CommandAgentAdapter:
                 timed_out=getattr(error, 'timed_out', False) or metadata.timed_out,
                 failure_code=metadata.failure_code,
                 failure_message=metadata.failure_message,
+                usage_status=metadata.usage_status,
+                usage=metadata.usage,
             )
             raise
         metadata = self._consume_runtime_metadata(request.runtime_metadata_path)
@@ -198,4 +203,6 @@ class CommandAgentAdapter:
             timed_out=metadata.timed_out,
             failure_code=metadata.failure_code,
             failure_message=metadata.failure_message,
+            usage_status=metadata.usage_status,
+            usage=metadata.usage,
         )
