@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from agent_orchestra.adapter.codex import _developer_environment
-from agent_orchestra.invocations import EffectiveModelStatus
 from agent_orchestra.manifests import adapter_arguments
 from agent_orchestra.runtime_metadata import reviewer_process_environment
 from agent_orchestra.skill_install import skill_destination
@@ -19,7 +18,9 @@ from tests.live.runtime_harness import (
     LiveRuntime,
     assert_issue_scenario,
     assert_local_scenario,
+    assert_runtime_capabilities,
     git,
+    live_runtime,
     require_success,
     run_command,
     run_local_scenario,
@@ -28,14 +29,7 @@ from tests.live.runtime_harness import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-LIVE_CODEX = LiveRuntime(
-    identifier='codex',
-    executable='codex',
-    opt_in_environment='AGENT_ORCHESTRA_LIVE_CODEX',
-    model_environment='AGENT_ORCHESTRA_LIVE_CODEX_MODEL',
-    skill_names=('agent-orchestra-reviewer', 'agent-orchestra-developer'),
-    effective_model_status=EffectiveModelStatus.UNAVAILABLE,
-)
+LIVE_CODEX: LiveRuntime = live_runtime('codex')
 LIVE_TIMEOUT_SECONDS = 300
 SKIP_REASON = 'set AGENT_ORCHESTRA_LIVE_CODEX=1 to run live Codex checks'
 SKILL_VERSION = re.compile(r'^\s+version:\s*"([^"]+)"\s*$', re.MULTILINE)
@@ -158,6 +152,7 @@ def _probe_role_skill(
 def codex_preflight(tmp_path_factory: pytest.TempPathFactory) -> str:
     """Require an installed, authenticated CLI and two invokable role skills."""
 
+    assert_runtime_capabilities(LIVE_CODEX)
     executable = shutil.which(LIVE_CODEX.executable)
     if executable is None:
         pytest.fail('codex executable not found on PATH')

@@ -9,16 +9,26 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from hashlib import sha256
+from importlib import import_module
 from itertools import pairwise
 from pathlib import Path
+from string import Formatter
 from typing import TYPE_CHECKING, Any, cast
 
+from agent_orchestra.adapter.registry import (
+    DEFAULT_RUNTIME_REGISTRY,
+    RuntimeDefinition,
+    RuntimeRegistry,
+    RuntimeRole,
+)
 from agent_orchestra.audit import build_audit_document
 from agent_orchestra.evidence import resolve_evidence_path
 from agent_orchestra.invocations import EffectiveModelStatus, InvocationEvidenceStore
 from agent_orchestra.issue_review import run_issue_review
 from agent_orchestra.issue_sources import IssueLocator, IssueSnapshot, write_snapshot
+from agent_orchestra.manifests import adapter_arguments, load_manifest
 from agent_orchestra.models import IssueJob, Run, RunState
+from agent_orchestra.skill_install import skill_destination
 from agent_orchestra.store import JobStore
 
 if TYPE_CHECKING:
@@ -45,6 +55,11 @@ class LiveRuntime:
     opt_in_environment: str
     model_environment: str
     skill_names: tuple[str, ...]
+    roles: frozenset[RuntimeRole]
+    manifest_placeholders: frozenset[str]
+    reports_runtime_metadata: bool
+    skill_home_environment: str
+    skill_home_directory: str
     effective_model_status: EffectiveModelStatus
 
     @property
@@ -52,6 +67,204 @@ class LiveRuntime:
         """Return the optional model selected for this live run."""
 
         return os.environ.get(self.model_environment) or None
+
+
+LIVE_RUNTIMES = (
+    LiveRuntime(
+        identifier='codex',
+        executable='codex',
+        opt_in_environment='AGENT_ORCHESTRA_LIVE_CODEX',
+        model_environment='AGENT_ORCHESTRA_LIVE_CODEX_MODEL',
+        skill_names=('agent-orchestra-reviewer', 'agent-orchestra-developer'),
+        roles=frozenset(RuntimeRole),
+        manifest_placeholders=frozenset({'cwd', 'schema', 'result'}),
+        reports_runtime_metadata=True,
+        skill_home_environment='CODEX_HOME',
+        skill_home_directory='.codex',
+        effective_model_status=EffectiveModelStatus.UNAVAILABLE,
+    ),
+    LiveRuntime(
+        identifier='claude-code',
+        executable='claude',
+        opt_in_environment='AGENT_ORCHESTRA_LIVE_CLAUDE',
+        model_environment='AGENT_ORCHESTRA_LIVE_CLAUDE_MODEL',
+        skill_names=('agent-orchestra-reviewer', 'agent-orchestra-developer'),
+        roles=frozenset(RuntimeRole),
+        manifest_placeholders=frozenset({'settings', 'schema'}),
+        reports_runtime_metadata=True,
+        skill_home_environment='CLAUDE_CONFIG_DIR',
+        skill_home_directory='.claude',
+        effective_model_status=EffectiveModelStatus.REPORTED,
+    ),
+)
+
+
+class RuntimeCapabilityError(AssertionError):
+    """Identify one runtime declaration that disagrees with its live contract."""
+
+    def __init__(
+        self, runtime: str, capability: str, expected: object, observed: object
+    ) -> None:
+        """Create an actionable mismatch for one named capability."""
+
+        self.runtime = runtime
+        self.capability = capability
+        self.expected = expected
+        self.observed = observed
+        super().__init__(
+            f'{runtime} capability {capability} mismatch: '
+            f'expected {expected!r}, observed {observed!r}'
+        )
+
+
+def live_runtime(identifier: str) -> LiveRuntime:
+    """Return the independently declared live expectations for one runtime."""
+
+    for runtime in LIVE_RUNTIMES:
+        if runtime.identifier == identifier:
+            return runtime
+    raise KeyError(identifier)
+
+
+def _require_capability(
+    runtime: LiveRuntime, capability: str, expected: object, observed: object
+) -> None:
+    """Fail with the exact capability whose declaration does not agree."""
+
+    if expected != observed:
+        raise RuntimeCapabilityError(runtime.identifier, capability, expected, observed)
+
+
+def _manifest_placeholders(profiles: dict[str, object]) -> frozenset[str]:
+    """Return every replacement field used by runtime command profiles."""
+
+    fields: set[str] = set()
+    for arguments in profiles.values():
+        if not isinstance(arguments, list):
+            continue
+        for argument in arguments:
+            if not isinstance(argument, str):
+                continue
+            fields.update(
+                field_name
+                for _, field_name, _, _ in Formatter().parse(argument)
+                if field_name is not None
+            )
+    return frozenset(fields)
+
+
+def assert_runtime_capabilities(
+    runtime: LiveRuntime,
+    *,
+    registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
+) -> RuntimeDefinition:
+    """Check one registry entry against its independent live expectations."""
+
+    definition = registry.require(runtime.identifier)
+    declared_roles = frozenset(
+        role for role in RuntimeRole if definition.supports(role)
+    )
+    _require_capability(runtime, 'roles', runtime.roles, declared_roles)
+    _require_capability(
+        runtime,
+        'manifest_placeholders',
+        runtime.manifest_placeholders,
+        definition.manifest_placeholders,
+    )
+    _require_capability(
+        runtime,
+        'reports_runtime_metadata',
+        runtime.reports_runtime_metadata,
+        definition.reports_runtime_metadata,
+    )
+    _require_capability(
+        runtime,
+        'skill_home_environment',
+        runtime.skill_home_environment,
+        definition.skill_home_environment,
+    )
+    _require_capability(
+        runtime,
+        'skill_home_directory',
+        runtime.skill_home_directory,
+        definition.skill_home_directory,
+    )
+
+    try:
+        import_module(definition.module)
+    except (ImportError, ValueError) as error:
+        raise RuntimeCapabilityError(
+            runtime.identifier, 'module', definition.module, str(error)
+        ) from error
+    for role in sorted(runtime.roles, key=str):
+        try:
+            registry.adapter(runtime.identifier, role)
+        except Exception as error:
+            raise RuntimeCapabilityError(
+                runtime.identifier,
+                f'adapter:{role}',
+                definition.adapter_path(role),
+                str(error),
+            ) from error
+
+    manifest = load_manifest(runtime.identifier)
+    profiles = cast('dict[str, object]', manifest.data['profiles'])
+    expected_profiles = frozenset(str(role) for role in runtime.roles)
+    _require_capability(
+        runtime, 'manifest_profiles', expected_profiles, frozenset(profiles)
+    )
+    _require_capability(
+        runtime,
+        'manifest_placeholders_observed',
+        runtime.manifest_placeholders,
+        _manifest_placeholders(profiles),
+    )
+    values = {
+        placeholder: f'/capability/{placeholder}'
+        for placeholder in runtime.manifest_placeholders
+    }
+    for role in sorted(runtime.roles, key=str):
+        try:
+            arguments = adapter_arguments(runtime.identifier, str(role), **values)
+        except Exception as error:
+            raise RuntimeCapabilityError(
+                runtime.identifier,
+                f'manifest_command:{role}',
+                'renderable command arguments',
+                str(error),
+            ) from error
+        command_is_valid = bool(arguments) and all(
+            isinstance(argument, str) for argument in arguments
+        )
+        if not command_is_valid:
+            raise RuntimeCapabilityError(
+                runtime.identifier,
+                f'manifest_command:{role}',
+                'non-empty string arguments',
+                arguments,
+            )
+
+    configured_home = os.environ.get(runtime.skill_home_environment)
+    expected_home = (
+        (
+            Path(configured_home)
+            if configured_home
+            else Path.home() / runtime.skill_home_directory
+        )
+        .expanduser()
+        .resolve()
+    )
+    for skill_name in runtime.skill_names:
+        destination = skill_destination(
+            runtime.identifier, skill_name, runtime_registry=registry
+        )
+        _require_capability(
+            runtime,
+            f'skill_destination:{skill_name}',
+            expected_home / 'skills' / skill_name,
+            destination,
+        )
+    return definition
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,11 +399,11 @@ def run_local_scenario(
         (
             'Review the changed calculator implementation. The public add function '
             f'must perform arithmetic addition and pass `{LIVE_VALIDATION_COMMAND}`. '
-            'Identify the behavioral defect, request its smallest correction, and '
-            f'after remediation approve only when the developer ran exactly '
-            f'`{LIVE_VALIDATION_COMMAND}`, reported that command with outcome '
-            '`passed` in the handoff validation, and the implementation returns the '
-            'sum.'
+            'Identify the behavioral defect and request its smallest correction. Ask '
+            f'the developer to run exactly `{LIVE_VALIDATION_COMMAND}` and report it '
+            'as passed. On the next review, decide from the worktree whether the '
+            'implementation returns the sum; the harness checks the developer '
+            'handoff separately because it is not part of a later review request.'
         ),
         '--runs-directory',
         str(runs_directory),
