@@ -955,7 +955,7 @@ def test_views_treat_absent_issue_tables_as_empty(
     assert main(['--database', str(database), 'jobs', '--attention']) == 0
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'jobs': [],
         'error': None,
     }

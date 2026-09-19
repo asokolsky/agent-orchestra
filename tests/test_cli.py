@@ -110,7 +110,7 @@ def test_cli_rejects_incompatible_manifest_with_stable_error(
     assert main(['--help']) == 2
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': cli.CLI_SCHEMA_VERSION,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'error': {
             'code': 'manifest_engine_too_old',
             'message': 'manifest_engine_too_old: codex',
@@ -127,7 +127,9 @@ def test_version_reports_installed_distribution(
         main(['--version'])
 
     assert raised.value.code == 0
-    assert capsys.readouterr().out == f'agent-orchestra {version("agent-orchestra")}\n'
+    assert capsys.readouterr().out == (
+        f'agent-orchestra {version("py-agent-orchestra")}\n'
+    )
 
 
 def test_skills_install_for_both_agents(
@@ -244,4 +246,4 @@ def test_command_documents_report_the_cli_schema_version_and_the_build(
 
     document = json.loads(capsys.readouterr().out)
     assert document['schema_version'] == cli.CLI_SCHEMA_VERSION
-    assert document['agent_orchestra_version'] == version('agent-orchestra')
+    assert document['agent_orchestra_version'] == version('py-agent-orchestra')

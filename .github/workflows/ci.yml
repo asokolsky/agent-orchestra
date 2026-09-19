@@ -55,3 +55,6 @@ jobs:
 
       - name: Build distributions
         run: mise run build
+
+      - name: Verify distributions
+        run: mise run verify-dist

@@ -23,10 +23,23 @@ run = [
     'uv build'
 ]
 
+[tasks.verify-dist]
+description = "Inspect distributions and smoke-test the installed wheel"
+run = [
+    'uv run python -m tools.release check-dist dist',
+    'uv run python -m tools.release smoke-wheel dist',
+]
+
+[tasks.verify-release-tag]
+description = "Verify that a release tag matches the package version"
+run = [
+    'uv run python -m tools.release check-tag',
+]
+
 [tasks.clean]
 description = "Do local clean-up"
 run = [
-    'rm -rf .mypy_cache .pytest_cache .ruff_cache .venv build dist src/agent_orchestra.egg-info',
+    'rm -rf .mypy_cache .pytest_cache .ruff_cache .venv build dist src/*.egg-info',
     'find . -name __pycache__ | xargs rm -rf'
 ]
 
@@ -34,32 +47,32 @@ run = [
 description = "Format python sources"
 run = [
     # sort imports
-    'uv run ruff check --select I --fix src/agent_orchestra tests',
+    'uv run ruff check --select I --fix src/agent_orchestra tests tools',
     # reformat sources
-    'uv run ruff format -v src/agent_orchestra tests',
+    'uv run ruff format -v src/agent_orchestra tests tools',
 ]
 
 [tasks.format-check]
 description = "Verify python sources are formatted without modifying them"
 run = [
     # verify import order
-    'uv run ruff check --select I src/agent_orchestra tests',
+    'uv run ruff check --select I src/agent_orchestra tests tools',
     # verify formatting
-    'uv run ruff format --check src/agent_orchestra tests',
+    'uv run ruff format --check src/agent_orchestra tests tools',
 ]
 
 [tasks.lint]
 description = "Lint python sources"
 run = [
     # check imports
-    'uv run ruff check -v --select I src/agent_orchestra tests',
-    'uv run ruff check -v src/agent_orchestra tests'
+    'uv run ruff check -v --select I src/agent_orchestra tests tools',
+    'uv run ruff check -v src/agent_orchestra tests tools'
 ]
 
 [tasks.mypy]
 description = "Check typing"
 run = [
-    'uv run mypy src/agent_orchestra tests'
+    'uv run mypy src/agent_orchestra tests tools'
 ]
 
 [tasks.tests]

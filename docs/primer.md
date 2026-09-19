@@ -40,11 +40,29 @@ Before you begin, you need:
   [git worktree](https://git-scm.com/docs/git-worktree) workflow recommended.
 - Agent [runtimes](concepts.md#runtimes) installed and authenticated, e.g. a
   working `codex` and/or `claude` session.
-- [mise](https://mise.jdx.dev/) to manage the toolchain.
+- Python 3.14 and either [`uv`](https://docs.astral.sh/uv/) or
+  [`pipx`](https://pipx.pypa.io/) to install the CLI.
 
 ### Making `agent-orchestra` available
 
-Clone it and install the toolchain:
+Install the CLI from PyPI with `uv`:
+
+```shell
+uv tool install py-agent-orchestra
+agent-orchestra --version
+```
+
+That prints the installed version. You can use `pipx` instead:
+
+```sh
+pipx install py-agent-orchestra
+```
+
+The PyPI project is named `py-agent-orchestra`; both installers expose the
+`agent-orchestra` command used below.
+
+If you are developing Agent Orchestra itself, clone the repo and use its managed
+toolchain instead of the published package:
 
 ```shell
 git clone https://github.com/asokolsky/agent-orchestra.git
@@ -52,39 +70,10 @@ cd agent-orchestra
 mise trust
 mise install
 uv sync --group dev
-```
-
-### Running agent-orchestra - option 1
-
-Run these commands from inside the checkout.
-
-```shell
-mise agent-orchestra -- --version
-```
-
-That prints `agent-orchestra 0.1.0`. The `--` separates mise's own arguments
-from the command's.
-
-### Running agent-orchestra - option 2
-
-Alternatively, this works from the checkout without mise:
-
-```sh
 uv run agent-orchestra --version
 ```
 
-### Running agent-orchestra - option 3
-
-Yet another option is to build the distribution and install it to put
-`agent-orchestra` in your `PATH`.
-
-```sh
-mise run build
-uv tool install dist/*.whl
-agent-orchestra --version
-```
-
-All three accept identical arguments; see [Invocation](cli.md#invocation).
+Both installations expose the same CLI; see [Invocation](cli.md#invocation).
 
 ## 1. Install the role skills
 
@@ -92,7 +81,7 @@ Enable agents to use `agent-orchestra` for various [roles](concepts.md#roles) by
 installing the [`skills`](cli.md#skills):
 
 ```shell
-mise agent-orchestra -- skills install \
+agent-orchestra skills install \
   --skill agent-orchestra-developer --skill agent-orchestra-reviewer
 ```
 
@@ -103,7 +92,7 @@ Repeat this after a skill version changes.
 Record the worktree's current diff as a job:
 
 ```shell
-export JOB_ID="$(mise agent-orchestra -- enqueue-local /path/to/repo)"
+export JOB_ID="$(agent-orchestra enqueue-local /path/to/repo)"
 printf '%s\n' "$JOB_ID"
 ```
 
@@ -127,7 +116,7 @@ To scan a directory of repositories and enqueue only the dirty ones, use
 Ask the default (Codex) agent to review the uncommitted change:
 
 ```shell
-mise agent-orchestra -- run "$JOB_ID" \
+agent-orchestra run "$JOB_ID" \
   --objective 'Review the queued implementation.' \
   --no-remediation
 ```
@@ -153,7 +142,7 @@ To use Claude Code instead of the default Codex
 [adapter](concepts.md#adapters):
 
 ```shell
-mise agent-orchestra -- run "$JOB_ID" \
+agent-orchestra run "$JOB_ID" \
   --objective 'Review the queued implementation.' \
   --reviewer-agent claude-code --reviewer-model sonnet --no-remediation
 ```
@@ -189,7 +178,7 @@ find ~/.local/state/agent-orchestra/runs -path "*$JOB_ID*" -name 'review-0*.md'
 That path is the built-in default. It changes if you pass `--runs-directory` or
 set `[storage].runs_directory` in the settings file, so if the search finds
 nothing, check the effective value with
-`mise agent-orchestra -- config show` and search there instead.
+`agent-orchestra config show` and search there instead.
 
 Once you have cleared the obstacle, **start a new review**: capture the diff
 again with `enqueue-local` and run it. The blocked job is not resumed into a
@@ -201,7 +190,7 @@ blocked job stays on disk as the record of what could not be judged.
 To see the findings, read the job's evidence:
 
 ```shell
-mise agent-orchestra -- audit "$JOB_ID"
+agent-orchestra audit "$JOB_ID"
 ```
 
 Or ask your agent to do exactly this step:

@@ -326,7 +326,7 @@ def test_enqueue_locals_captures_changed_child_repositories(
     output = json.loads(capsys.readouterr().out)
     assert output == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'directory': str(projects),
         'jobs': [
             {'job_id': str(runs[1].id), 'worktree_path': str(changed_a)},

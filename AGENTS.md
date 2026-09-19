@@ -43,7 +43,8 @@
 - Use Python 3.14 and the uv, Ruff, mypy, pytest, and mise configuration in this
   repo.
 - Use `agent_orchestra` for the Python import package.
-- Use `agent-orchestra` for the distribution and user-facing CLI.
+- Use `py-agent-orchestra` for the PyPI distribution.
+- Use `agent-orchestra` for the user-facing CLI.
 - New Python files require a module docstring, applicable class and function
   docstrings, and typed parameters and return values.
 

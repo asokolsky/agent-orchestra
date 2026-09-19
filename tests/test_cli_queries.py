@@ -80,7 +80,7 @@ def test_jobs_lists_persisted_job(
     output = capsys.readouterr().out
     assert output.startswith(
         '{\n  "schema_version": 23,\n'
-        f'  "agent_orchestra_version": "{version("agent-orchestra")}",\n'
+        f'  "agent_orchestra_version": "{version("py-agent-orchestra")}",\n'
         '  "jobs": [\n    {\n'
     )
     assert output.endswith('\n}\n')
@@ -99,7 +99,7 @@ def test_jobs_lists_persisted_job(
     assert set(document['jobs'][0]) == expected_fields
     assert document == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'jobs': [
             {
                 'job_id': str(run.id),
@@ -248,7 +248,7 @@ def test_jobs_rejects_unknown_state_with_stable_error(
     assert result == 2
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'error': {
             'code': 'invalid_job_state',
             'message': 'unknown durable job state: needs-coffee',
@@ -606,7 +606,7 @@ def test_jobs_lists_empty_jobs_as_json(
     assert result == 0
     assert json.loads(capsys.readouterr().out) == {
         'schema_version': 23,
-        'agent_orchestra_version': version('agent-orchestra'),
+        'agent_orchestra_version': version('py-agent-orchestra'),
         'jobs': [],
         'error': None,
     }
