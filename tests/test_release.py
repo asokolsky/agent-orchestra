@@ -27,6 +27,9 @@ MANIFEST_NAMES = (
     'gitlab.toml',
 )
 SKILL_NAMES = ('agent-orchestra-developer', 'agent-orchestra-reviewer')
+FIXTURE_VERSION = project_version()
+PYPI_PUBLISH_COMMIT = 'dc37677b2e1c63e2034f94d8a5b11f265b73ba33'
+PYPI_PUBLISH_TAG_OBJECT = 'a892a5a61159132606e93a2fa6f4358831b04d26'
 
 
 def write_pyproject(path: Path, version: str) -> Path:
@@ -58,19 +61,21 @@ def core_metadata(version: str) -> bytes:
 def write_distributions(
     directory: Path,
     *,
-    version: str = '0.1.0',
+    version: str = FIXTURE_VERSION,
     omitted_member: str | None = None,
 ) -> tuple[Path, Path]:
     """Build minimal wheel and source archives for verifier tests."""
 
-    wheel = directory / 'py_agent_orchestra-0.1.0-py3-none-any.whl'
+    wheel = directory / f'py_agent_orchestra-{FIXTURE_VERSION}-py3-none-any.whl'
     wheel_members = {
-        'py_agent_orchestra-0.1.0.dist-info/METADATA': core_metadata(version),
+        f'py_agent_orchestra-{FIXTURE_VERSION}.dist-info/METADATA': core_metadata(
+            version
+        ),
         **{
             f'agent_orchestra/manifest/{name}': b'manifest\n' for name in MANIFEST_NAMES
         },
         **{
-            'py_agent_orchestra-0.1.0.data/data/share/agent-orchestra/'
+            f'py_agent_orchestra-{FIXTURE_VERSION}.data/data/share/agent-orchestra/'
             f'skills/{skill}/{filename}': b'skill\n'
             for skill in SKILL_NAMES
             for filename in ('SKILL.md', 'SKILL-meta.md')
@@ -81,8 +86,8 @@ def write_distributions(
             if name != omitted_member:
                 archive.writestr(name, content)
 
-    source = directory / 'py_agent_orchestra-0.1.0.tar.gz'
-    root = 'py_agent_orchestra-0.1.0'
+    source = directory / f'py_agent_orchestra-{FIXTURE_VERSION}.tar.gz'
+    root = f'py_agent_orchestra-{FIXTURE_VERSION}'
     source_members = {
         f'{root}/PKG-INFO': core_metadata(version),
         **{
@@ -121,6 +126,15 @@ def test_release_tag_matches_project_version(tmp_path: Path) -> None:
         check_release_tag('v1.2.4', pyproject)
 
 
+def test_release_workflow_pins_publisher_to_peeled_commit() -> None:
+    """Use the publisher's GHCR-backed commit, not its annotated tag object."""
+
+    workflow = Path('.github/workflows/release.yml').read_text()
+
+    assert f'pypa/gh-action-pypi-publish@{PYPI_PUBLISH_COMMIT}' in workflow
+    assert PYPI_PUBLISH_TAG_OBJECT not in workflow
+
+
 def test_check_distributions_accepts_complete_archives(tmp_path: Path) -> None:
     """Accept matching metadata, manifests, and role skills in both archives."""
 
@@ -134,13 +148,16 @@ def test_check_distributions_accepts_complete_archives(tmp_path: Path) -> None:
     [
         ('9.9.9', None, 'metadata is py-agent-orchestra 9.9.9'),
         (
-            '0.1.0',
+            FIXTURE_VERSION,
             'agent_orchestra/manifest/codex.toml',
             'must contain one agent_orchestra/manifest/codex.toml',
         ),
         (
-            '0.1.0',
-            'py_agent_orchestra-0.1.0/skills/agent-orchestra-developer/SKILL.md',
+            FIXTURE_VERSION,
+            (
+                f'py_agent_orchestra-{FIXTURE_VERSION}/skills/'
+                'agent-orchestra-developer/SKILL.md'
+            ),
             'must contain one skills/agent-orchestra-developer/SKILL.md',
         ),
     ],
@@ -164,8 +181,8 @@ def test_smoke_test_wheel_exercises_installed_cli(
 ) -> None:
     """Exercise version, manifest, and skill checks through the installed CLI."""
 
-    wheel = tmp_path / 'py_agent_orchestra-0.1.0-py3-none-any.whl'
-    source = tmp_path / 'py_agent_orchestra-0.1.0.tar.gz'
+    wheel = tmp_path / f'py_agent_orchestra-{FIXTURE_VERSION}-py3-none-any.whl'
+    source = tmp_path / f'py_agent_orchestra-{FIXTURE_VERSION}.tar.gz'
     calls: list[list[str]] = []
 
     def fake_check_distributions(directory: Path) -> tuple[Path, Path]:
@@ -177,7 +194,7 @@ def test_smoke_test_wheel_exercises_installed_cli(
     def fake_project_version() -> str:
         """Return the version expected from the synthetic installed CLI."""
 
-        return '0.1.0'
+        return FIXTURE_VERSION
 
     def fake_run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         """Record smoke commands and materialize the requested skill installs."""
@@ -185,7 +202,7 @@ def test_smoke_test_wheel_exercises_installed_cli(
         calls.append(command)
         if command[-1] == '--version':
             return subprocess.CompletedProcess(
-                command, 0, stdout='agent-orchestra 0.1.0\n', stderr=''
+                command, 0, stdout=f'agent-orchestra {FIXTURE_VERSION}\n', stderr=''
             )
         if 'skills' in command:
             for index, argument in enumerate(command):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py-agent-orchestra"
-version = "0.1.0"
+version = "0.1.1"
 description = "A lightweight local workflow orchestrator for development and review agents."
 readme = "README.md"
 requires-python = ">=3.14"
