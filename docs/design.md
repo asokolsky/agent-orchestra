@@ -235,6 +235,22 @@ configuration without itself proving which processes ran, and it would prevent
 legitimate single-runtime use. Cross-runtime review is therefore an operator
 choice recorded by the evidence contract, not a workflow invariant.
 
+### What the Omnigent comparison clarified
+
+[Omnigent's Polly example](omnigent-comparison.md) also sends work from coding
+agents to reviewers from other vendors. That makes cross-vendor review a useful
+technique, but not a sufficient description of this project.
+
+Agent Orchestra also
+
+- validates each response,
+- binds approval to one immutable diff digest,
+- reconstructs interrupted work from durable messages, and
+- verifies audit evidence against hashes on disk.
+
+These are the parts it can check and promise. The operator remains free to
+choose the same runtime or different runtimes for each role.
+
 ## Collaborators and value types
 
 Two kinds of object carry state, and the difference decides where new code goes.

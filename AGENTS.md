@@ -20,6 +20,24 @@
 - Do not commit, push, create or update a pull request, post remotely, merge, or
   remove a worktree without explicit authorization for that exact action.
 
+## Documentation voice
+
+- Keep the voice conversational and curious.
+- Prefer concrete, informally professional language.
+- Use the README opening beginning "Agents are good. Collaborating agents are
+  even better" as the reference. Its personality and natural question lead into
+  a plain explanation of the tool.
+- Preserve established prose with personality when adding a design point. Do
+  not replace it with corporate, marketing, or manifesto-style positioning.
+- Describe what the tool does before making abstract claims about what the
+  project exists to provide.
+- Avoid slogans such as "the mechanism, not the thesis," declarations that a
+  comparison "settles the question," and similarly grand positioning language.
+- Explain differences as understated engineering observations backed by
+  specific behavior. Let the evidence make the case.
+- When enumerating four or more elements, use a bulleted list instead of
+  embedding the enumeration in prose.
+
 ## Python and naming
 
 - Use Python 3.14 and the uv, Ruff, mypy, pytest, and mise configuration in this

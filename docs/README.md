@@ -9,6 +9,7 @@
 | [Design](design.md) | Why the tool is built this way, and the contracts it keeps. | You are changing the tool, or need the rationale behind a constraint. |
 | [OpenAI Agents API runtime decision](openai-agents-api.md) | Why the Agents API is not a registered runtime. | You are evaluating that API as an execution backend. |
 | [Subagent role publication decision](subagent-role-publication.md) | Why role skills are not also published as vendor subagents. | You are evaluating another role-content install target. |
+| [Omnigent comparison](omnigent-comparison.md) | What a larger meta-harness validates, what it does differently, and which lessons this project adopts. | You are evaluating the project's differentiation or a lesson from Omnigent. |
 
 ## Role contracts
 
