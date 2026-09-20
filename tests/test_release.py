@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -251,6 +252,7 @@ def test_smoke_test_wheel_exercises_installed_cli(
     wheel = tmp_path / f'py_agent_orchestra-{FIXTURE_VERSION}-py3-none-any.whl'
     source = tmp_path / f'py_agent_orchestra-{FIXTURE_VERSION}.tar.gz'
     calls: list[list[str]] = []
+    environments: list[dict[str, str] | None] = []
 
     def fake_check_distributions(directory: Path) -> tuple[Path, Path]:
         """Return synthetic archives without repeating archive verification."""
@@ -263,10 +265,13 @@ def test_smoke_test_wheel_exercises_installed_cli(
 
         return FIXTURE_VERSION
 
-    def fake_run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        command: list[str], cwd: Path, *, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Record smoke commands and materialize the requested skill installs."""
 
         calls.append(command)
+        environments.append(env)
         if command[-1] == '--version':
             return subprocess.CompletedProcess(
                 command, 0, stdout=f'agent-orchestra {FIXTURE_VERSION}\n', stderr=''
@@ -289,6 +294,17 @@ def test_smoke_test_wheel_exercises_installed_cli(
 
     release.smoke_test_wheel(tmp_path)
 
+    install_index = next(
+        index
+        for index, command in enumerate(calls)
+        if command[:3] == ['uv', 'tool', 'install']
+    )
+    install = calls[install_index]
+    install_environment = environments[install_index]
+    assert install[install.index('--python') + 1] == sys.executable
+    assert install_environment is not None
+    assert Path(install_environment['UV_TOOL_DIR']).name == 'tools'
+    assert Path(install_environment['UV_TOOL_BIN_DIR']).name == 'bin'
     assert any(command[-1] == '--version' for command in calls)
     assert any('validate_packaged_manifests' in ' '.join(command) for command in calls)
     assert any('skills' in command for command in calls)

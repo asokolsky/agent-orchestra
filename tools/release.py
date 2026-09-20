@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import email
+import os
 import re
 import subprocess
 import sys
@@ -246,7 +247,9 @@ def check_distributions(directory: Path) -> tuple[Path, Path]:
     return wheel, source
 
 
-def _run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], cwd: Path, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run one smoke-test command and preserve its diagnostic output."""
 
     return subprocess.run(
@@ -255,6 +258,7 @@ def _run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         check=True,
         text=True,
         capture_output=True,
+        env=env,
     )
 
 
@@ -265,17 +269,26 @@ def smoke_test_wheel(directory: Path) -> None:
     expected_version = project_version()
     with tempfile.TemporaryDirectory(prefix='agent-orchestra-wheel-') as temporary:
         root = Path(temporary)
-        environment = root / 'venv'
+        tool_directory = root / 'tools'
+        bin_directory = root / 'bin'
+        tool_environment = os.environ | {
+            'UV_TOOL_DIR': str(tool_directory),
+            'UV_TOOL_BIN_DIR': str(bin_directory),
+        }
         _run(
-            ['uv', 'venv', '--python', sys.executable, str(environment)],
+            [
+                'uv',
+                'tool',
+                'install',
+                '--python',
+                sys.executable,
+                str(wheel.resolve()),
+            ],
             root,
+            env=tool_environment,
         )
-        python = environment / 'bin/python'
-        executable = environment / 'bin/agent-orchestra'
-        _run(
-            ['uv', 'pip', 'install', '--python', str(python), str(wheel.resolve())],
-            root,
-        )
+        python = tool_directory / PROJECT_NAME / 'bin/python'
+        executable = bin_directory / COMMAND_NAME
         reported = _run([str(executable), '--version'], root).stdout.strip()
         if reported != f'{COMMAND_NAME} {expected_version}':
             raise ReleaseVerificationError(f'unexpected --version output: {reported!r}')

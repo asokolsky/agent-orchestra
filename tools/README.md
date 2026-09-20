@@ -14,8 +14,8 @@ checks exposed through these mise tasks:
 - `mise run verify-dist` checks the wheel and source distribution metadata,
   rejects package-description links that would resolve relative to PyPI,
   and verifies packaged manifests and canonical role skills. It then installs
-  the wheel in a temporary environment and exercises the installed CLI and skill
-  installer.
+  the wheel through `uv tool install` in a temporary tool environment and
+  exercises the installed CLI and skill installer.
 
 The tests in `tests/test_release.py` build small synthetic archives around those
 contracts. They also require the release workflow to pin the PyPI publisher

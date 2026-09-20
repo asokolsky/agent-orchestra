@@ -30,7 +30,7 @@ Response shape | Whatever the harness returns. | Validated against a JSON schema
 Audit | No document verifiable against on-disk hashes after the fact. | Audit document verifiable against the evidence index and hashes.
 Interruption | Sessions resume as conversations. | The workflow is reconstructed from durable canonical messages and attempt records.
 Harness breadth | About a dozen behind one interface. | Two, behind a registry built to hold more.
-Installation | `curl \| sh`, Homebrew, or `uv tool install`. | A mise-managed source checkout.
+Installation | `curl \| sh`, Homebrew, or `uv tool install`. | `uv tool install --python 3.14 py-agent-orchestra`.
 
 Both tools can arrange cross-vendor review. Agent Orchestra additionally makes
 the review scope and result verifiable after the run.
@@ -110,17 +110,11 @@ somebody reviews with, and each one added is a live suite, a skill install path,
 and a capability claim to keep honest. The bench above is what makes a wider
 roster affordable when a reason for one arrives.
 
-### Installation — publish to PyPI
+### Installation — adopted
 
-Omnigent is easier to install. It supports a shell installer, Homebrew, and
-`uv tool install`. Agent Orchestra currently expects you to clone the repo and
-use mise.
-
-Agent Orchestra can already be built and installed as a Python package. The
-next step is to publish that package to PyPI so you can run
-`uv tool install py-agent-orchestra` without cloning the repo.
-[Issue #153](https://github.com/asokolsky/agent-orchestra/issues/153) tracks
-that work.
+Omnigent supports a shell installer, Homebrew, and `uv tool install`. Agent
+Orchestra is available from PyPI and installs into an isolated Python 3.14 tool
+environment with `uv tool install --python 3.14 py-agent-orchestra`.
 
 ### How the project describes itself — adopted
 

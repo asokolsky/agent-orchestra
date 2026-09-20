@@ -48,15 +48,23 @@ Before you begin, you need:
 Install the CLI from PyPI with `uv`:
 
 ```shell
-uv tool install py-agent-orchestra
+uv tool install --python 3.14 py-agent-orchestra
 agent-orchestra --version
 ```
 
-That prints the installed version. You can use `pipx` instead:
+That creates a persistent, isolated tool environment and prints the installed
+version. You do not need to create or activate another virtual environment. If
+`uv python list 3.14` offers only a prerelease such as `3.14.0b3`,
+[update uv](https://docs.astral.sh/uv/getting-started/installation/#updating-uv)
+first because each uv release carries a fixed list of downloadable Python
+builds. You can use `pipx` instead:
 
 ```sh
-pipx install py-agent-orchestra
+pipx install --python python3.14 py-agent-orchestra
 ```
+
+Unlike uv, pipx does not download Python. Install Python 3.14 first and make
+sure `python3.14` is available on `PATH` before using that command.
 
 The PyPI project is named `py-agent-orchestra`; both installers expose the
 `agent-orchestra` command used below.

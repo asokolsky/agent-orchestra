@@ -95,10 +95,13 @@ After the job succeeds, verify both supported installation paths from outside
 the source checkout:
 
 ```shell
-uv tool install py-agent-orchestra
+uv tool install --python 3.14 py-agent-orchestra
 agent-orchestra --version
-pipx install py-agent-orchestra
+pipx install --python python3.14 py-agent-orchestra
 ```
+
+The pipx check requires `python3.14` to be installed and available on `PATH`;
+pipx does not download Python.
 
 [github-release]: https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository#creating-a-release
 [pypi-trusted-publisher]: https://docs.pypi.org/trusted-publishers/adding-a-publisher/
