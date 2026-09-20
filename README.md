@@ -7,7 +7,7 @@ and OpenAI has
 [subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 But... How about combining the agents from different vendors?
 
-[`agent-orchestra`](docs/cli.md) is a local CLI for coordinating coding agents.
+[`agent-orchestra`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md) is a local CLI for coordinating coding agents.
 Each agent gets a role and an assigned Git worktree. Workflow state and review
 artifacts stay outside that worktree.
 
@@ -26,8 +26,8 @@ Agent-orchestra intends to be a thin coordination layer offering improved agent 
 
 ## Concepts
 
-See [Roles, runtimes, adapters, and capabilities](docs/concepts.md) for the
-canonical definitions. See the [CLI reference](docs/cli.md) for every command,
+See [Roles, runtimes, adapters, and capabilities](https://github.com/asokolsky/agent-orchestra/blob/main/docs/concepts.md) for the
+canonical definitions. See the [CLI reference](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md) for every command,
 option, default, output, and exit behavior.
 
 Agent Orchestra distinguishes source-code reviewers and source-code developers,
@@ -70,19 +70,19 @@ agent-orchestra skills install \
   --skill agent-orchestra-reviewer
 ```
 
-The [primer](docs/primer.md) continues from here. If you want to change Agent
+The [primer](https://github.com/asokolsky/agent-orchestra/blob/main/docs/primer.md) continues from here. If you want to change Agent
 Orchestra itself, use the source-checkout steps under [Development](#development).
 
 Provider diagnostics, built-in runtime arguments, and canonical evidence names
 are declared in versioned TOML files under
 `src/agent_orchestra/manifest/`. These files ship in both distribution formats
 and are validated before the CLI handles a command. See
-[Packaged knowledge manifests](docs/design.md#packaged-knowledge-manifests) for
+[Packaged knowledge manifests](https://github.com/asokolsky/agent-orchestra/blob/main/docs/design.md#packaged-knowledge-manifests) for
 the schema, compatibility rules, and stable failure codes.
 
 ## Supported scenarios
 
-- The implemented [local development and review workflow](docs/workflows.md#local-development-and-review)
+- The implemented [local development and review workflow](https://github.com/asokolsky/agent-orchestra/blob/main/docs/workflows.md#local-development-and-review)
   captures an existing uncommitted diff as a job, dispatches an independent
   source-code reviewer, sends structured findings to a source-code developer
   for remediation, and
@@ -91,7 +91,7 @@ the schema, compatibility rules, and stable failure codes.
   jobs can resume from durable task and attempt evidence. Approval stops at the
   commit-authorization boundary; committing and publishing remain separate
   user-authorized actions.
-- The implemented [issue-refinement workflow](docs/workflows.md#issue-refinement)
+- The implemented [issue-refinement workflow](https://github.com/asokolsky/agent-orchestra/blob/main/docs/workflows.md#issue-refinement)
   captures a GitHub or GitLab issue and reviews its immutable source digest
   before development
   begins. An issue reviewer checks that its problem statement, scope, constraints,
@@ -100,31 +100,31 @@ the schema, compatibility rules, and stable failure codes.
   again until it is ready for implementation. Codex and Claude Code receive the
   same provider-neutral request. Review is read-only; the generated feedback
   can be posted only through a separate explicitly authorized command.
-- The implemented [`audit`](docs/cli.md#audit) view reconstructs ordered state,
+- The implemented [`audit`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#audit) view reconstructs ordered state,
   tasks, attempts, canonical message summaries, and provider actions for either
   workflow. Optional local verification checks the finalized evidence index and
   hashes without reading process-stream contents or contacting a provider.
-- The implemented [`stats`](docs/cli.md#stats) report summarizes review verdicts,
+- The implemented [`stats`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#stats) report summarizes review verdicts,
   job standing, and finding dispositions across a rolling time window while
   identifying jobs whose history is unavailable.
-- The implemented [settings and retention commands](docs/cli.md#global-settings)
+- The implemented [settings and retention commands](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#global-settings)
   provide XDG-aware storage defaults, effective-value inspection, and a
   dry-run-first policy for expiring terminal job evidence. Database cleanup and
   unmatched-directory cleanup require separate explicit options.
-- The designed [remote pull-request review workflow](docs/workflows.md#remote-pull-request-review)
+- The designed [remote pull-request review workflow](https://github.com/asokolsky/agent-orchestra/blob/main/docs/workflows.md#remote-pull-request-review)
   starts from a pull-request URL and reviews one exact remote head. Remote
   pull-request enqueueing and provider-side review actions are not implemented.
 
-The [design and message contract](docs/design.md) defines the shared protocol
-and the [CLI reference](docs/cli.md) documents the implemented commands.
+The [design and message contract](https://github.com/asokolsky/agent-orchestra/blob/main/docs/design.md) defines the shared protocol
+and the [CLI reference](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md) documents the implemented commands.
 
 ## Using it
 
-The [primer](docs/primer.md) takes you from an unreviewed change to a review you
+The [primer](https://github.com/asokolsky/agent-orchestra/blob/main/docs/primer.md) takes you from an unreviewed change to a review you
 can act on: installing the role skills, capturing a diff, running the review, and
 reading the result.
 
-The [documentation index](docs/README.md) says what every other document is for.
+The [documentation index](https://github.com/asokolsky/agent-orchestra/blob/main/docs/README.md) says what every other document is for.
 
 ## Current scope
 
@@ -154,19 +154,19 @@ The current implementation provides:
 
 The source-code roles are documented separately:
 
-- [Source-code developer role](docs/role-developer.md)
-- [Source-code reviewer role](docs/role-reviewer.md)
-- [Issue reviewer role](docs/role-issue-reviewer.md)
-- [Issue creator responsibility](docs/role-issue-creator.md)
+- [Source-code developer role](https://github.com/asokolsky/agent-orchestra/blob/main/docs/role-developer.md)
+- [Source-code reviewer role](https://github.com/asokolsky/agent-orchestra/blob/main/docs/role-reviewer.md)
+- [Issue reviewer role](https://github.com/asokolsky/agent-orchestra/blob/main/docs/role-issue-reviewer.md)
+- [Issue creator responsibility](https://github.com/asokolsky/agent-orchestra/blob/main/docs/role-issue-creator.md)
 
 Installation and invocation examples are in the
-[primer](docs/primer.md).
+[primer](https://github.com/asokolsky/agent-orchestra/blob/main/docs/primer.md).
 
 Every review and remediation request, result, artifact, attempt
 configuration, process log, and terminal failure is persisted outside the
 worktree. Recoverable jobs continue with the same job ID through the
-[`resume` command](docs/cli.md#resume); terminal replacements can retain lineage
-through [`enqueue-local --supersedes`](docs/cli.md#enqueue-local). Initial
+[`resume` command](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#resume); terminal replacements can retain lineage
+through [`enqueue-local --supersedes`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#enqueue-local). Initial
 clean-worktree development, worktree creation, leases, and remote pull-request
 operations remain subsequent increments. Issue-review feedback can be posted to
 GitHub or GitLab only through the explicit `post-issue-feedback --authorize`
@@ -197,7 +197,7 @@ CI will see.
 Authenticated runtime checks are deliberately separate from the ordinary test
 suite. After installing the corresponding role skills, run
 `mise run test-live-claude` or `mise run test-live-codex`; see
-[Opt-in live runtime verification](docs/cli.md#opt-in-live-runtime-verification)
+[Opt-in live runtime verification](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#opt-in-live-runtime-verification)
 for prerequisites, cost, isolation, and failure semantics.
 
 `mise run tests` distributes the suite across one worker per available CPU,
