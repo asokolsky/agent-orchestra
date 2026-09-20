@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import email
+import re
 import subprocess
 import sys
 import tarfile
@@ -11,11 +12,18 @@ import tempfile
 import tomllib
 import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 PROJECT_NAME = 'py-agent-orchestra'
 COMMAND_NAME = 'agent-orchestra'
 PACKAGE_NAME = 'agent_orchestra'
 SKILL_NAMES = ('agent-orchestra-developer', 'agent-orchestra-reviewer')
+INLINE_MARKDOWN_LINK_DESTINATION = re.compile(r'!?\[[^]]*\]\(\s*<?([^\s)>]+)>?')
+REFERENCE_MARKDOWN_LINK_DESTINATION = re.compile(
+    r'^ {0,3}\[[^]]+\]:\s*<?([^\s>]+)>?', re.MULTILINE
+)
+FENCED_CODE_START = re.compile(r'^ {0,3}(`{3,}|~{3,})')
+INLINE_CODE_SPAN = re.compile(r'(`+)(.*?)\1', re.DOTALL)
 
 
 class ReleaseVerificationError(RuntimeError):
@@ -113,10 +121,75 @@ def _metadata_values(raw: bytes, archive: Path) -> tuple[str, str, str, set[str]
     return str(name), str(version), str(python), urls
 
 
+def _without_markdown_code(description: str) -> str:
+    """Remove code blocks and spans whose link-like text is not rendered."""
+
+    visible: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in description.splitlines(keepends=True):
+        stripped = line.lstrip(' ')
+        indentation = len(line) - len(stripped)
+        if fence is not None:
+            marker = stripped.rstrip('\r\n')
+            character, minimum_length = fence
+            run_length = len(marker) - len(marker.lstrip(character))
+            if (
+                indentation <= 3
+                and run_length >= minimum_length
+                and not marker[run_length:].strip()
+            ):
+                fence = None
+            visible.append('\n' if line.endswith(('\n', '\r')) else '')
+            continue
+        match = FENCED_CODE_START.match(line)
+        if match is not None:
+            marker = match.group(1)
+            fence = (marker[0], len(marker))
+            visible.append('\n' if line.endswith(('\n', '\r')) else '')
+            continue
+        if line.startswith(('    ', '\t')):
+            visible.append('\n' if line.endswith(('\n', '\r')) else '')
+            continue
+        visible.append(line)
+    return INLINE_CODE_SPAN.sub('', ''.join(visible))
+
+
+def _check_description(raw: bytes, archive: Path) -> None:
+    """Reject Markdown metadata with link targets that depend on its host URL."""
+
+    metadata = email.message_from_bytes(raw)
+    content_type = metadata.get('Description-Content-Type')
+    description = metadata.get_payload()
+    if (
+        not isinstance(content_type, str)
+        or content_type.partition(';')[0].strip().lower() != 'text/markdown'
+        or not isinstance(description, str)
+    ):
+        raise ReleaseVerificationError(
+            f'{archive.name} must contain a Markdown package description'
+        )
+    visible_description = _without_markdown_code(description)
+    destinations = INLINE_MARKDOWN_LINK_DESTINATION.findall(
+        visible_description
+    ) + REFERENCE_MARKDOWN_LINK_DESTINATION.findall(visible_description)
+    relative = sorted(
+        {
+            destination
+            for destination in destinations
+            if not destination.startswith('#') and not urlsplit(destination).scheme
+        }
+    )
+    if relative:
+        raise ReleaseVerificationError(
+            f'{archive.name} description has relative link targets: {relative}'
+        )
+
+
 def _check_metadata(raw: bytes, archive: Path, expected_version: str) -> None:
     """Verify identity, version, Python support, and published project URLs."""
 
     name, version, python, urls = _metadata_values(raw, archive)
+    _check_description(raw, archive)
     if name != PROJECT_NAME or version != expected_version or python != '>=3.14':
         raise ReleaseVerificationError(
             f'{archive.name} metadata is {name} {version} Python {python}'

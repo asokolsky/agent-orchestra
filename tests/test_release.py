@@ -30,6 +30,11 @@ SKILL_NAMES = ('agent-orchestra-developer', 'agent-orchestra-reviewer')
 FIXTURE_VERSION = project_version()
 PYPI_PUBLISH_COMMIT = 'dc37677b2e1c63e2034f94d8a5b11f265b73ba33'
 PYPI_PUBLISH_TAG_OBJECT = 'a892a5a61159132606e93a2fa6f4358831b04d26'
+VALID_DESCRIPTION = (
+    '# Agent Orchestra\n\n'
+    '[Documentation](https://github.com/asokolsky/agent-orchestra/tree/main/docs) '
+    'or [details](#details).\n'
+)
 
 
 def write_pyproject(path: Path, version: str) -> Path:
@@ -42,7 +47,11 @@ def write_pyproject(path: Path, version: str) -> Path:
     return pyproject
 
 
-def core_metadata(version: str) -> bytes:
+def core_metadata(
+    version: str,
+    description: str = VALID_DESCRIPTION,
+    content_type: str = 'text/markdown',
+) -> bytes:
     """Return the core metadata fields enforced by the verifier."""
 
     return (
@@ -54,7 +63,9 @@ def core_metadata(version: str) -> bytes:
         'Project-URL: Documentation, https://github.com/asokolsky/agent-orchestra/tree/main/docs\n'
         'Project-URL: Issues, https://github.com/asokolsky/agent-orchestra/issues\n'
         'Project-URL: Repository, https://github.com/asokolsky/agent-orchestra\n'
+        f'Description-Content-Type: {content_type}\n'
         '\n'
+        f'{description}'
     ).encode()
 
 
@@ -63,13 +74,15 @@ def write_distributions(
     *,
     version: str = FIXTURE_VERSION,
     omitted_member: str | None = None,
+    description: str = VALID_DESCRIPTION,
+    content_type: str = 'text/markdown',
 ) -> tuple[Path, Path]:
     """Build minimal wheel and source archives for verifier tests."""
 
     wheel = directory / f'py_agent_orchestra-{FIXTURE_VERSION}-py3-none-any.whl'
     wheel_members = {
         f'py_agent_orchestra-{FIXTURE_VERSION}.dist-info/METADATA': core_metadata(
-            version
+            version, description, content_type
         ),
         **{
             f'agent_orchestra/manifest/{name}': b'manifest\n' for name in MANIFEST_NAMES
@@ -89,7 +102,7 @@ def write_distributions(
     source = directory / f'py_agent_orchestra-{FIXTURE_VERSION}.tar.gz'
     root = f'py_agent_orchestra-{FIXTURE_VERSION}'
     source_members = {
-        f'{root}/PKG-INFO': core_metadata(version),
+        f'{root}/PKG-INFO': core_metadata(version, description, content_type),
         **{
             f'{root}/src/agent_orchestra/manifest/{name}': b'manifest\n'
             for name in MANIFEST_NAMES
@@ -141,6 +154,60 @@ def test_check_distributions_accepts_complete_archives(tmp_path: Path) -> None:
     wheel, source = write_distributions(tmp_path)
 
     assert check_distributions(tmp_path) == (wheel, source)
+
+
+def test_check_distributions_accepts_link_examples_in_code(tmp_path: Path) -> None:
+    """Ignore relative link syntax that the package description renders as code."""
+
+    description = (
+        '`[inline example](docs/inline.md)`\n\n'
+        '```markdown\n[fenced example](docs/fenced.md)\n```\n\n'
+        '    [indented example](docs/indented.md)\n'
+    )
+    wheel, source = write_distributions(tmp_path, description=description)
+
+    assert check_distributions(tmp_path) == (wheel, source)
+
+
+def test_check_distributions_accepts_markdown_content_type_parameters(
+    tmp_path: Path,
+) -> None:
+    """Accept optional parameters on the standard Markdown content type."""
+
+    wheel, source = write_distributions(
+        tmp_path, content_type='text/markdown; charset=UTF-8'
+    )
+
+    assert check_distributions(tmp_path) == (wheel, source)
+
+
+def test_check_distributions_requires_markdown_description(tmp_path: Path) -> None:
+    """Reject package descriptions that are not declared as Markdown."""
+
+    write_distributions(tmp_path, content_type='text/plain')
+
+    with pytest.raises(
+        ReleaseVerificationError, match='must contain a Markdown package description'
+    ):
+        check_distributions(tmp_path)
+
+
+@pytest.mark.parametrize(
+    'description',
+    [
+        '[CLI reference](docs/cli.md)\n',
+        '[CLI reference][cli]\n\n[cli]: docs/cli.md\n',
+    ],
+)
+def test_check_distributions_rejects_relative_description_links(
+    tmp_path: Path, description: str
+) -> None:
+    """Reject links that resolve against PyPI instead of the source repository."""
+
+    write_distributions(tmp_path, description=description)
+
+    with pytest.raises(ReleaseVerificationError, match='relative link targets'):
+        check_distributions(tmp_path)
 
 
 @pytest.mark.parametrize(
