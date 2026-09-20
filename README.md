@@ -1,15 +1,15 @@
 # agent-orchestra
 
 Agents are good.  Collaborating agents are even better.
-Claude has
-[sub-agents](https://code.claude.com/docs/en/sub-agents)
+Claude has [sub-agents](https://code.claude.com/docs/en/sub-agents)
 and OpenAI has
 [subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 But... How about combining the agents from different vendors?
 
-[`agent-orchestra`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md) is a local CLI for coordinating coding agents.
-Each agent gets a role and an assigned Git worktree. Workflow state and review
-artifacts stay outside that worktree.
+[`agent-orchestra`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md)
+is a local CLI for coordinating coding agents. Each agent gets a role and an
+assigned Git worktree. Workflow state and review artifacts stay outside that
+worktree.
 
 What do you get after the agents finish? An approval tied to one exact diff,
 schema-validated responses, and evidence you can inspect later.
@@ -50,15 +50,25 @@ Agent Orchestra currently requires Python 3.14. Install the published CLI with
 [`uv`](https://docs.astral.sh/uv/guides/tools/):
 
 ```shell
-uv tool install py-agent-orchestra
+uv tool install --python 3.14 py-agent-orchestra
 agent-orchestra --version
 ```
+
+`uv tool install` keeps the CLI in its own persistent virtual environment; you
+do not need to create or activate one. The explicit Python request prevents uv
+from choosing an older default interpreter. If `uv python list 3.14` offers only
+a prerelease such as `3.14.0b3`,
+[update uv](https://docs.astral.sh/uv/getting-started/installation/#updating-uv)
+first: each uv release carries a fixed list of downloadable Python builds.
 
 [`pipx`](https://pipx.pypa.io/) is an equivalent option:
 
 ```shell
-pipx install py-agent-orchestra
+pipx install --python python3.14 py-agent-orchestra
 ```
+
+Unlike uv, pipx does not download Python. Install Python 3.14 first and make
+sure `python3.14` is available on `PATH` before using that command.
 
 The PyPI project is named `py-agent-orchestra`; it installs the
 `agent-orchestra` command. Then install the bundled developer and reviewer
@@ -66,8 +76,7 @@ skills for Codex and Claude Code:
 
 ```shell
 agent-orchestra skills install \
-  --skill agent-orchestra-developer \
-  --skill agent-orchestra-reviewer
+  --skill agent-orchestra-developer --skill agent-orchestra-reviewer
 ```
 
 The [primer](https://github.com/asokolsky/agent-orchestra/blob/main/docs/primer.md) continues from here. If you want to change Agent
