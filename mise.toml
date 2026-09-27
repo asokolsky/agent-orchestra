@@ -39,8 +39,9 @@ run = [
 [tasks.clean]
 description = "Do local clean-up"
 run = [
-    'rm -rf .mypy_cache .pytest_cache .ruff_cache .venv build dist src/*.egg-info',
-    'find . -name __pycache__ | xargs rm -rf'
+    'rm -rf .mypy_cache .pytest_cache .ruff_cache .hypothesis .coverage .coverage.* coverage.xml htmlcov cover build dist sdist wheels docs/_build src/*.egg-info',
+    'find . -path ./.venv -prune -o -type d -name __pycache__ -prune -exec rm -rf {} +',
+    'rm -rf .venv',
 ]
 
 [tasks.format]
