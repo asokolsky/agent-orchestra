@@ -151,6 +151,7 @@ class InvocationRecord:
     attempt: int
     status: AttemptStatus
     conclusion: AttemptConclusion | None
+    requested_effort: str | None = None
     response_received_at: str | None = None
     validation_started_at: str | None = None
     reviewer_id: str | None = None
@@ -190,7 +191,7 @@ class AttemptIdentity:
     def schema_version(self) -> int:
         """Return the record schema this attempt's identity requires."""
 
-        return 6
+        return 7
 
     @property
     def task_id(self) -> str:
@@ -491,6 +492,9 @@ def _valid_record_types(record: InvocationRecord) -> bool:
         and isinstance(record.invocation_id, str)
         and isinstance(record.agent_vendor, str)
         and (record.requested_model is None or isinstance(record.requested_model, str))
+        and (
+            record.requested_effort is None or isinstance(record.requested_effort, str)
+        )
         and isinstance(record.effective_models, (list, tuple))
         and all(isinstance(model, str) and model for model in record.effective_models)
         and isinstance(record.effective_model_status, str)
@@ -523,8 +527,10 @@ def _valid_record_types(record: InvocationRecord) -> bool:
 def validate_attempt_record(record: InvocationRecord) -> None:
     """Validate lifecycle, identity, and milestone consistency."""
 
-    if record.schema_version not in {4, 5, 6}:
+    if record.schema_version not in {4, 5, 6, 7}:
         _fail('unsupported invocation record schema')
+    if record.schema_version < 7 and record.requested_effort is not None:
+        _fail('legacy invocation schema cannot contain requested effort')
     if record.schema_version == 4 and record.reviewer_id is not None:
         _fail('schema 4 invocation cannot contain reviewer_id')
     if record.schema_version == 5:
@@ -537,7 +543,7 @@ def validate_attempt_record(record: InvocationRecord) -> None:
     ):
         _fail('legacy invocation schema cannot contain usage')
     if (
-        record.schema_version == 6
+        record.schema_version in {6, 7}
         and record.role != 'reviewer'
         and record.reviewer_id is not None
     ):
@@ -752,6 +758,8 @@ def _validated_document(
     if record.schema_version == 5:
         document.pop('usage_status')
         document.pop('usage')
+    if record.schema_version < 7:
+        document.pop('requested_effort')
     new_record = not path.exists()
     if new_record and record.status != 'pending':
         _fail('new attempt must start pending')
@@ -769,6 +777,7 @@ def _validated_document(
             'role',
             'attempt',
             'reviewer_id',
+            'requested_effort',
         )
         if any(
             existing.get(field) != document.get(field) for field in immutable_fields
@@ -927,9 +936,11 @@ class InvocationEvidenceStore:
             if not isinstance(document, dict):
                 _fail(f'invalid invocation record {path.name}: {UNEXPECTED_FIELDS}')
             schema_version = document.get('schema_version')
-            if schema_version not in {4, 5, 6}:
+            if schema_version not in {4, 5, 6, 7}:
                 _fail(f'unsupported invocation record schema in {path.name}')
             required = set(InvocationRecord.__dataclass_fields__)
+            if schema_version < 7:
+                required.remove('requested_effort')
             if schema_version in {4, 5}:
                 required.remove('usage_status')
                 required.remove('usage')
@@ -942,6 +953,8 @@ class InvocationEvidenceStore:
             if schema_version in {4, 5}:
                 document['usage_status'] = UsageStatus.UNAVAILABLE
                 document['usage'] = None
+            if schema_version < 7:
+                document['requested_effort'] = None
 
             def fail_record(message: str, name: str = path.name) -> Never:
                 """Report one unreadable persisted field for this record."""

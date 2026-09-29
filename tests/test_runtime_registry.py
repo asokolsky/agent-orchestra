@@ -68,6 +68,25 @@ class FakeReviewer(ReviewerAdapter):
         response_path.write_text(request_path.read_text())
 
 
+def test_registry_rejects_unadvertised_effort() -> None:
+    """Reject a direct adapter request before invoking an incompatible runtime."""
+
+    registry = RuntimeRegistry((fake_runtime(),))
+
+    with pytest.raises(RuntimeRegistryError, match='runtime_effort_unsupported'):
+        registry.adapter('fake-runtime', RuntimeRole.REVIEWER, effort='medium')
+
+
+def test_registry_reports_adapter_missing_declared_effort() -> None:
+    """Turn a custom adapter signature mismatch into a stable registry error."""
+
+    definition = replace(fake_runtime(), effort_levels=frozenset({'medium'}))
+    registry = RuntimeRegistry((definition,))
+
+    with pytest.raises(RuntimeRegistryError, match='runtime_adapter_invalid'):
+        registry.adapter('fake-runtime', RuntimeRole.REVIEWER, effort='medium')
+
+
 class FakeDeveloper(DeveloperAdapter):
     """Executable test developer adapter."""
 

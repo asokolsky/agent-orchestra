@@ -529,6 +529,7 @@ def test_tasks_normalizes_an_invalid_reviewer_identity(
         reviewer_id=reviewer_id,
     )
     document = asdict(record)
+    document.pop('requested_effort')
     document.pop('usage_status')
     document.pop('usage')
     (invocations_directory / 'reviewer.json').write_text(

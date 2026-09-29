@@ -273,7 +273,7 @@ def test_run_persists_reported_effective_model_metadata(tmp_path: Path) -> None:
     invocation = json.loads(
         (run_directory / 'invocations/000001-reviewer.json').read_text()
     )
-    assert invocation['schema_version'] == 6
+    assert invocation['schema_version'] == 7
     assert invocation['usage_status'] == 'reported'
     assert invocation['usage']['turn_count'] == 2
     assert invocation['usage']['totals'] == {
@@ -482,6 +482,105 @@ def test_run_selects_reviewer_adapter(
     assert plan.reviewer_identity == InvocationIdentity(
         vendor=vendor, model=model, runtime=runtime
     )
+
+
+def test_run_applies_runtime_model_and_effort_preferences(
+    tmp_path: Path,
+    enqueued_run: CliRunContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Freeze configured choices into both adapter commands and identities."""
+
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[runtimes.codex]\nmodel = "gpt-6-sol"\neffort = "medium"\n'
+        '[runtimes.claude-code]\nmodel = "claude-opus-5-5"\neffort = "high"\n'
+    )
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+    observed: dict[str, object] = {}
+
+    def review(**kwargs: object) -> Run:
+        """Capture dispatch without launching either runtime."""
+
+        observed.update(kwargs)
+        return enqueued_run.run
+
+    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
+
+    assert main(run_arguments(enqueued_run, '--reviewer-agent', 'claude-code')) == 0
+    plan = observed['plan']
+    assert isinstance(plan, ReviewPlan)
+    assert plan.reviewer_command[-4:] == [
+        '--model',
+        'claude-opus-5-5',
+        '--effort',
+        'high',
+    ]
+    assert plan.reviewer_identity.model == 'claude-opus-5-5'
+    assert plan.developer_command[-4:] == ['--model', 'gpt-6-sol', '--effort', 'medium']
+    assert plan.developer_identity.model == 'gpt-6-sol'
+
+    observed.clear()
+    assert (
+        main(
+            run_arguments(
+                enqueued_run,
+                '--reviewer-agent',
+                'claude-code',
+                '--reviewer-model',
+                'reviewer-override',
+                '--developer-model',
+                'developer-override',
+            )
+        )
+        == 0
+    )
+    overridden = observed['plan']
+    assert isinstance(overridden, ReviewPlan)
+    assert overridden.reviewer_command[-4:] == [
+        '--model',
+        'reviewer-override',
+        '--effort',
+        'high',
+    ]
+    assert overridden.developer_command[-4:] == [
+        '--model',
+        'developer-override',
+        '--effort',
+        'medium',
+    ]
+
+
+def test_review_only_run_does_not_attribute_a_configured_developer_model(
+    tmp_path: Path,
+    enqueued_run: CliRunContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Describe only a developer that can actually be dispatched."""
+
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text('[runtimes.codex]\nmodel = "gpt-6-sol"\neffort = "medium"\n')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+    observed: dict[str, object] = {}
+
+    def review(**kwargs: object) -> Run:
+        """Capture the review plan without launching a runtime."""
+
+        observed.update(kwargs)
+        return enqueued_run.run
+
+    monkeypatch.setattr('agent_orchestra.cli.run_queued_review', review)
+
+    assert main(run_arguments(enqueued_run, '--no-remediation')) == 0
+    plan = observed['plan']
+    assert isinstance(plan, ReviewPlan)
+    assert plan.reviewer_identity.model == 'gpt-6-sol'
+    assert plan.developer_command == []
+    assert plan.developer_identity.model is None
 
 
 @pytest.mark.parametrize(

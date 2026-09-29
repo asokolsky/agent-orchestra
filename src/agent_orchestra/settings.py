@@ -7,6 +7,8 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from agent_orchestra.adapter.registry import (
     DEFAULT_RUNTIME_REGISTRY,
@@ -15,6 +17,9 @@ from agent_orchestra.adapter.registry import (
     RuntimeRole,
 )
 from agent_orchestra.errors import AgentOrchestraError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class SettingsError(AgentOrchestraError):
@@ -57,7 +62,19 @@ class Settings:
     job_evidence_days: Setting
     developer_runtime: Setting
     reviewer_runtime: Setting
+    runtime_preferences: Mapping[str, Mapping[str, Setting]]
     reviewer_sets: tuple[ReviewerSet, ...]
+    runtime_preferences_source: str = 'built_in'
+
+    def preference(self, runtime: str, name: str) -> str | None:
+        """Return a configured runtime model or effort, if one exists."""
+
+        setting = self.runtime_preferences.get(runtime, {}).get(name)
+        return (
+            setting.value
+            if setting is not None and isinstance(setting.value, str)
+            else None
+        )
 
 
 def config_path() -> Path:
@@ -189,6 +206,7 @@ def load_settings(
         'built_in',
     )
     reviewer_sets: tuple[ReviewerSet, ...] = ()
+    runtime_preferences: dict[str, dict[str, Setting]] = {}
     if not selected.exists():
         return Settings(
             path=selected,
@@ -197,6 +215,7 @@ def load_settings(
             job_evidence_days=days,
             developer_runtime=developer_runtime,
             reviewer_runtime=reviewer_runtime,
+            runtime_preferences=MappingProxyType({}),
             reviewer_sets=reviewer_sets,
         )
     if not selected.is_file() or selected.is_symlink():
@@ -210,12 +229,14 @@ def load_settings(
         'retention',
         'defaults',
         'reviewer_sets',
+        'runtimes',
     }:
         message = 'settings contain unknown top-level fields'
         raise SettingsError(message)
     storage = document.get('storage', {})
     retention = document.get('retention', {})
     defaults = document.get('defaults', {})
+    runtimes = document.get('runtimes', {})
     if not isinstance(storage, dict) or set(storage) - {'database', 'runs_directory'}:
         message = 'storage settings contain unknown fields'
         raise SettingsError(message)
@@ -228,6 +249,33 @@ def load_settings(
     }:
         message = 'default settings contain unknown fields'
         raise SettingsError(message)
+    if not isinstance(runtimes, dict):
+        message = 'runtimes must be a table'
+        raise SettingsError(message)
+    for runtime, preference in runtimes.items():
+        try:
+            definition = runtime_registry.require(runtime)
+        except RuntimeRegistryError as error:
+            raise SettingsError(f'runtimes.{runtime}: {error}') from error
+        if not isinstance(preference, dict) or set(preference) - {'model', 'effort'}:
+            raise SettingsError(f'runtimes.{runtime} contains unknown fields')
+        resolved: dict[str, Setting] = {}
+        for name, value in preference.items():
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+            ):
+                raise SettingsError(
+                    f'runtimes.{runtime}.{name} must be a non-empty string without surrounding whitespace'
+                )
+            if name == 'effort' and value not in definition.effort_levels:
+                allowed = ', '.join(sorted(definition.effort_levels))
+                raise SettingsError(
+                    f'runtimes.{runtime}.effort is invalid; allowed: {allowed}'
+                )
+            resolved[name] = Setting(value, 'file')
+        runtime_preferences[runtime] = resolved
     if 'database' in storage:
         database = Setting(_path_value(storage['database'], 'storage.database'), 'file')
     if 'runs_directory' in storage:
@@ -263,5 +311,12 @@ def load_settings(
         job_evidence_days=days,
         developer_runtime=developer_runtime,
         reviewer_runtime=reviewer_runtime,
+        runtime_preferences=MappingProxyType(
+            {
+                runtime: MappingProxyType(preferences)
+                for runtime, preferences in runtime_preferences.items()
+            }
+        ),
         reviewer_sets=reviewer_sets,
+        runtime_preferences_source='file' if 'runtimes' in document else 'built_in',
     )

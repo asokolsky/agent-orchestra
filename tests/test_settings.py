@@ -34,6 +34,7 @@ def test_config_show_reports_file_values_and_cli_precedence(
         '\n[defaults]\n'
         'developer_runtime = "claude-code"\n'
         'reviewer_runtime = "codex"\n'
+        '\n[runtimes.claude-code]\nmodel = "claude-opus-5-5"\n'
         '\n[reviewer_sets.security]\n'
         'members = [\n'
         '  { id = "primary", runtime = "codex", model = "gpt-5.6" },\n'
@@ -88,7 +89,7 @@ def test_config_show_reports_file_values_and_cli_precedence(
                         'id': 'second',
                         'runtime': 'claude-code',
                         'vendor': 'anthropic',
-                        'model': None,
+                        'model': 'claude-opus-5-5',
                         'required': True,
                     },
                 ],
@@ -120,6 +121,112 @@ def test_config_show_reports_built_in_runtime_defaults(
         'value': 'codex',
         'source': 'built_in',
     }
+
+
+def test_runtime_model_and_effort_preferences_are_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Report each configured model and effort without inheriting CLI defaults."""
+
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[runtimes.codex]\nmodel = "gpt-6-sol"\neffort = "medium"\n'
+        '[runtimes.claude-code]\nmodel = "claude-opus-5-5"\neffort = "high"\n'
+    )
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+
+    assert main(['config', 'show']) == 0
+    reported = json.loads(capsys.readouterr().out)['settings']['runtimes']
+    assert reported['value']['codex']['model'] == {
+        'value': 'gpt-6-sol',
+        'source': 'file',
+    }
+    assert reported['value']['codex']['effort']['value'] == 'medium'
+    assert reported['value']['claude-code']['model']['value'] == 'claude-opus-5-5'
+    assert reported['value']['claude-code']['effort']['value'] == 'high'
+
+
+def test_config_show_attributes_empty_runtime_table_to_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Distinguish an explicitly empty runtime table from built-in defaults."""
+
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text('[runtimes]\n')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+
+    assert main(['config', 'show']) == 0
+    reported = json.loads(capsys.readouterr().out)['settings']['runtimes']
+    assert reported == {'value': {}, 'source': 'file'}
+
+
+@pytest.mark.parametrize('effort', ['ultra', 'invalid'])
+def test_claude_runtime_rejects_unsupported_effort(tmp_path: Path, effort: str) -> None:
+    """Reject effort values Claude Code cannot accept."""
+
+    config = tmp_path / 'config.toml'
+    config.write_text(f'[runtimes.claude-code]\neffort = "{effort}"\n')
+
+    with pytest.raises(
+        SettingsError, match=r'runtimes\.claude-code\.effort is invalid'
+    ):
+        load_settings(config)
+
+
+def test_runtime_rejects_effort_when_adapter_declares_no_support(
+    tmp_path: Path,
+) -> None:
+    """Avoid accepting a setting that would fail only after dispatch."""
+
+    config = tmp_path / 'config.toml'
+    config.write_text('[runtimes.custom]\neffort = "medium"\n')
+    custom = replace(
+        DEFAULT_RUNTIME_REGISTRY.require('codex'),
+        identifier='custom',
+        effort_levels=frozenset(),
+    )
+
+    with pytest.raises(SettingsError, match=r'runtimes\.custom\.effort is invalid'):
+        load_settings(config, runtime_registry=RuntimeRegistry((custom,)))
+
+
+def test_runtime_rejects_model_with_surrounding_whitespace(tmp_path: Path) -> None:
+    """Avoid passing a model spelling the runtime cannot resolve."""
+
+    config = tmp_path / 'config.toml'
+    config.write_text('[runtimes.codex]\nmodel = " gpt-6-sol "\n')
+
+    with pytest.raises(SettingsError, match='without surrounding whitespace'):
+        load_settings(config)
+
+
+@pytest.mark.parametrize(
+    'runtime_table',
+    [
+        '[runtimes.unknown]\nmodel = "example"\n',
+        '[runtimes.codex]\nunknown = "example"\n',
+        'runtimes = "invalid"\n',
+        '[runtimes.codex]\nmodel = 42\n',
+    ],
+)
+def test_runtime_preferences_reject_invalid_shapes(
+    tmp_path: Path, runtime_table: str
+) -> None:
+    """Reject unknown runtimes, fields, table shapes, and scalar types."""
+
+    config = tmp_path / 'config.toml'
+    config.write_text(runtime_table)
+
+    with pytest.raises(SettingsError):
+        load_settings(config)
 
 
 def test_invalid_settings_fail_closed_without_creating_state(

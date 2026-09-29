@@ -47,6 +47,8 @@ AUDIT_ATTEMPT_FIELDS: tuple[str, ...] = (
     'reviewer_id',
 )
 AUDIT_WITHHELD_FIELDS: tuple[str, ...] = (
+    # Retained in the invocation evidence for exact retry replay.
+    'requested_effort',
     # Retired vocabulary. Schema 8 replaced run_id with job_id across the public
     # surface; storage keeps the implementation-level name.
     'run_id',
@@ -88,6 +90,7 @@ CLI_ATTEMPT_FIELDS: tuple[str, ...] = (
     *CLI_ATTEMPT_TAIL_FIELDS,
 )
 CLI_WITHHELD_FIELDS: tuple[str, ...] = (
+    'requested_effort',
     # Correlation fields belonging to the evidence layout rather than to the
     # job, task, and attempt vocabulary the CLI documents.
     'task_id',

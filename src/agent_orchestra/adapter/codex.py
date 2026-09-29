@@ -224,7 +224,11 @@ def _developer_environment(worktree: Path, temporary: Path) -> dict[str, str]:
 
 
 def _execute_codex_reviewer(
-    request_path: Path, response_path: Path, *, model: str | None = None
+    request_path: Path,
+    response_path: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke Codex and persist a correlated response plus review artifact."""
 
@@ -267,6 +271,8 @@ def _execute_codex_reviewer(
             ]
             if model:
                 command.extend(['--model', model])
+            if effort:
+                command.extend(['-c', f'model_reasoning_effort={effort}'])
             command.append('-')
             completed = run_streaming_process(
                 command,
@@ -312,6 +318,7 @@ class CodexIssueReviewerAdapter(IssueReviewerAdapter):
     """Run issue-readiness reviews through the Codex CLI."""
 
     model: str | None = None
+    effort: str | None = None
 
     def execute(self, request: dict[str, Any], *, timeout: int) -> IssueReviewExecution:
         """Run a network-disabled issue review and return structured output."""
@@ -338,6 +345,8 @@ class CodexIssueReviewerAdapter(IssueReviewerAdapter):
             ]
             if self.model:
                 command.extend(['--model', self.model])
+            if self.effort:
+                command.extend(['-c', f'model_reasoning_effort={self.effort}'])
             command.append('-')
             try:
                 completed = run_streaming_process(
@@ -378,7 +387,11 @@ class CodexIssueReviewerAdapter(IssueReviewerAdapter):
 
 
 def _execute_codex_developer(
-    request_path: Path, response_path: Path, *, model: str | None = None
+    request_path: Path,
+    response_path: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke Codex with worktree-write access and persist its handoff."""
 
@@ -423,6 +436,8 @@ def _execute_codex_developer(
         ]
         if model:
             command.extend(['--model', model])
+        if effort:
+            command.extend(['-c', f'model_reasoning_effort={effort}'])
         command.append('-')
         try:
             completed = run_streaming_process(
@@ -449,11 +464,14 @@ class CodexReviewerAdapter(ReviewerAdapter):
     """Implement canonical code review through the Codex CLI."""
 
     model: str | None = None
+    effort: str | None = None
 
     def execute(self, request_path: Path, response_path: Path) -> None:
         """Execute a diff-scoped review."""
 
-        _execute_codex_reviewer(request_path, response_path, model=self.model)
+        _execute_codex_reviewer(
+            request_path, response_path, model=self.model, effort=self.effort
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,11 +479,14 @@ class CodexDeveloperAdapter(DeveloperAdapter):
     """Implement canonical development through the Codex CLI."""
 
     model: str | None = None
+    effort: str | None = None
 
     def execute(self, request_path: Path, response_path: Path) -> None:
         """Execute one development request."""
 
-        _execute_codex_developer(request_path, response_path, model=self.model)
+        _execute_codex_developer(
+            request_path, response_path, model=self.model, effort=self.effort
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -475,14 +496,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog='agent-orchestra-codex-reviewer')
     parser.add_argument('--role', choices=('reviewer', 'developer'), default='reviewer')
     parser.add_argument('--model')
+    parser.add_argument('--effort')
     parser.add_argument('request', type=Path)
     parser.add_argument('response', type=Path)
     parsed = parser.parse_args(arguments)
     try:
         if parsed.role == 'reviewer':
-            CodexReviewerAdapter(parsed.model).execute(parsed.request, parsed.response)
+            CodexReviewerAdapter(parsed.model, parsed.effort).execute(
+                parsed.request, parsed.response
+            )
         else:
-            CodexDeveloperAdapter(parsed.model).execute(parsed.request, parsed.response)
+            CodexDeveloperAdapter(parsed.model, parsed.effort).execute(
+                parsed.request, parsed.response
+            )
     except (AdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         if isinstance(error, AdapterError) and error.timed_out:

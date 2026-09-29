@@ -483,6 +483,10 @@ so ambient user configuration cannot reach the agent; making the profiles
 themselves user-configurable would reintroduce the exposure those flags exist
 to remove.
 
+Agent Orchestra's validated runtime model and effort preferences are separate
+inputs passed to those fixed profiles. They do not replace profile arguments or
+load ambient runtime settings.
+
 The evidence manifest is a contract with data that already exists. Its
 templates and audit recognition patterns are two halves of one naming
 agreement, and overriding either half makes previously written evidence
@@ -604,7 +608,7 @@ other.
 Strictness per version is not the same as reading only what this build wrote.
 Persisted evidence outlives the build that produced it, and a reader may accept
 more than one version: `InvocationEvidenceStore` accepts invocation records at
-schemas 4, 5, and 6, adapting older records as it reads. Compatibility there is
+schemas 4 through 7, adapting older records as it reads. Compatibility there is
 expressed by naming each version a reader accepts, not by tolerating unknown
 keys within one. Those documents carry no `agent_orchestra_version` because the
 version already identifies the shape, and the reader adapts per version rather
@@ -726,6 +730,13 @@ Invocation record schema 6 adds `usage_status` and the nullable, versioned
 `unavailable` means it did not. Aggregate attempt values and per-model values
 remain separate so partial model data cannot be mistaken for complete totals.
 Schema-4 and schema-5 records are adapted to unavailable usage when read.
+
+Invocation record schema 7 adds immutable `requested_effort`. Issue-review
+attempts record the selected effort so a retry uses the same value even if the
+settings file changes. Other roles retain their exact command, including effort,
+in `execution.json`. Schema-4 through schema-6 records remain readable with
+`requested_effort` unavailable; issue-review retries of those records use the
+current configured effort.
 
 One reviewer execution plan resolves into one dispatch per required reviewer
 before any reviewer process starts. Each dispatch carries the member's frozen
@@ -1186,7 +1197,8 @@ the stream tee, the timeout controller, and attempt evidence capture.
 
 Every [attempt](concepts.md#jobs-tasks-and-attempts) at an external process
 writes one versioned JSON record under the run's `invocations/` directory. The record is runtime-neutral and contains the
-run, task, and invocation IDs; role; selected agent vendor; requested model override;
+run, task, and invocation IDs; role; selected agent vendor; requested model and
+optional requested effort;
 effective model identities and reporting status, adapter runtime, iteration,
 start and finish timestamps, exit code, timeout and interruption flags, attempt
 number, explicit attempt `status` and `conclusion`, response and validation

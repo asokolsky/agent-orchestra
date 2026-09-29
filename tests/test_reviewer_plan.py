@@ -69,6 +69,43 @@ def test_select_and_build_ordered_mixed_runtime_plan(tmp_path: Path) -> None:
     assert {reviewer.timeout_seconds for reviewer in plan.reviewers} == {90}
 
 
+def test_reviewer_set_inherits_runtime_preferences_with_member_override(
+    tmp_path: Path,
+) -> None:
+    """Freeze model and effort into each reviewer command and identity."""
+
+    config = _settings(tmp_path)
+    config.write_text(
+        config.read_text()
+        + '[runtimes.codex]\nmodel = "gpt-6-sol"\neffort = "medium"\n'
+        + '[runtimes.claude-code]\nmodel = "claude-opus-5-5"\neffort = "high"\n'
+    )
+    settings = load_settings(config)
+
+    plan = build_reviewer_execution_plan(
+        select_reviewer_set(settings, 'default'),
+        settings=settings,
+        registry=DEFAULT_RUNTIME_REGISTRY,
+        executable=Path('/python'),
+        timeout_seconds=90,
+    )
+
+    assert plan.reviewers[0].command[-4:] == (
+        '--model',
+        'gpt-5.6',
+        '--effort',
+        'medium',
+    )
+    assert plan.reviewers[0].identity.model == 'gpt-5.6'
+    assert plan.reviewers[1].command[-4:] == (
+        '--model',
+        'claude-opus-5-5',
+        '--effort',
+        'high',
+    )
+    assert plan.reviewers[1].identity.model == 'claude-opus-5-5'
+
+
 def test_select_reviewer_set_rejects_unknown_name(tmp_path: Path) -> None:
     """Fail selection before any execution plan can be persisted."""
 

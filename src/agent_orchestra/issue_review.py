@@ -58,6 +58,7 @@ from agent_orchestra.schemas import (
 from agent_orchestra.usage import UsageStatus
 
 if TYPE_CHECKING:
+    from agent_orchestra.settings import Settings
     from agent_orchestra.store import JobStore
 
 
@@ -261,6 +262,7 @@ def _start_invocation(
     agent: str,
     vendor: str,
     model: str | None,
+    effort: str | None,
     attempt: int,
 ) -> tuple[Path, InvocationRecord]:
     """Persist a running issue-review attempt and return its record location."""
@@ -272,13 +274,14 @@ def _start_invocation(
     _write_text(job_directory, stderr_path, '')
     task_id = f'{job.id}:{iteration:06d}-issue_reviewer'
     pending = InvocationRecord(
-        schema_version=6,
+        schema_version=7,
         run_id=job.id,
         task_id=task_id,
         invocation_id=f'{task_id}:attempt-{attempt:04d}',
         role=RuntimeRole.ISSUE_REVIEWER,
         agent_vendor=vendor,
         requested_model=model if agent != 'custom' else None,
+        requested_effort=effort if agent != 'custom' else None,
         effective_models=(),
         effective_model_status=EffectiveModelStatus.UNAVAILABLE,
         runtime=agent,
@@ -398,6 +401,7 @@ def run_issue_review(
     agent: str,
     model: str | None,
     timeout: int,
+    effort: str | None = None,
     command: tuple[str, ...] = (),
     registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
 ) -> IssueJob:
@@ -411,7 +415,7 @@ def run_issue_review(
         if runtime is not None:
             adapter = cast(
                 'IssueReviewerAdapter',
-                registry.adapter(agent, RuntimeRole.ISSUE_REVIEWER, model),
+                registry.adapter(agent, RuntimeRole.ISSUE_REVIEWER, model, effort),
             )
     except RuntimeRegistryError as error:
         raise IssueReviewError(str(error)) from error
@@ -598,6 +602,7 @@ def run_issue_review(
             agent='custom' if command else agent,
             vendor='custom' if runtime is None else runtime.vendor,
             model=model,
+            effort=effort,
             attempt=attempt,
         )
         if command:
@@ -675,6 +680,7 @@ def resume_issue_review(
     *,
     timeout: int,
     registry: RuntimeRegistry = DEFAULT_RUNTIME_REGISTRY,
+    settings: Settings | None = None,
 ) -> IssueJob:
     """Resume one built-in issue-review attempt from durable evidence."""
 
@@ -717,6 +723,13 @@ def resume_issue_review(
         objective=request.objective,
         agent=latest.runtime,
         model=latest.requested_model,
+        effort=(
+            latest.requested_effort
+            if latest.schema_version >= 7
+            else settings.preference(latest.runtime, 'effort')
+            if settings
+            else None
+        ),
         timeout=timeout,
         registry=registry,
     )

@@ -20,6 +20,7 @@ RUNTIME_DEFAULT_UNKNOWN = 'runtime registry default is not registered'
 RUNTIME_UNKNOWN = 'runtime_unknown'
 RUNTIME_ROLE_UNSUPPORTED = 'runtime_role_unsupported'
 RUNTIME_ADAPTER_INVALID = 'runtime_adapter_invalid'
+RUNTIME_EFFORT_UNSUPPORTED = 'runtime_effort_unsupported'
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -62,6 +63,7 @@ class RuntimeDefinition:
     reports_runtime_metadata: bool
     skill_home_environment: str
     skill_home_directory: str
+    effort_levels: frozenset[str] = frozenset()
 
     def adapter_path(self, role: RuntimeRole) -> str | None:
         """Return the declared adapter path for one role."""
@@ -137,11 +139,17 @@ class RuntimeRegistry:
         return definition
 
     def adapter(
-        self, runtime: str, role: RuntimeRole, model: str | None = None
+        self,
+        runtime: str,
+        role: RuntimeRole,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> ReviewerAdapter | DeveloperAdapter | IssueReviewerAdapter:
         """Instantiate the adapter registered for one runtime role."""
 
         definition = self.require(runtime, role)
+        if effort is not None and effort not in definition.effort_levels:
+            raise RuntimeRegistryError(RUNTIME_EFFORT_UNSUPPORTED, runtime)
         adapter_path = definition.adapter_path(role)
         if adapter_path is None:  # pragma: no cover - guarded by require
             raise RuntimeRegistryError(RUNTIME_ROLE_UNSUPPORTED, runtime, role)
@@ -162,10 +170,15 @@ class RuntimeRegistry:
         ):
             raise RuntimeRegistryError(RUNTIME_ADAPTER_INVALID, runtime, role)
         factory = cast(
-            'Callable[[str | None], ReviewerAdapter | DeveloperAdapter | IssueReviewerAdapter]',
+            'Callable[..., ReviewerAdapter | DeveloperAdapter | IssueReviewerAdapter]',
             adapter_class,
         )
-        return factory(model)
+        try:
+            return factory(model) if effort is None else factory(model, effort=effort)
+        except TypeError as error:
+            raise RuntimeRegistryError(
+                RUNTIME_ADAPTER_INVALID, runtime, role
+            ) from error
 
 
 DEFAULT_RUNTIME_REGISTRY = RuntimeRegistry(
@@ -183,6 +196,7 @@ DEFAULT_RUNTIME_REGISTRY = RuntimeRegistry(
             reports_runtime_metadata=True,
             skill_home_environment='CODEX_HOME',
             skill_home_directory='.codex',
+            effort_levels=frozenset({'low', 'medium', 'high', 'xhigh', 'max', 'ultra'}),
         ),
         RuntimeDefinition(
             identifier='claude-code',
@@ -201,6 +215,7 @@ DEFAULT_RUNTIME_REGISTRY = RuntimeRegistry(
             reports_runtime_metadata=True,
             skill_home_environment='CLAUDE_CONFIG_DIR',
             skill_home_directory='.claude',
+            effort_levels=frozenset({'low', 'medium', 'high', 'xhigh', 'max'}),
         ),
     ),
     default_identifier='codex',

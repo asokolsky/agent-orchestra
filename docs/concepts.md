@@ -143,6 +143,11 @@ do. Runtime-specific details include:
 Those details belong in runtime adapters and execution evidence. They do not
 belong in canonical role payloads or lifecycle states.
 
+Global settings may request a model and effort for each built-in runtime;
+an explicit model option or reviewer-set member model overrides the configured
+model. Choosing a model or effort does not change the selected runtime or the
+permissions granted to the role.
+
 Developer and reviewer runtimes are selected independently. The target adapter
 matrix supports all combinations:
 
@@ -230,7 +235,7 @@ SQLite state. Process streams become final only after their invocation process
 has completed.
 
 Each external process has adapter-neutral attempt evidence. It identifies
-the role, agent vendor, optional requested model override, effective models
+the role, agent vendor, optional requested model, effective models
 reported through stable runtime metadata, runtime, iteration, attempt,
 timestamps, exit status, timeout or interruption status, and the separate
 stdout and stderr paths. Effective identity is explicitly unavailable when the
