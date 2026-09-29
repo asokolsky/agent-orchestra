@@ -284,6 +284,7 @@ def _add_intake_commands(
     commands: argparse._SubParsersAction[argparse.ArgumentParser],
     evidence: argparse.ArgumentParser,
     runtimes: RuntimeRegistry,
+    effective: Settings,
 ) -> None:
     """Register the commands that bring work into the system."""
 
@@ -329,7 +330,7 @@ def _add_intake_commands(
         default=runtimes.default(RuntimeRole.ISSUE_REVIEWER).identifier,
     )
     review_issue.add_argument('--reviewer-model')
-    review_issue.set_defaults(reviewer_command=())
+    review_issue.set_defaults(reviewer_command=(), settings=effective)
 
     publish_feedback = commands.add_parser(
         'post-issue-feedback',
@@ -448,6 +449,7 @@ def _add_execution_commands(
         'resume', help='resume one recoverable job', parents=[evidence]
     )
     resume.add_argument('job_id')
+    resume.set_defaults(settings=effective)
 
 
 def _add_administration_commands(
@@ -519,7 +521,7 @@ def build_parser(
     evidence.add_argument('--runs-directory', type=Path, default=runs_default)
     commands = parser.add_subparsers(dest='command', required=True)
 
-    _add_intake_commands(commands, evidence, runtimes)
+    _add_intake_commands(commands, evidence, runtimes, effective)
     _add_query_commands(commands, evidence)
     _add_execution_commands(commands, evidence, runtimes, effective)
     _add_administration_commands(commands, evidence, runtimes)
@@ -694,13 +696,17 @@ def _review_issue(args: argparse.Namespace, store: JobStore) -> int:
         return 2
     try:
         job = store.get_issue(args.job_id)
+        model = args.reviewer_model or args.settings.preference(
+            args.reviewer_agent, 'model'
+        )
         finished = run_issue_review(
             job,
             store,
             args.runs_directory,
             objective=args.objective,
             agent=args.reviewer_agent,
-            model=args.reviewer_model,
+            model=model,
+            effort=args.settings.preference(args.reviewer_agent, 'effort'),
             timeout=args.timeout,
             command=tuple(args.reviewer_command),
             registry=args.runtime_registry,
@@ -1768,6 +1774,7 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
         if args.reviewer_set:
             reviewer_plan = build_reviewer_execution_plan(
                 select_reviewer_set(args.settings, args.reviewer_set),
+                settings=args.settings,
                 registry=args.runtime_registry,
                 executable=Path(sys.executable),
                 timeout_seconds=args.timeout,
@@ -1784,6 +1791,10 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
             )
         else:
             reviewer_plan = None
+            reviewer_model = args.reviewer_model or args.settings.preference(
+                args.reviewer_agent, 'model'
+            )
+            reviewer_effort = args.settings.preference(args.reviewer_agent, 'effort')
             reviewer_runtime = args.runtime_registry.require(
                 args.reviewer_agent, RuntimeRole.REVIEWER
             )
@@ -1792,17 +1803,23 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
                 '-m',
                 reviewer_runtime.module,
             ]
-            if args.reviewer_model:
-                reviewer_command.extend(['--model', args.reviewer_model])
+            if reviewer_model:
+                reviewer_command.extend(['--model', reviewer_model])
+            if reviewer_effort:
+                reviewer_command.extend(['--effort', reviewer_effort])
             reviewer_identity = InvocationIdentity(
                 vendor=reviewer_runtime.vendor,
-                model=args.reviewer_model,
+                model=reviewer_model,
                 runtime=args.reviewer_agent,
             )
         developer_command: list[str] = []
         developer_runtime = args.runtime_registry.require(
             args.developer_agent, RuntimeRole.DEVELOPER
         )
+        developer_model = args.developer_model or args.settings.preference(
+            args.developer_agent, 'model'
+        )
+        developer_effort = args.settings.preference(args.developer_agent, 'effort')
         # An empty developer command is already how the worker returns a run at
         # its review verdict instead of remediating, so --no-remediation reuses
         # that path rather than introducing a second one.
@@ -1814,11 +1831,13 @@ def _run(args: argparse.Namespace, store: JobStore) -> int:
                 '--role',
                 'developer',
             ]
-            if args.developer_model:
-                developer_command.extend(['--model', args.developer_model])
+            if developer_model:
+                developer_command.extend(['--model', developer_model])
+            if developer_effort:
+                developer_command.extend(['--effort', developer_effort])
         developer_identity = InvocationIdentity(
             vendor=developer_runtime.vendor,
-            model=args.developer_model,
+            model=developer_model if developer_command else None,
             runtime=args.developer_agent,
         )
         if reviewer_plan is not None:
@@ -1914,6 +1933,7 @@ def _resume(args: argparse.Namespace, store: JobStore) -> int:
                 args.runs_directory,
                 timeout=1800,
                 registry=args.runtime_registry,
+                settings=args.settings,
             )
         else:
             _require_external_database(args.database, run.worktree_path)
@@ -2034,6 +2054,16 @@ def _config_show(
                     'value': settings.reviewer_runtime.value,
                     'source': settings.reviewer_runtime.source,
                 },
+                'runtimes': {
+                    'value': {
+                        runtime: {
+                            name: {'value': setting.value, 'source': setting.source}
+                            for name, setting in preferences.items()
+                        }
+                        for runtime, preferences in settings.runtime_preferences.items()
+                    },
+                    'source': settings.runtime_preferences_source,
+                },
                 'reviewer_sets': {
                     'value': [
                         {
@@ -2043,7 +2073,8 @@ def _config_show(
                                     'id': member.identifier,
                                     'runtime': member.runtime,
                                     'vendor': member.vendor,
-                                    'model': member.model,
+                                    'model': member.model
+                                    or settings.preference(member.runtime, 'model'),
                                     'required': True,
                                 }
                                 for member in reviewer_set.members

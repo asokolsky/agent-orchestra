@@ -28,19 +28,27 @@ from agent_orchestra.usage import ModelUsage, RuntimeUsage, UsageStatus, UsageVa
 
 
 def run_codex_developer(
-    request: Path, response: Path, *, model: str | None = None
+    request: Path,
+    response: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke the concrete Codex developer adapter."""
 
-    CodexDeveloperAdapter(model).execute(request, response)
+    CodexDeveloperAdapter(model, effort).execute(request, response)
 
 
 def run_claude_code_developer(
-    request: Path, response: Path, *, model: str | None = None
+    request: Path,
+    response: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke the concrete Claude Code developer adapter."""
 
-    ClaudeCodeDeveloperAdapter(model).execute(request, response)
+    ClaudeCodeDeveloperAdapter(model, effort).execute(request, response)
 
 
 if TYPE_CHECKING:
@@ -167,7 +175,7 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
     else:
         raise AssertionError(f'unsupported runtime: {runtime}')
 
-    invoke(request, response, model='runtime-model')
+    invoke(request, response, model='runtime-model', effort='medium')
 
     document = json.loads(response.read_text())
     assert document['sequence'] == 4
@@ -182,6 +190,7 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
     assert isinstance(environment, dict)
     assert RUNTIME_METADATA_ENV not in environment
     if runtime == 'codex':
+        assert 'model_reasoning_effort=medium' in command
         assert command[command.index('--sandbox') + 1] == 'workspace-write'
         config_values = [
             command[index + 1]
@@ -199,6 +208,7 @@ def test_developer_adapter_writes_equivalent_canonical_handoff(
         assert Path(environment['MISE_STATE_DIR']).name == 'mise-state'
         assert Path(environment['UV_CACHE_DIR']).name == 'uv-cache'
     elif runtime == 'claude-code':
+        assert command[command.index('--effort') + 1] == 'medium'
         assert command[command.index('--permission-mode') + 1] == 'acceptEdits'
     else:
         raise AssertionError(f'unsupported runtime: {runtime}')

@@ -53,6 +53,7 @@ def select_reviewer_set(settings: Settings, reviewer_set_id: str) -> ReviewerSet
 def build_reviewer_execution_plan(
     reviewer_set: ReviewerSet,
     *,
+    settings: Settings | None = None,
     registry: RuntimeRegistry,
     executable: Path,
     timeout_seconds: int,
@@ -66,15 +67,21 @@ def build_reviewer_execution_plan(
     for member in reviewer_set.members:
         runtime = registry.require(member.runtime, RuntimeRole.REVIEWER)
         command = [str(executable), '-m', runtime.module]
-        if member.model is not None:
-            command.extend(['--model', member.model])
+        model = member.model or (
+            settings.preference(member.runtime, 'model') if settings else None
+        )
+        effort = settings.preference(member.runtime, 'effort') if settings else None
+        if model is not None:
+            command.extend(['--model', model])
+        if effort is not None:
+            command.extend(['--effort', effort])
         reviewers.append(
             ReviewerExecution(
                 reviewer_id=member.identifier,
                 command=tuple(command),
                 identity=InvocationIdentity(
                     vendor=runtime.vendor,
-                    model=member.model,
+                    model=model,
                     runtime=runtime.identifier,
                 ),
                 timeout_seconds=timeout_seconds,

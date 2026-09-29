@@ -152,6 +152,28 @@ def test_schema_6_round_trip_preserves_reported_usage(tmp_path: Path) -> None:
     assert loaded.usage == record.usage
 
 
+def test_schema_7_preserves_requested_effort_and_rejects_change(tmp_path: Path) -> None:
+    """Persist issue-review effort and keep it fixed across attempt updates."""
+
+    job_directory = tmp_path / 'run'
+    record = replace(
+        pending_attempt(),
+        schema_version=7,
+        requested_effort='high',
+        stdout_path='logs/000001-reviewer.stdout.log',
+        stderr_path='logs/000001-reviewer.stderr.log',
+    )
+    path = job_directory / 'invocations/000001-reviewer.json'
+    _write_record_unindexed(path, record)
+
+    [loaded] = InvocationEvidenceStore(job_directory).read_all('run')
+    assert loaded.requested_effort == 'high'
+    with pytest.raises(InvocationEvidenceError, match='identity is immutable'):
+        InvocationEvidenceStore(job_directory).write(
+            path, replace(record, requested_effort='low')
+        )
+
+
 def test_attempt_transitions_through_validation_to_success() -> None:
     """Accept the complete pending, running, and successful path."""
 
@@ -706,6 +728,7 @@ def test_read_records_rejects_duplicate_task_attempts(tmp_path: Path) -> None:
         stderr_path=str(tmp_path / 'logs/stderr.log'),
     )
     serialized = asdict(record)
+    serialized.pop('requested_effort')
     serialized.pop('reviewer_id')
     serialized.pop('usage_status')
     serialized.pop('usage')

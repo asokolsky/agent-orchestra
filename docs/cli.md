@@ -131,18 +131,43 @@ job_evidence_days = 90
 developer_runtime = "codex"
 reviewer_runtime = "claude-code"
 
+[runtimes.codex]
+model = "gpt-6-sol"
+effort = "medium"
+
+[runtimes.claude-code]
+model = "claude-opus-5-5"
+effort = "high"
+
 [reviewer_sets.default]
 members = [
-  { id = "codex", runtime = "codex", model = "gpt-5.6" },
+  { id = "codex", runtime = "codex" },
   { id = "claude", runtime = "claude-code" },
 ]
 ```
 
-Precedence is command-line option, settings file, then built-in default.
+For runtime selection and models, precedence is command-line option, settings
+file, then built-in default. Effort is selected only from the settings file;
+without it, the runtime chooses its own default.
 Environment variables select the XDG location but do not override individual
 values. Runtime defaults apply to `run`, must name a registered runtime that
 supports the corresponding role, and can be overridden with `--developer-agent`
 or `--reviewer-agent`.
+
+The optional `[runtimes.RUNTIME]` entries set the requested model and effort
+when Agent Orchestra launches that built-in runtime for source review,
+remediation, issue review, or a reviewer set. They do not select which runtime
+runs a role. An explicit model option or reviewer-set member model takes
+precedence over the configured runtime model; the configured effort still
+applies. Without a configured model or effort, the installed runtime chooses
+its own defaults. Codex passes effort as `model_reasoning_effort`; Claude Code
+uses `--effort`. The runtime registry validates supported effort levels when
+loading settings. Supported Codex levels are `low`, `medium`, `high`, `xhigh`,
+`max`, and `ultra`; Claude Code levels are `low`, `medium`, `high`, `xhigh`, and
+`max`. Model options can override a configured model but cannot clear it for a
+single invocation. Agent Orchestra records requested models in run evidence;
+issue-review invocation records also retain the requested effort for retries.
+An effective model is reported only when the runtime supplies it.
 
 ### `config`
 
@@ -421,7 +446,7 @@ agent-orchestra [--database DATABASE] review-issue JOB_ID [OPTIONS]
 | `--objective TEXT` | `Review this issue for implementation readiness.` | Context supplied to the reviewer. |
 | `--timeout SECONDS` | `1800` | Positive bound for the reviewer process. |
 | `--reviewer-agent {codex,claude-code}` | `codex` | Issue-reviewer runtime adapter implementation. |
-| `--reviewer-model MODEL` | Runtime default | Optional model passed to the selected runtime. |
+| `--reviewer-model MODEL` | Configured model for the selected runtime, otherwise its own default | Override the model passed to the selected runtime. |
 | `--runs-directory DIRECTORY` | `~/.local/state/agent-orchestra/runs` | Evidence root used when the issue was captured. |
 
 Before and after agent execution, the command fetches the live issue. It
@@ -925,7 +950,9 @@ concurrent agent process per member and no separate concurrency cap; operators
 should size sets for available local resources. The canonical aggregate decision
 is stored under `review-batches/`, has a human-readable aggregate artifact under
 `artifacts/`, and is included in audit history. `config show` reports configured
-reviewer sets with a `status` of `"full_workflow"`.
+reviewer sets with a `status` of `"full_workflow"`. A member's `model` overrides
+its runtime's configured model; a member without one uses that runtime's
+configured model and effort.
 
 The separate-job fallback remains available when a native reviewer set cannot
 be configured. Freeze the worktree, enqueue one reviewer-only job per reviewer
@@ -952,9 +979,9 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--reviewer-set NAME` | unset | Run every required reviewer in this configured set as one batch, instead of a single reviewer. See [Reviewer sets](#reviewer-sets). |
 | `--no-remediation` | off | Review once and stop, without dispatching a developer. Rejected when a developer option selects anything other than its default, since no developer can run. |
 | `--developer-agent {codex,claude-code}` | Configured `defaults.developer_runtime`, otherwise `codex` | Built-in runtime selected for development remediation. |
-| `--developer-model MODEL` | Runtime default | Optional model passed to the developer adapter. |
+| `--developer-model MODEL` | Configured model for the selected runtime, otherwise its own default | Override the model passed to the developer adapter. |
 | `--reviewer-agent {codex,claude-code}` | Configured `defaults.reviewer_runtime`, otherwise `codex` | Built-in runtime selected for review. |
-| `--reviewer-model MODEL` | Runtime default | Optional model passed to the reviewer adapter. |
+| `--reviewer-model MODEL` | Configured model for the selected runtime, otherwise its own default | Override the model passed to the reviewer adapter. |
 | `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | External evidence root; timestamp-shaped job IDs are stored under internal `YYYY/MM/DD` shards. |
 
 The state database and evidence directory must remain outside the target worktree.
@@ -966,6 +993,9 @@ error document.
 The command verifies the current diff digest before review, after every
 read-only review, and after remediation. Approval stops at
 `awaiting_commit_authorization`; this command never commits or publishes work.
+Runs using configured effort save that adapter argument in their execution
+record. Resuming such a run requires an Agent Orchestra version whose adapter
+accepts `--effort`.
 
 Examples:
 
@@ -980,7 +1010,7 @@ mise agent-orchestra -- run "$JOB_ID" \
   --developer-agent claude-code \
   --developer-model sonnet \
   --reviewer-agent codex \
-  --reviewer-model gpt-5.6 \
+  --reviewer-model gpt-6-sol \
   --max-iterations 4
 ```
 
@@ -1254,9 +1284,10 @@ invocation receives a higher attempt number and new log files.
 
 For an issue-review job in `failed` or recoverable `reviewing`, `resume` reads
 the persisted issue-review request and latest completed attempt, then retries
-the same built-in reviewer runtime and requested model. Custom reviewer
-commands are not persisted and must instead be supplied again with
-`review-issue`.
+the same built-in reviewer runtime, requested model, and recorded effort. Older
+attempts without recorded effort use the current runtime setting. Custom
+reviewer commands are not persisted and must instead
+be supplied again with `review-issue`.
 
 Examples:
 

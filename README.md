@@ -86,9 +86,11 @@ continues from here.
   across a rolling time window while identifying jobs whose history is
   unavailable.
 - The [settings and retention commands](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#global-settings)
-  provide XDG-aware storage defaults, effective-value inspection, and a
-  dry-run-first policy for expiring terminal job evidence. Database cleanup and
-  unmatched-directory cleanup require separate explicit options.
+  provide storage based on the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/0.8/),
+  runtime model and effort defaults, effective value inspection, and a
+  dry-run-first policy for expiring terminal job
+  evidence. Database cleanup and unmatched-directory cleanup require separate
+  explicit options.
 - The designed [remote pull-request review workflow](https://github.com/asokolsky/agent-orchestra/blob/main/docs/workflows.md#remote-pull-request-review)
   starts from a pull-request URL and reviews one exact remote head. Remote
   pull-request enqueueing and provider-side review actions are not implemented.

@@ -11,26 +11,86 @@ from uuid import uuid4
 
 import pytest
 
+from agent_orchestra.adapter import claude_code, codex
 from agent_orchestra.adapter.claude_code import ClaudeCodeReviewerAdapter
 from agent_orchestra.adapter.codex import CodexReviewerAdapter
 from agent_orchestra.adapter.errors import AdapterError
 from agent_orchestra.runtime_metadata import RUNTIME_METADATA_ENV
 
 
+@pytest.mark.parametrize('runtime', ['codex', 'claude-code'])
+@pytest.mark.parametrize('role', ['reviewer', 'developer'])
+def test_adapter_entry_point_passes_effort_to_selected_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    role: str,
+) -> None:
+    """Keep the saved role command's effort through the module entry point."""
+
+    module = codex if runtime == 'codex' else claude_code
+    adapter_class = (
+        (
+            module.CodexReviewerAdapter
+            if role == 'reviewer'
+            else module.CodexDeveloperAdapter
+        )
+        if runtime == 'codex'
+        else (
+            module.ClaudeCodeReviewerAdapter
+            if role == 'reviewer'
+            else module.ClaudeCodeDeveloperAdapter
+        )
+    )
+    observed: dict[str, str | None] = {}
+
+    def execute(self: object, _request: Path, _response: Path) -> None:
+        """Capture the instantiated role adapter without launching a CLI."""
+
+        observed['model'] = getattr(self, 'model', None)
+        observed['effort'] = getattr(self, 'effort', None)
+
+    monkeypatch.setattr(adapter_class, 'execute', execute)
+    assert (
+        module.main(
+            [
+                '--role',
+                role,
+                '--model',
+                'selected-model',
+                '--effort',
+                'high',
+                str(tmp_path / 'request.json'),
+                str(tmp_path / 'response.json'),
+            ]
+        )
+        == 0
+    )
+    assert observed == {'model': 'selected-model', 'effort': 'high'}
+
+
 def run_codex_reviewer(
-    request: Path, response: Path, *, model: str | None = None
+    request: Path,
+    response: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke the concrete Codex adapter for shared contract tests."""
 
-    CodexReviewerAdapter(model).execute(request, response)
+    CodexReviewerAdapter(model, effort).execute(request, response)
 
 
 def run_claude_code_reviewer(
-    request: Path, response: Path, *, model: str | None = None
+    request: Path,
+    response: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke the concrete Claude Code adapter for shared contract tests."""
 
-    ClaudeCodeReviewerAdapter(model).execute(request, response)
+    ClaudeCodeReviewerAdapter(model, effort).execute(request, response)
 
 
 if TYPE_CHECKING:
@@ -152,7 +212,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
     else:
         raise AssertionError(f'unsupported runtime: {runtime}')
 
-    invoke(request, response, model='runtime-model')
+    invoke(request, response, model='runtime-model', effort='high')
 
     command = observed['command']
     assert isinstance(command, list)
@@ -161,6 +221,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
     environment = kwargs['env']
     assert isinstance(environment, dict)
     if runtime == 'codex':
+        assert 'model_reasoning_effort=high' in command
         assert command[command.index('--sandbox') + 1] == 'workspace-write'
         temporary = Path(command[command.index('--cd') + 1])
         assert temporary.parent == response.parent
@@ -170,6 +231,7 @@ def test_reviewer_adapters_produce_equivalent_read_only_results(
         assert 'sandbox_workspace_write.network_access=false' in command
         assert str(worktree) in str(kwargs['input'])
     elif runtime == 'claude-code':
+        assert command[command.index('--effort') + 1] == 'high'
         assert command[command.index('--permission-mode') + 1] == 'dontAsk'
         assert kwargs['cwd'] == worktree
         settings = json.loads(command[command.index('--settings') + 1])

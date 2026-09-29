@@ -417,7 +417,11 @@ def _output_with_runtime_metadata(stdout: str) -> dict[str, Any] | None:
 
 
 def _execute_claude_code_reviewer(
-    request_path: Path, response_path: Path, *, model: str | None = None
+    request_path: Path,
+    response_path: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke Claude Code and persist a correlated canonical review response."""
 
@@ -469,6 +473,8 @@ def _execute_claude_code_reviewer(
         ]
         if model:
             command.extend(['--model', model])
+        if effort:
+            command.extend(['--effort', effort])
         try:
             completed = run_streaming_process(
                 command,
@@ -534,6 +540,7 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
     """Run issue-readiness reviews through the Claude Code CLI."""
 
     model: str | None = None
+    effort: str | None = None
 
     def execute(self, request: dict[str, Any], *, timeout: int) -> IssueReviewExecution:
         """Run an isolated issue review and return structured output."""
@@ -556,6 +563,8 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
             ]
             if self.model:
                 command.extend(['--model', self.model])
+            if self.effort:
+                command.extend(['--effort', self.effort])
             try:
                 completed = run_streaming_process(
                     command,
@@ -623,7 +632,11 @@ class ClaudeCodeIssueReviewerAdapter(IssueReviewerAdapter):
 
 
 def _execute_claude_code_developer(
-    request_path: Path, response_path: Path, *, model: str | None = None
+    request_path: Path,
+    response_path: Path,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> None:
     """Invoke Claude Code with edit access and persist its canonical handoff."""
 
@@ -666,6 +679,8 @@ def _execute_claude_code_developer(
         ]
         if model:
             command.extend(['--model', model])
+        if effort:
+            command.extend(['--effort', effort])
         try:
             completed = run_streaming_process(
                 command,
@@ -703,11 +718,14 @@ class ClaudeCodeReviewerAdapter(ReviewerAdapter):
     """Implement canonical code review through the Claude Code CLI."""
 
     model: str | None = None
+    effort: str | None = None
 
     def execute(self, request_path: Path, response_path: Path) -> None:
         """Execute a diff-scoped review."""
 
-        _execute_claude_code_reviewer(request_path, response_path, model=self.model)
+        _execute_claude_code_reviewer(
+            request_path, response_path, model=self.model, effort=self.effort
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -715,11 +733,14 @@ class ClaudeCodeDeveloperAdapter(DeveloperAdapter):
     """Implement canonical development through the Claude Code CLI."""
 
     model: str | None = None
+    effort: str | None = None
 
     def execute(self, request_path: Path, response_path: Path) -> None:
         """Execute one development request."""
 
-        _execute_claude_code_developer(request_path, response_path, model=self.model)
+        _execute_claude_code_developer(
+            request_path, response_path, model=self.model, effort=self.effort
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -728,16 +749,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog='agent-orchestra-claude-code-reviewer')
     parser.add_argument('--role', choices=('reviewer', 'developer'), default='reviewer')
     parser.add_argument('--model')
+    parser.add_argument('--effort')
     parser.add_argument('request', type=Path)
     parser.add_argument('response', type=Path)
     parsed = parser.parse_args(argv)
     try:
         if parsed.role == 'reviewer':
-            ClaudeCodeReviewerAdapter(parsed.model).execute(
+            ClaudeCodeReviewerAdapter(parsed.model, parsed.effort).execute(
                 parsed.request, parsed.response
             )
         else:
-            ClaudeCodeDeveloperAdapter(parsed.model).execute(
+            ClaudeCodeDeveloperAdapter(parsed.model, parsed.effort).execute(
                 parsed.request, parsed.response
             )
     except (AdapterError, OSError) as error:

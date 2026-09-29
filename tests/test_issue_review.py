@@ -12,6 +12,8 @@ import pytest
 
 from agent_orchestra import issue_review
 from agent_orchestra.adapter.base import IssueReviewerAdapter, IssueReviewExecution
+from agent_orchestra.adapter.claude_code import ClaudeCodeIssueReviewerAdapter
+from agent_orchestra.adapter.codex import CodexIssueReviewerAdapter
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
 from agent_orchestra.audit import _canonical_evidence_type, build_audit_document
@@ -162,6 +164,95 @@ Path(sys.argv[2]).write_text(json.dumps(result))
 ''',
         encoding='utf-8',
     )
+
+
+@pytest.mark.parametrize(
+    ('override', 'expected_model'),
+    [([], 'claude-opus-5-5'), (['--reviewer-model', 'sonnet'], 'sonnet')],
+)
+def test_issue_review_uses_configured_model_and_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    override: list[str],
+    expected_model: str,
+) -> None:
+    """Apply the selected runtime preference and preserve model precedence."""
+
+    store, job, runs = setup_job(tmp_path)
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[runtimes.claude-code]\nmodel = "claude-opus-5-5"\neffort = "high"\n'
+    )
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+    observed: dict[str, object] = {}
+
+    def review(*_args: object, **kwargs: object) -> IssueJob:
+        """Capture issue-review dispatch without contacting the provider."""
+
+        observed.update(kwargs)
+        return job
+
+    monkeypatch.setattr('agent_orchestra.cli.run_issue_review', review)
+
+    assert (
+        main(
+            [
+                '--database',
+                str(store.database_path),
+                'review-issue',
+                job.id,
+                '--runs-directory',
+                str(runs),
+                '--reviewer-agent',
+                'claude-code',
+                *override,
+            ]
+        )
+        == 0
+    )
+    assert observed['model'] == expected_model
+    assert observed['effort'] == 'high'
+
+
+@pytest.mark.parametrize('runtime', ['codex', 'claude-code'])
+def test_issue_reviewer_command_passes_model_and_effort(
+    monkeypatch: pytest.MonkeyPatch, runtime: str
+) -> None:
+    """Pass configured choices through each built-in issue-review CLI command."""
+
+    module_name = (
+        f'agent_orchestra.adapter.{"codex" if runtime == "codex" else "claude_code"}'
+    )
+    monkeypatch.setattr(f'{module_name}.shutil.which', lambda _name: '/bin/agent')
+    observed: list[str] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Capture the command and return a minimal structured result."""
+
+        observed.extend(command)
+        if runtime == 'codex':
+            Path(command[command.index('--output-last-message') + 1]).write_text('{}')
+            output = ''
+        else:
+            output = '{"structured_output": {}}'
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr='')
+
+    monkeypatch.setattr(f'{module_name}.run_streaming_process', run)
+    adapter = (
+        CodexIssueReviewerAdapter('selected-model', 'high')
+        if runtime == 'codex'
+        else ClaudeCodeIssueReviewerAdapter('selected-model', 'high')
+    )
+
+    adapter.execute({'source': {}}, timeout=30)
+
+    assert observed[observed.index('--model') + 1] == 'selected-model'
+    if runtime == 'codex':
+        assert 'model_reasoning_effort=high' in observed
+    else:
+        assert observed[observed.index('--effort') + 1] == 'high'
 
 
 def test_run_issue_review_rejects_invalid_adapter_before_attempt(
@@ -316,6 +407,7 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
             agent='codex',
             model='codex-test',
             timeout=30,
+            effort='high',
         )
 
     result = {
@@ -327,9 +419,26 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
         'validation': ['Reviewed all dimensions.'],
         'verification_gaps': [],
     }
+    config_home = tmp_path / 'config'
+    config = config_home / 'agent-orchestra/config.toml'
+    config.parent.mkdir(parents=True)
+    config.write_text('[runtimes.codex]\nmodel = "gpt-6-sol"\neffort = "medium"\n')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config_home))
+    observed: dict[str, str | None] = {}
+
+    def succeed(
+        adapter: object, _request: dict[str, Any], *, timeout: int
+    ) -> IssueReviewExecution:
+        """Capture the model and effort replayed from the first attempt."""
+
+        del timeout
+        observed['model'] = getattr(adapter, 'model', None)
+        observed['effort'] = getattr(adapter, 'effort', None)
+        return IssueReviewExecution(result, '', '', 0)
+
     monkeypatch.setattr(
         'agent_orchestra.adapter.codex.CodexIssueReviewerAdapter.execute',
-        lambda *_args, **_kwargs: IssueReviewExecution(result, '', '', 0),
+        succeed,
     )
 
     assert (
@@ -353,6 +462,8 @@ def test_resume_issue_review_retries_timed_out_builtin_adapter(
     )
     assert [record.conclusion for record in records] == ['timed_out', 'succeeded']
     assert records[-1].requested_model == 'codex-test'
+    assert [record.requested_effort for record in records] == ['high', 'high']
+    assert observed == {'model': 'codex-test', 'effort': 'high'}
 
 
 def test_fake_issue_runtime_dispatches_resumes_and_attributes_vendor(
@@ -667,6 +778,7 @@ def test_run_issue_review_does_not_relaunch_running_attempt(
         agent='codex',
         vendor='openai',
         model=None,
+        effort=None,
         attempt=1,
     )
     monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
