@@ -33,8 +33,10 @@ Repository = "https://github.com/asokolsky/agent-orchestra"
 agent-orchestra = "agent_orchestra.cli:main"
 agent-orchestra-codex-reviewer = "agent_orchestra.adapter.codex:main"
 agent-orchestra-claude-code-reviewer = "agent_orchestra.adapter.claude_code:main"
+agent-orchestra-opencode-reviewer = "agent_orchestra.adapter.opencode:main"
 agent-orchestra-codex-developer = "agent_orchestra.adapter.codex:developer_main"
 agent-orchestra-claude-code-developer = "agent_orchestra.adapter.claude_code:developer_main"
+agent-orchestra-opencode-developer = "agent_orchestra.adapter.opencode:developer_main"
 
 [dependency-groups]
 # uv sync --group dev
@@ -73,6 +75,7 @@ norecursedirs = ["tests/data"]
 markers = [
     "live_claude: opt-in tests that invoke an installed authenticated Claude CLI",
     "live_codex: opt-in tests that invoke an installed authenticated Codex CLI",
+    "live_opencode: opt-in tests that invoke an installed authenticated OpenCode CLI",
 ]
 
 [tool.ruff]

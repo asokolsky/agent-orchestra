@@ -15,6 +15,7 @@ from agent_orchestra.adapter.base import IssueReviewerAdapter, IssueReviewExecut
 from agent_orchestra.adapter.claude_code import ClaudeCodeIssueReviewerAdapter
 from agent_orchestra.adapter.codex import CodexIssueReviewerAdapter
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
+from agent_orchestra.adapter.opencode_isolation import OpenCodeIsolationError
 from agent_orchestra.adapter.registry import RuntimeDefinition, RuntimeRegistry
 from agent_orchestra.audit import _canonical_evidence_type, build_audit_document
 from agent_orchestra.cli import main
@@ -565,6 +566,42 @@ def test_run_issue_review_dispatches_claude_code_adapter(
     assert InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
         job.id
     )[0].effective_models == ('claude-test',)
+
+
+def test_opencode_preflight_failure_finishes_issue_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OpenCode isolation failure leaves durable failed issue-review evidence."""
+
+    store, job, runs = setup_job(tmp_path)
+    monkeypatch.setattr(issue_review, 'fetch_issue', lambda _url: snapshot())
+
+    def unavailable() -> Path:
+        """Reject the CLI before its process starts."""
+
+        message = 'opencode executable not found'
+        raise OpenCodeIsolationError(message)
+
+    monkeypatch.setattr(
+        'agent_orchestra.adapter.opencode.require_opencode', unavailable
+    )
+
+    with pytest.raises(IssueReviewError, match='opencode executable not found'):
+        run_issue_review(
+            job,
+            store,
+            runs,
+            objective='Review readiness.',
+            agent='opencode',
+            model=None,
+            timeout=30,
+        )
+
+    assert store.get_issue(job.id).state is RunState.FAILED
+    record = InvocationEvidenceStore(resolve_evidence_path(runs, job.id)).read_all(
+        job.id
+    )[0]
+    assert record.conclusion == 'failed'
 
 
 def test_run_issue_review_rejects_change_during_review(

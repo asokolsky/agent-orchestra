@@ -12,7 +12,7 @@ worktree, SHAs, or diff digest. The result verdict is `ready`,
 an issue section or field; they do not invent source paths or line numbers.
 
 The issue reviewer is read-only and receives no provider credentials or write
-capability. Codex and Claude Code implement the same abstract adapter method and
+capability. Codex, Claude Code, and OpenCode implement the same abstract adapter method and
 receive the same canonical request. The orchestrator performs provider reads
 before and after the invocation so it can reject a result for a stale snapshot.
 

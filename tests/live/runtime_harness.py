@@ -96,6 +96,19 @@ LIVE_RUNTIMES = (
         skill_home_directory='.claude',
         effective_model_status=EffectiveModelStatus.REPORTED,
     ),
+    LiveRuntime(
+        identifier='opencode',
+        executable='opencode',
+        opt_in_environment='AGENT_ORCHESTRA_LIVE_OPENCODE',
+        model_environment='AGENT_ORCHESTRA_LIVE_OPENCODE_MODEL',
+        skill_names=('agent-orchestra-reviewer', 'agent-orchestra-developer'),
+        roles=frozenset(RuntimeRole),
+        manifest_placeholders=frozenset(),
+        reports_runtime_metadata=True,
+        skill_home_environment='OPENCODE_CONFIG_DIR',
+        skill_home_directory='.config/opencode',
+        effective_model_status=EffectiveModelStatus.UNAVAILABLE,
+    ),
 )
 
 

@@ -5,7 +5,7 @@ objective or fixes source-code review findings in one
 assigned worktree. It may use only the capabilities listed in its request and
 returns a structured handoff for review.
 
-This contract is vendor-neutral. Codex and Claude Code execute it through their
+This contract is vendor-neutral. Codex, Claude Code, and OpenCode execute it through their
 respective runtime adapters and the same canonical
 `agent-orchestra-developer` skill.
 

@@ -139,6 +139,10 @@ effort = "medium"
 model = "claude-opus-5-5"
 effort = "high"
 
+[runtimes.opencode]
+model = "provider/model"
+effort = "high"
+
 [reviewer_sets.default]
 members = [
   { id = "codex", runtime = "codex" },
@@ -445,7 +449,7 @@ agent-orchestra [--database DATABASE] review-issue JOB_ID [OPTIONS]
 |---|---|---|
 | `--objective TEXT` | `Review this issue for implementation readiness.` | Context supplied to the reviewer. |
 | `--timeout SECONDS` | `1800` | Positive bound for the reviewer process. |
-| `--reviewer-agent {codex,claude-code}` | `codex` | Issue-reviewer runtime adapter implementation. |
+| `--reviewer-agent {codex,claude-code,opencode}` | `codex` | Issue-reviewer runtime adapter implementation. |
 | `--reviewer-model MODEL` | Configured model for the selected runtime, otherwise its own default | Override the model passed to the selected runtime. |
 | `--runs-directory DIRECTORY` | `~/.local/state/agent-orchestra/runs` | Evidence root used when the issue was captured. |
 
@@ -978,9 +982,9 @@ agent-orchestra [--database DATABASE] run JOB_ID --objective OBJECTIVE [OPTIONS]
 | `--max-iterations COUNT` | `3` | Positive maximum number of review iterations. Bounds remediation rounds, so it has no effect when no developer can be dispatched. |
 | `--reviewer-set NAME` | unset | Run every required reviewer in this configured set as one batch, instead of a single reviewer. See [Reviewer sets](#reviewer-sets). |
 | `--no-remediation` | off | Review once and stop, without dispatching a developer. Rejected when a developer option selects anything other than its default, since no developer can run. |
-| `--developer-agent {codex,claude-code}` | Configured `defaults.developer_runtime`, otherwise `codex` | Built-in runtime selected for development remediation. |
+| `--developer-agent {codex,claude-code,opencode}` | Configured `defaults.developer_runtime`, otherwise `codex` | Built-in runtime selected for development remediation. |
 | `--developer-model MODEL` | Configured model for the selected runtime, otherwise its own default | Override the model passed to the developer adapter. |
-| `--reviewer-agent {codex,claude-code}` | Configured `defaults.reviewer_runtime`, otherwise `codex` | Built-in runtime selected for review. |
+| `--reviewer-agent {codex,claude-code,opencode}` | Configured `defaults.reviewer_runtime`, otherwise `codex` | Built-in runtime selected for review. |
 | `--reviewer-model MODEL` | Configured model for the selected runtime, otherwise its own default | Override the model passed to the reviewer adapter. |
 | `--runs-directory RUNS_DIRECTORY` | `~/.local/state/agent-orchestra/runs` | External evidence root; timestamp-shaped job IDs are stored under internal `YYYY/MM/DD` shards. |
 
@@ -1221,6 +1225,55 @@ installed CLI chooses its configured default. Codex currently does not expose
 effective model identity in its machine-readable result, so the suite requires
 `effective_model_status: "unavailable"` and an empty effective-model list.
 
+#### OpenCode
+
+Install OpenCode and both role skills on macOS, then check the CLI version:
+
+```shell
+brew install anomalyco/tap/opencode
+opencode --version  # must report 1.18.33
+agent-orchestra skills install --agent opencode \
+  --skill agent-orchestra-reviewer \
+  --skill agent-orchestra-developer
+```
+
+The Homebrew tap may install a newer release. This adapter fails closed until
+that release has been validated and its version gate updated.
+
+OpenCode's [CLI](https://opencode.ai/docs/cli/) accepts models as
+`provider/model` and provider-specific variants through `--variant`. Set the
+model in `[runtimes.opencode]` or use a command-line model option. Agent
+Orchestra passes its `effort` value as the requested variant and keeps the
+runtime vendor separate from the model provider.
+
+The adapter requires OpenCode 1.18.33 and macOS `sandbox-exec`. It starts each
+role with isolated home and XDG directories, disables project config, and uses
+`--pure` to exclude external plugins. It stages only the installed role skill
+and copies the OpenCode auth file into temporary state when present. The staged
+config directory is read-only inside the sandbox, so OpenCode cannot install
+its plugin SDK there. Its [permission rules](https://opencode.ai/docs/permissions/)
+deny every tool by default. Each source role can load only its staged skill;
+the reviewer permits read, glob, grep, and four exact read-only Git commands
+for the captured base SHA. The developer also permits edit and bash and can
+read the two review evidence files it must address.
+The operating-system sandbox keeps reviewer writes in
+scratch and developer writes in scratch or the assigned worktree. Issue review
+has no tools. All temporary state is outside the target worktree. A missing
+sandbox, unsupported CLI release, failed process, or incomplete JSON event
+stream fails the attempt. The pinned CLI's step events report usage but no
+effective model identity, so attempts record that identity as unavailable.
+
+The opt-in live suite uses a configured provider and an explicit model:
+
+```shell
+AGENT_ORCHESTRA_LIVE_OPENCODE_MODEL=provider/model mise run test-live-opencode
+```
+
+It exercises a temporary source-review and remediation lifecycle, an issue
+review using a local snapshot, and a direct filesystem denial. Ordinary
+`mise run tests` skips the live sessions. OpenCode sessions may incur provider
+usage charges.
+
 ### Custom reviewer command
 
 Append `-- COMMAND [ARGUMENT ...]` to replace the built-in reviewer adapter:
@@ -1403,14 +1456,14 @@ agent-orchestra skills install --skill SKILL [--skill SKILL ...] [OPTIONS]
 | Option | Default | Meaning |
 |---|---|---|
 | `--skill SKILL` | Required | Skill name to install. Repeat to install multiple skills; duplicate names are collapsed. |
-| `--agent {codex,claude-code,all}` | `all` | Runtime installation target. |
+| `--agent {codex,claude-code,opencode,all}` | `all` | Runtime installation target. |
 | `--source SOURCE` | Packaged skill data | Alternate directory containing canonical skill subdirectories. |
 | `--skill-home RUNTIME=PATH` | Runtime registry environment/default | Override a registered runtime configuration root; repeat as needed. |
 
 Examples:
 
 ```shell
-# Install both bundled skills for Codex and Claude Code.
+# Install both bundled skills for every registered runtime.
 mise agent-orchestra -- skills install \
   --skill agent-orchestra-developer \
   --skill agent-orchestra-reviewer
@@ -1437,6 +1490,8 @@ installed agent-orchestra-developer for codex: /home/user/.codex/skills/agent-or
 already installed agent-orchestra-reviewer for codex: /home/user/.codex/skills/agent-orchestra-reviewer
 installed agent-orchestra-developer for claude-code: /home/user/.claude/skills/agent-orchestra-developer
 already installed agent-orchestra-reviewer for claude-code: /home/user/.claude/skills/agent-orchestra-reviewer
+installed agent-orchestra-developer for opencode: /home/user/.config/opencode/skills/agent-orchestra-developer
+already installed agent-orchestra-reviewer for opencode: /home/user/.config/opencode/skills/agent-orchestra-reviewer
 ```
 
 The line begins with `installed` when files were copied or updated and `already

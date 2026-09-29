@@ -26,6 +26,7 @@ MANIFEST_NAMES = (
     'evidence.toml',
     'github.toml',
     'gitlab.toml',
+    'opencode.toml',
 )
 SKILL_NAMES = ('agent-orchestra-developer', 'agent-orchestra-reviewer')
 FIXTURE_VERSION = project_version()

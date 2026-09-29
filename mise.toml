@@ -105,3 +105,9 @@ description = "Run opt-in integration checks against the authenticated Codex CLI
 run = [
     'AGENT_ORCHESTRA_LIVE_CODEX=1 uv run pytest -vv -s -p no:xdist tests/live/test_codex_integration.py',
 ]
+
+[tasks.test-live-opencode]
+description = "Run opt-in integration checks against the authenticated OpenCode CLI"
+run = [
+    'AGENT_ORCHESTRA_LIVE_OPENCODE=1 uv run pytest -vv -s -p no:xdist tests/live/test_opencode_integration.py tests/test_opencode_isolation.py::test_sandbox_rejects_external_write tests/test_opencode_isolation.py::test_reviewer_git_commands_work_in_linked_worktree tests/test_opencode_isolation.py::test_live_opencode_ignores_project_agent_and_denies_tools',
+]

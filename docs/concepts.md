@@ -114,7 +114,7 @@ prove that the user authorized a commit or remote action.
 
 ## Runtimes
 
-A runtime is the product that runs an agent. Codex and Claude Code are the first
+A runtime is the product that runs an agent. Codex, Claude Code, and OpenCode are
 supported runtimes.
 
 The runtime registry is the single source of supported identifiers. Each entry

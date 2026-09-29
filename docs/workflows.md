@@ -166,7 +166,7 @@ work.
 3. **Start a read-only review.** `review-issue JOB_ID` re-fetches the issue and
    rejects the review if the initially captured revision changed. It writes a
    versioned issue-review request, increments the iteration, and dispatches
-   either the Codex or Claude Code implementation of the same abstract adapter.
+   the Codex, Claude Code, or OpenCode implementation of the same abstract adapter.
 4. **Evaluate readiness.** The issue reviewer evaluates problem clarity, scope,
    constraints, dependencies, risks, acceptance criteria, testability, and
    implementation readiness. Findings identify an issue section or field, not
