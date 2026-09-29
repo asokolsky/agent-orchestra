@@ -49,7 +49,8 @@ git diff --check
 `verify-dist` checks the source distribution and wheel metadata, confirms that
 every packaged manifest and canonical role skill is present, installs the wheel
 in a temporary environment outside the checkout, and exercises the installed
-CLI. It also installs both role skills for Codex and Claude Code from the wheel.
+CLI. It also installs both role skills for Codex, Claude Code, and OpenCode from
+the wheel.
 
 ## Publish the release
 

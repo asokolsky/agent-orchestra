@@ -217,6 +217,25 @@ DEFAULT_RUNTIME_REGISTRY = RuntimeRegistry(
             skill_home_directory='.claude',
             effort_levels=frozenset({'low', 'medium', 'high', 'xhigh', 'max'}),
         ),
+        RuntimeDefinition(
+            identifier='opencode',
+            vendor='anomalyco',
+            module='agent_orchestra.adapter.opencode',
+            reviewer_adapter=(
+                'agent_orchestra.adapter.opencode.OpenCodeReviewerAdapter'
+            ),
+            developer_adapter=(
+                'agent_orchestra.adapter.opencode.OpenCodeDeveloperAdapter'
+            ),
+            issue_reviewer_adapter=(
+                'agent_orchestra.adapter.opencode.OpenCodeIssueReviewerAdapter'
+            ),
+            manifest_placeholders=frozenset(),
+            reports_runtime_metadata=True,
+            skill_home_environment='OPENCODE_CONFIG_DIR',
+            skill_home_directory='.config/opencode',
+            effort_levels=frozenset({'minimal', 'low', 'medium', 'high', 'max'}),
+        ),
     ),
     default_identifier='codex',
 )

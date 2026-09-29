@@ -55,7 +55,7 @@ separate decisions from the
 [authorization authority](concepts.md#system-participants).
 
 The current CLI implements this bounded loop for existing local changes through
-the Codex and Claude Code adapters. Custom reviewer commands retain the
+the Codex, Claude Code, and OpenCode adapters. Custom reviewer commands retain the
 single-review compatibility path. See [Current scope](../README.md#current-scope)
 and the [workflow contracts](workflows.md) for that boundary.
 
@@ -458,12 +458,12 @@ deliberately no override mechanism: no settings key, no environment variable, no
 means the installation is invalid or incompatible, so the remedy is to reinstall
 or upgrade rather than to edit installed package data.
 
-The six manifests are not one category. What an override would do differs by
+The seven manifests are not one category. What an override would do differs by
 kind, and a proposal that treats them alike is reasoning about the wrong risk:
 
 | Kind | Manifests | What an override would change |
 |---|---|---|
-| Runtime profile | `codex`, `claude-code` | The agent capability ceiling. |
+| Runtime profile | `codex`, `claude-code`, `opencode` | The agent capability ceiling. |
 | Evidence | `evidence` | A contract with evidence already on disk. |
 | Assignment | `assignments` | The instruction text an agent is given. |
 | Provider | `github`, `gitlab` | Only the error code a diagnostic maps to. |
@@ -865,12 +865,14 @@ cannot change the diff under review.
 The orchestrator writes a request to a temporary file, flushes it, and renames
 it into `messages/` atomically. The agent adapter receives the request path and
 an expected response path. It translates the JSON request into the invocation
-format required by Codex or Claude Code. The response is also written
+format required by the selected runtime. The response is also written
 atomically, validated, and accepted before the workflow state changes.
 
-Agent process stdout and stderr are retained as execution logs only. They may
-contain progress text or vendor diagnostics and are never parsed as the message
-response. This prevents conversational output from corrupting the protocol.
+Agent process stdout and stderr are retained as execution logs. OpenCode's
+JSONL stdout is parsed by its adapter only after a complete successful run;
+its final JSON text still must pass the role schema before the adapter writes a
+canonical response. Raw events and conversational output are never workflow
+messages.
 
 The first local review step implements this file transport for its request and
 response. Other lifecycle messages remain a target contract. See

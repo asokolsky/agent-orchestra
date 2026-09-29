@@ -31,8 +31,9 @@ for every command, option, default, output, and exit behavior.
 You should also have:
 
 - Git 2.36 or newer and
-- at least one supported agent runtime, Codex or Claude Code, installed,
-  configured, and authenticated.
+- at least one supported agent runtime, Codex, Claude Code, or OpenCode,
+  installed, configured, and authenticated. OpenCode currently requires
+  macOS and version 1.18.33.
 
 ## Installation
 
@@ -45,8 +46,7 @@ uv tool install --python 3.14 py-agent-orchestra
 agent-orchestra --version
 ```
 
-Next install the bundled developer and reviewer skills for Codex and Claude
-Code:
+Next install the bundled developer and reviewer skills for your runtimes:
 
 ```shell
 agent-orchestra skills install \
@@ -62,7 +62,7 @@ continues from here.
   captures an existing uncommitted diff as a job, dispatches an independent
   source-code reviewer, sends structured findings to a source-code developer
   for remediation, and
-  repeats review against each new diff digest. Codex and Claude Code can be
+  repeats review against each new diff digest. Codex, Claude Code, and OpenCode can be
   selected independently for either role. Interrupted and validation-required
   jobs can resume from durable task and attempt evidence. Approval stops at the
   commit-authorization boundary; committing and publishing remain separate
@@ -73,7 +73,7 @@ continues from here.
   statement, scope, constraints, risks, and acceptance criteria are clear and
   testable, then communicates actionable feedback to the issue creator. The
   issue can be revised and reviewed again until it is ready for implementation.
-  Codex and Claude Code receive the same provider-neutral request. Review is
+  Codex, Claude Code, and OpenCode receive the same provider-neutral request. Review is
   read-only; the generated feedback can be posted only through a separate
   explicitly authorized command.
 - The [`audit`](https://github.com/asokolsky/agent-orchestra/blob/main/docs/cli.md#audit)
@@ -115,7 +115,7 @@ The current implementation provides:
 - validated, SQLite-backed state for local-diff and issue-refinement jobs;
 - exact-digest evidence, Markdown review rendering, and resumable review and
   remediation;
-- built-in Codex and Claude Code adapters plus versioned developer and reviewer
+- built-in Codex, Claude Code, and OpenCode adapters plus versioned developer and reviewer
   skills;
 - adapter-neutral attempt records with requested and effective model
   provenance;

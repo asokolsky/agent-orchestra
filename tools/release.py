@@ -15,6 +15,8 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from agent_orchestra.adapter.registry import DEFAULT_RUNTIME_REGISTRY
+
 PROJECT_NAME = 'py-agent-orchestra'
 COMMAND_NAME = 'agent-orchestra'
 PACKAGE_NAME = 'agent_orchestra'
@@ -304,27 +306,28 @@ def smoke_test_wheel(directory: Path) -> None:
             ],
             root,
         )
-        codex_home = root / 'codex'
-        claude_home = root / 'claude'
+        runtime_homes = {
+            identifier: root / identifier
+            for identifier in DEFAULT_RUNTIME_REGISTRY.identifiers()
+        }
+        install_command = [
+            str(executable),
+            'skills',
+            'install',
+            '--agent',
+            'all',
+            '--skill',
+            SKILL_NAMES[0],
+            '--skill',
+            SKILL_NAMES[1],
+        ]
+        for identifier, home in runtime_homes.items():
+            install_command.extend(['--skill-home', f'{identifier}={home}'])
         _run(
-            [
-                str(executable),
-                'skills',
-                'install',
-                '--agent',
-                'all',
-                '--skill',
-                SKILL_NAMES[0],
-                '--skill',
-                SKILL_NAMES[1],
-                '--skill-home',
-                f'codex={codex_home}',
-                '--skill-home',
-                f'claude-code={claude_home}',
-            ],
+            install_command,
             root,
         )
-        for home in (codex_home, claude_home):
+        for home in runtime_homes.values():
             for suffix in _required_skill_suffixes():
                 relative = suffix.removeprefix(f'share/{COMMAND_NAME}/skills/')
                 if not (home / 'skills' / relative).is_file():

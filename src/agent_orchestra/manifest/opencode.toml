@@ -1,0 +1,9 @@
+id = "opencode"
+kind = "runtime"
+schema_version = 1
+min_engine_version = 1
+
+[profiles]
+reviewer = ["run", "--pure", "--format", "json", "--agent", "build", "--title", "agent-orchestra-reviewer"]
+developer = ["run", "--pure", "--format", "json", "--agent", "build", "--title", "agent-orchestra-developer"]
+issue_reviewer = ["run", "--pure", "--format", "json", "--agent", "build", "--title", "agent-orchestra-issue-reviewer"]

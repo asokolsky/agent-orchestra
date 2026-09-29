@@ -3,7 +3,7 @@
 The `reviewer` protocol role is the source-code reviewer. It evaluates one exact diff and returns a verdict with
 structured findings. It is read-only and never fixes the change it reviews.
 
-This contract is vendor-neutral. Codex and Claude Code execute it through their
+This contract is vendor-neutral. Codex, Claude Code, and OpenCode execute it through their
 respective runtime adapters and the same canonical
 `agent-orchestra-reviewer` skill.
 

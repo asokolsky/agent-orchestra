@@ -1,13 +1,10 @@
 """Tests for installing bundled agent skills."""
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from agent_orchestra.skill_install import SkillInstallError, install_skills
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def create_skill(root: Path, name: str, body: str = 'instructions\n') -> Path:
@@ -154,3 +151,20 @@ def test_claude_config_dir_is_used(
     )
 
     assert (claude_home / 'skills/example-skill/SKILL.md').is_file()
+
+
+def test_opencode_installs_both_canonical_role_skills(tmp_path: Path) -> None:
+    """Install packaged role skills into OpenCode's configuration layout."""
+
+    home = tmp_path / 'opencode'
+    names = ('agent-orchestra-reviewer', 'agent-orchestra-developer')
+
+    results = install_skills(
+        names,
+        ('opencode',),
+        source_root=Path(__file__).parents[1] / 'skills',
+        skill_homes={'opencode': home},
+    )
+
+    assert all(result.installed for result in results)
+    assert all((home / 'skills' / name / 'SKILL.md').is_file() for name in names)

@@ -84,9 +84,9 @@ uv run agent-orchestra --version
 Both installations expose the same CLI; see [Invocation](cli.md#invocation).
 
 If you want Agent Orchestra to request particular models or effort levels for
-Codex and Claude Code, set them in its optional
+Codex, Claude Code, or OpenCode, set them in its optional
 [global settings](cli.md#global-settings). Its isolated agent sessions do not
-read your ordinary Codex or Claude project settings.
+read your ordinary Codex, Claude, or OpenCode project settings.
 
 ## 1. Install the role skills
 
