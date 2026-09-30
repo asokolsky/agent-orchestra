@@ -9,9 +9,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from agent_orchestra.adapter.errors import AdapterError
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.runtime_metadata import RUNTIME_METADATA_ENV
 
 OPENCODE_SUPPORTED_VERSION = '1.18.33'
@@ -24,7 +25,7 @@ class OpenCodeIsolationError(AdapterError):
 def isolated_environment(
     scratch: Path,
     directory: Path,
-    role: Literal['reviewer', 'developer', 'issue_reviewer'] = 'issue_reviewer',
+    role: RuntimeRole = RuntimeRole.ISSUE_REVIEWER,
     *,
     external_read_paths: tuple[Path, ...] = (),
     review_base_sha: str | None = None,
@@ -36,6 +37,13 @@ def isolated_environment(
     ``directory`` is the CLI's current directory. Both paths must be absolute.
     """
 
+    if not isinstance(role, RuntimeRole) or role not in {
+        RuntimeRole.REVIEWER,
+        RuntimeRole.DEVELOPER,
+        RuntimeRole.ISSUE_REVIEWER,
+    }:
+        msg = f'unsupported OpenCode role: {role}'
+        raise OpenCodeIsolationError(msg)
     scratch = scratch.resolve()
     directory = directory.resolve()
     if scratch.is_relative_to(directory) or directory.is_relative_to(scratch):
@@ -85,7 +93,7 @@ def isolated_environment(
         shutil.copyfile(auth_source, auth_target)
         auth_target.chmod(0o600)
     permissions: dict[str, Any] = {'*': 'deny'}
-    if role == 'reviewer':
+    if role is RuntimeRole.REVIEWER:
         if (
             review_base_sha is None
             or re.fullmatch(r'[0-9a-f]{40}', review_base_sha) is None
@@ -105,7 +113,7 @@ def isolated_environment(
                 f'git diff --no-ext-diff --binary {review_base_sha}': 'allow',
             },
         )
-    elif role == 'developer':
+    elif role is RuntimeRole.DEVELOPER:
         permissions.update(
             read='allow',
             glob='allow',
@@ -135,6 +143,9 @@ def isolated_environment(
             RUFF_CACHE_DIR=str(scratch / 'ruff-cache'),
             PYTHONDONTWRITEBYTECODE='1',
         )
+    elif role is RuntimeRole.ISSUE_REVIEWER:
+        # Issue review uses the default-deny tool policy.
+        pass
     if external_read_paths:
         permissions['external_directory'] = {
             '*': 'deny',

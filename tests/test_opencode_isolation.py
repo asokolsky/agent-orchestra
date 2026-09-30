@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import cast
 
 import pytest
 
@@ -19,6 +19,7 @@ from agent_orchestra.adapter.opencode_isolation import (
     require_opencode,
     sandbox_command,
 )
+from agent_orchestra.adapter.registry import RuntimeRole
 
 
 def test_isolated_environment_hides_inherited_configuration(
@@ -54,15 +55,41 @@ def test_isolated_environment_hides_inherited_configuration(
     assert 'AGENT_ORCHESTRA_RUNTIME_METADATA_PATH' not in environment
 
 
+def test_isolated_environment_rejects_unknown_role_before_writing(
+    tmp_path: Path,
+) -> None:
+    """Reject an unrecognized role before preparing its scratch environment."""
+
+    scratch = tmp_path / 'scratch'
+    worktree = tmp_path / 'worktree'
+    with pytest.raises(OpenCodeIsolationError, match='unsupported OpenCode role'):
+        isolated_environment(
+            scratch,
+            worktree,
+            cast('RuntimeRole', 'other'),
+        )
+    assert not scratch.exists()
+
+
+def test_issue_reviewer_keeps_default_deny_permissions(tmp_path: Path) -> None:
+    """Recognize issue review while denying optional tools and skills."""
+
+    environment = isolated_environment(
+        tmp_path / 'scratch', tmp_path / 'worktree', RuntimeRole.ISSUE_REVIEWER
+    )
+    permissions = json.loads(environment['OPENCODE_CONFIG_CONTENT'])['permission']
+    assert permissions == {'*': 'deny'}
+
+
 @pytest.mark.parametrize(
     ('role', 'skill_name'),
     [
-        ('reviewer', 'agent-orchestra-reviewer'),
-        ('developer', 'agent-orchestra-developer'),
+        (RuntimeRole.REVIEWER, 'agent-orchestra-reviewer'),
+        (RuntimeRole.DEVELOPER, 'agent-orchestra-developer'),
     ],
 )
 def test_role_permissions_allow_only_the_staged_skill(
-    tmp_path: Path, role: Literal['reviewer', 'developer'], skill_name: str
+    tmp_path: Path, role: RuntimeRole, skill_name: str
 ) -> None:
     """A role can load its own skill while unrelated skills remain denied."""
 
@@ -76,7 +103,7 @@ def test_role_permissions_allow_only_the_staged_skill(
         worktree,
         role,
         external_read_paths=(review,),
-        review_base_sha=base_sha if role == 'reviewer' else None,
+        review_base_sha=base_sha if role is RuntimeRole.REVIEWER else None,
     )
     permission = json.loads(environment['OPENCODE_CONFIG_CONTENT'])['permission']
 
@@ -85,7 +112,7 @@ def test_role_permissions_allow_only_the_staged_skill(
         '*': 'deny',
         str(review): 'allow',
     }
-    if role == 'reviewer':
+    if role is RuntimeRole.REVIEWER:
         assert permission['bash'] == {
             '*': 'deny',
             'git status --short': 'allow',
@@ -260,7 +287,9 @@ def test_live_opencode_ignores_project_agent_and_denies_tools(tmp_path: Path) ->
         text=True,
         timeout=20,
         cwd=repo,
-        env=isolated_environment(scratch, repo, 'reviewer', review_base_sha='a' * 40),
+        env=isolated_environment(
+            scratch, repo, RuntimeRole.REVIEWER, review_base_sha='a' * 40
+        ),
     )
 
     assert result.returncode == 0
@@ -287,7 +316,9 @@ def test_live_opencode_ignores_project_agent_and_denies_tools(tmp_path: Path) ->
         text=True,
         timeout=20,
         cwd=repo,
-        env=isolated_environment(scratch, repo, 'reviewer', review_base_sha='a' * 40),
+        env=isolated_environment(
+            scratch, repo, RuntimeRole.REVIEWER, review_base_sha='a' * 40
+        ),
     )
     assert skills.returncode == 0
     assert 'agent-orchestra-reviewer' in skills.stdout

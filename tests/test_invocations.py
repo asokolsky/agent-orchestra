@@ -683,6 +683,19 @@ def test_recovery_boundaries_select_deterministic_actions(
     )
 
 
+def test_recovery_rejects_issue_reviewer_role() -> None:
+    """Do not infer a source-review state for an issue-review attempt."""
+
+    record = replace(
+        pending_attempt(),
+        role=RuntimeRole.ISSUE_REVIEWER,
+        task_id='run:000001-issue_reviewer',
+        invocation_id='run:000001-issue_reviewer:attempt-0001',
+    )
+    with pytest.raises(InvocationEvidenceError, match='unsupported recovery role'):
+        recovery_action(record, workflow_state=RunState.DEVELOPING)
+
+
 def test_legacy_invocation_schema_is_unreadable(tmp_path: Path) -> None:
     """Reject schemas one through three instead of guessing lifecycle fields."""
 

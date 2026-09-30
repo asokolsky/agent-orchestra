@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from uuid import uuid4
 
 from agent_orchestra.adapter.base import (
@@ -40,6 +40,7 @@ from agent_orchestra.adapter.opencode_isolation import (
     sandbox_command,
 )
 from agent_orchestra.adapter.process import run_streaming_process
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.evidence import JobEvidence
 from agent_orchestra.manifests import adapter_arguments
 from agent_orchestra.models import Finding, Review, Severity, Verdict
@@ -95,7 +96,7 @@ def _stage_skill(name: str, scratch: Path) -> None:
 
 
 def _run(
-    role: Literal['reviewer', 'developer', 'issue_reviewer'],
+    role: RuntimeRole,
     prompt: str,
     directory: Path,
     timeout: int,
@@ -129,7 +130,7 @@ def _run(
         *sandbox_command(
             executable,
             scratch,
-            writable_worktree=directory if role == 'developer' else None,
+            writable_worktree=directory if role is RuntimeRole.DEVELOPER else None,
         ),
         *adapter_arguments('opencode', role),
     ]
@@ -280,7 +281,7 @@ class OpenCodeReviewerAdapter(ReviewerAdapter):
                 + json.dumps(request, indent=2)
             )
             result, _, _, _, _ = _run(
-                'reviewer',
+                RuntimeRole.REVIEWER,
                 prompt,
                 directory,
                 max(1, timeout - 5),
@@ -365,7 +366,7 @@ class OpenCodeDeveloperAdapter(DeveloperAdapter):
             scratch = Path(name).resolve()
             _stage_skill('agent-orchestra-developer', scratch)
             result, _, _, _, _ = _run(
-                'developer',
+                RuntimeRole.DEVELOPER,
                 developer_prompt(request, 'the agent-orchestra-developer skill')
                 + '\nResult JSON Schema:\n'
                 + json.dumps(DEVELOPER_RESULT_SCHEMA, indent=2)
@@ -401,7 +402,7 @@ class OpenCodeIssueReviewerAdapter(IssueReviewerAdapter):
             directory.mkdir()
             try:
                 result, stdout, stderr, models, usage = _run(
-                    'issue_reviewer',
+                    RuntimeRole.ISSUE_REVIEWER,
                     issue_review_prompt(request)
                     + '\nResult JSON Schema:\n'
                     + json.dumps(ISSUE_REVIEW_RESULT_SCHEMA, indent=2),
@@ -453,21 +454,28 @@ def main(argv: list[str] | None = None) -> int:
     """Dispatch one command-line reviewer or developer role adapter."""
 
     parser = argparse.ArgumentParser(prog='agent-orchestra-opencode-reviewer')
-    parser.add_argument('--role', choices=('reviewer', 'developer'), default='reviewer')
+    parser.add_argument(
+        '--role',
+        type=RuntimeRole,
+        choices=tuple(RuntimeRole),
+        default=RuntimeRole.REVIEWER,
+    )
     parser.add_argument('--model')
     parser.add_argument('--effort')
     parser.add_argument('request', type=Path)
     parser.add_argument('response', type=Path)
     parsed = parser.parse_args(argv)
     try:
-        if parsed.role == 'reviewer':
+        if parsed.role is RuntimeRole.REVIEWER:
             OpenCodeReviewerAdapter(parsed.model, parsed.effort).execute(
                 parsed.request, parsed.response
             )
-        else:
+        elif parsed.role is RuntimeRole.DEVELOPER:
             OpenCodeDeveloperAdapter(parsed.model, parsed.effort).execute(
                 parsed.request, parsed.response
             )
+        else:
+            parser.error(f'unsupported adapter role: {parsed.role}')
     except (AdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         if isinstance(error, AdapterError) and error.timed_out:

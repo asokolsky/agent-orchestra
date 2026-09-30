@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from agent_orchestra.adapter import claude_code, codex
+from agent_orchestra.adapter import claude_code, codex, opencode
 from agent_orchestra.adapter.claude_code import ClaudeCodeReviewerAdapter
 from agent_orchestra.adapter.codex import CodexReviewerAdapter
 from agent_orchestra.adapter.errors import AdapterError
@@ -67,6 +69,51 @@ def test_adapter_entry_point_passes_effort_to_selected_role(
         == 0
     )
     assert observed == {'model': 'selected-model', 'effort': 'high'}
+
+
+@pytest.mark.parametrize('main', [claude_code.main, codex.main, opencode.main])
+def test_adapter_entry_point_rejects_unrecognized_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    main: Callable[[list[str] | None], int],
+) -> None:
+    """Never dispatch an unrecognized parsed role as a developer."""
+
+    parsed = argparse.Namespace(
+        role='unknown',
+        model=None,
+        effort=None,
+        request=tmp_path / 'request.json',
+        response=tmp_path / 'response.json',
+    )
+    monkeypatch.setattr(argparse.ArgumentParser, 'parse_args', lambda *_: parsed)
+
+    with pytest.raises(SystemExit) as error:
+        main([])
+    assert error.value.code == 2
+    assert 'unsupported adapter role: unknown' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('main', [claude_code.main, codex.main, opencode.main])
+def test_adapter_entry_point_rejects_known_unsupported_role(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    main: Callable[[list[str] | None], int],
+) -> None:
+    """A registered role without this entry point's protocol fails explicitly."""
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                '--role',
+                'issue_reviewer',
+                str(tmp_path / 'request.json'),
+                str(tmp_path / 'response.json'),
+            ]
+        )
+    assert error.value.code == 2
+    assert 'unsupported adapter role: issue_reviewer' in capsys.readouterr().err
 
 
 def run_codex_reviewer(

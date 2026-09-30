@@ -317,7 +317,7 @@ def transition_attempt(
     """Return an attempt advanced through one valid durable transition."""
 
     validate_attempt_record(record)
-    current = AttemptStatus(record.status)
+    current = record.status
     if status not in ATTEMPT_TRANSITIONS.get(current, frozenset()):
         _fail(f'invalid attempt transition from {current} to {status}')
     if status is AttemptStatus.COMPLETED and conclusion is None:
@@ -574,7 +574,7 @@ def validate_attempt_record(record: InvocationRecord) -> None:
         _fail('effective_model_status contradicts effective_models')
     if record.iteration < 1 or record.attempt < 1:
         _fail('iteration and attempt must be positive')
-    terminal = record.status == 'completed'
+    terminal = record.status is AttemptStatus.COMPLETED
     if terminal != (record.conclusion is not None):
         _fail('invalid attempt status and conclusion')
     if record.reviewer_id is not None:
@@ -593,7 +593,7 @@ def validate_attempt_record(record: InvocationRecord) -> None:
     expected_invocation_id = f'{record.task_id}:attempt-{record.attempt:04d}'
     if record.invocation_id != expected_invocation_id:
         _fail('invocation_id does not match task and attempt')
-    if record.status == 'pending' and (
+    if record.status is AttemptStatus.PENDING and (
         record.finished_at is not None
         or record.exit_code is not None
         or record.response_received_at is not None
@@ -688,12 +688,15 @@ def recovery_action(
     if record is None:
         return RecoveryAction.LAUNCH
     validate_attempt_record(record)
-    if record.status == 'pending':
+    if record.role not in {RuntimeRole.REVIEWER, RuntimeRole.DEVELOPER}:
+        _fail(f'unsupported recovery role: {record.role}')
+    if record.status is AttemptStatus.PENDING:
         action = RecoveryAction.FAIL_ACTIVATION_UNCERTAIN
-    elif record.status == 'completed':
-        active_state = (
-            RunState.REVIEWING if record.role == 'reviewer' else RunState.DEVELOPING
-        )
+    elif record.status is AttemptStatus.COMPLETED:
+        active_state = {
+            RuntimeRole.REVIEWER: RunState.REVIEWING,
+            RuntimeRole.DEVELOPER: RunState.DEVELOPING,
+        }[record.role]
         action = (
             RecoveryAction.NONE
             if workflow_state is not active_state
@@ -761,7 +764,7 @@ def _validated_document(
     if record.schema_version < 7:
         document.pop('requested_effort')
     new_record = not path.exists()
-    if new_record and record.status != 'pending':
+    if new_record and record.status is not AttemptStatus.PENDING:
         _fail('new attempt must start pending')
     if not new_record and path.is_file():
         try:
@@ -788,9 +791,9 @@ def _validated_document(
             _fail(f'invalid existing invocation record {path.name}')
         try:
             existing_status = AttemptStatus(existing_status_value)
-            new_status = AttemptStatus(record.status)
         except ValueError as error:
             _fail(f'invalid existing invocation record {path.name}', error)
+        new_status = record.status
         if (
             existing_status is AttemptStatus.PENDING
             and new_status is AttemptStatus.PENDING
@@ -996,7 +999,8 @@ class InvocationEvidenceStore:
                 record.iteration < 1
                 or record.attempt < 1
                 or not record.task_id
-                or (record.status == 'completed') != (record.conclusion is not None)
+                or (record.status is AttemptStatus.COMPLETED)
+                != (record.conclusion is not None)
                 or (
                     record.effective_model_status == 'reported'
                     and not record.effective_models
@@ -1024,7 +1028,7 @@ class InvocationEvidenceStore:
 
         records = self.read_all(run_id)
         for record in records:
-            if record.status != 'completed':
+            if record.status is not AttemptStatus.COMPLETED:
                 continue
             task_stem = record.task_id.rsplit(':', 1)[-1]
             if record.role == 'issue_reviewer':
@@ -1101,7 +1105,7 @@ def persist_attempt_record(path: Path, record: InvocationRecord) -> None:
     try:
         job_directory = path.parent.parent
         InvocationEvidenceStore(job_directory).write(path, record)
-        if record.status == 'completed':
+        if record.status is AttemptStatus.COMPLETED:
             record_finalized_path(Path(record.stdout_path), 'process_stdout')
             record_finalized_path(Path(record.stderr_path), 'process_stderr')
     except InvocationEvidenceError as error:
@@ -1194,7 +1198,7 @@ def attempt_activation_was_persisted(
     return (
         latest is not None
         and latest.attempt == attempt
-        and latest.status == AttemptStatus.RUNNING.value
+        and latest.status is AttemptStatus.RUNNING
     )
 
 

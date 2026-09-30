@@ -34,6 +34,7 @@ from agent_orchestra.adapter.issue_reviewer import (
     issue_review_prompt,
 )
 from agent_orchestra.adapter.process import run_streaming_process
+from agent_orchestra.adapter.registry import RuntimeRole
 from agent_orchestra.evidence import (
     EvidenceType,
     JobEvidence,
@@ -747,21 +748,28 @@ def main(argv: list[str] | None = None) -> int:
     """Run a Claude Code role adapter."""
 
     parser = argparse.ArgumentParser(prog='agent-orchestra-claude-code-reviewer')
-    parser.add_argument('--role', choices=('reviewer', 'developer'), default='reviewer')
+    parser.add_argument(
+        '--role',
+        type=RuntimeRole,
+        choices=tuple(RuntimeRole),
+        default=RuntimeRole.REVIEWER,
+    )
     parser.add_argument('--model')
     parser.add_argument('--effort')
     parser.add_argument('request', type=Path)
     parser.add_argument('response', type=Path)
     parsed = parser.parse_args(argv)
     try:
-        if parsed.role == 'reviewer':
+        if parsed.role is RuntimeRole.REVIEWER:
             ClaudeCodeReviewerAdapter(parsed.model, parsed.effort).execute(
                 parsed.request, parsed.response
             )
-        else:
+        elif parsed.role is RuntimeRole.DEVELOPER:
             ClaudeCodeDeveloperAdapter(parsed.model, parsed.effort).execute(
                 parsed.request, parsed.response
             )
+        else:
+            parser.error(f'unsupported adapter role: {parsed.role}')
     except (AdapterError, OSError) as error:
         print(f'error: {error}', file=sys.stderr)
         if isinstance(error, AdapterError) and error.timed_out:

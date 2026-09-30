@@ -12,6 +12,7 @@ from agent_orchestra.adapter import opencode
 from agent_orchestra.adapter.issue_reviewer import IssueReviewerError
 from agent_orchestra.adapter.opencode import OpenCodeAdapterError
 from agent_orchestra.adapter.opencode_isolation import OpenCodeIsolationError
+from agent_orchestra.adapter.registry import RuntimeRole
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,7 +63,7 @@ def test_opencode_run_consumes_complete_jsonl(
     directory.mkdir()
 
     value, stdout, stderr, models, usage = opencode._run(
-        'issue_reviewer',
+        RuntimeRole.ISSUE_REVIEWER,
         'return JSON',
         directory,
         5,
@@ -168,7 +169,7 @@ def test_opencode_run_rejects_failed_or_partial_output(
 
     with pytest.raises(OpenCodeAdapterError) as raised:
         opencode._run(
-            'issue_reviewer',
+            RuntimeRole.ISSUE_REVIEWER,
             'return JSON',
             directory,
             5,

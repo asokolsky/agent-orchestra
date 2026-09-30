@@ -524,6 +524,8 @@ def _resume_active_attempt(
 ) -> Run:
     """Recover an active workflow state from its latest durable task evidence."""
 
+    if run.state not in {RunState.REVIEWING, RunState.DEVELOPING}:
+        raise WorkerError(f'unsupported active recovery state: {run.state}')
     expected_type = (
         'review_request' if run.state is RunState.REVIEWING else 'remediation_request'
     )
