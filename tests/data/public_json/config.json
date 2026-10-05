@@ -1,0 +1,37 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "config_file": "/ROOT/config/agent-orchestra/config.toml",
+  "settings": {
+    "storage.database": {
+      "value": "/ROOT/state.db",
+      "source": "command_line"
+    },
+    "storage.runs_directory": {
+      "value": "/ROOT/runs",
+      "source": "command_line"
+    },
+    "retention.job_evidence_days": {
+      "value": 90,
+      "source": "built_in"
+    },
+    "defaults.developer_runtime": {
+      "value": "codex",
+      "source": "built_in"
+    },
+    "defaults.reviewer_runtime": {
+      "value": "codex",
+      "source": "built_in"
+    },
+    "runtimes": {
+      "value": {},
+      "source": "built_in"
+    },
+    "reviewer_sets": {
+      "value": [],
+      "source": "built_in",
+      "status": "full_workflow"
+    }
+  },
+  "error": null
+}

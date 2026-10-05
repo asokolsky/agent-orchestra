@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -43,6 +43,11 @@ from agent_orchestra.models import (
     Run,
     RunState,
 )
+from agent_orchestra.public_documents import (
+    evidence_document,
+    history_document,
+    retention_policy_document,
+)
 from agent_orchestra.schemas import (
     EXECUTION_RECORD_ADAPTER,
     REVIEWER_BATCH_RESULT_ADAPTER,
@@ -75,6 +80,16 @@ class AuditFinding:
     code: str
     message: str
     path: str | None = None
+
+
+def _finding_document(finding: AuditFinding) -> dict[str, object]:
+    """Publish only the declared audit finding fields."""
+
+    return {
+        'code': finding.code,
+        'message': finding.message,
+        'path': finding.path,
+    }
 
 
 def _timestamp(value: datetime) -> str:
@@ -333,7 +348,7 @@ def _verify_entry(
     """Verify one indexed file by contained byte size and SHA-256 digest."""
 
     relative = str(entry['path'])
-    document = dict(entry)
+    document = evidence_document(entry, status='not_verified')
     try:
         path = resolve_evidence_path(root, job_id, *Path(relative).parts)
     except (EvidencePathError, ValueError) as error:
@@ -751,18 +766,12 @@ def _validate_canonical_json(
                     )
                 )
         history.append(
-            {
-                'path': relative,
-                'evidence_type': evidence_type,
-                'iteration': document.get('iteration', path_iteration),
-                'message_id': document.get('message_id'),
-                'verdict': document.get('verdict')
-                or (document.get('payload') or {}).get('verdict'),
-                'findings': document.get('findings')
-                or (document.get('payload') or {}).get('findings', []),
-                'dispositions': (document.get('payload') or {}).get('dispositions', []),
-                'validation': (document.get('payload') or {}).get('validation', []),
-            }
+            history_document(
+                document,
+                path=relative,
+                evidence_type=evidence_type,
+                iteration=path_iteration,
+            )
         )
     if isinstance(job, Run) and reviewer_plan is not None:
         for relative, remediation in canonical_documents.items():
@@ -1229,7 +1238,7 @@ def build_audit_document(
             'operations': _derived_operations(transitions),
             'tasks': [],
             'evidence': [
-                {**entry, 'status': 'in_progress'}
+                evidence_document(entry, status='in_progress')
                 for entry in cast('list[object]', retention['evidence'])
                 if isinstance(entry, dict)
             ],
@@ -1237,11 +1246,13 @@ def build_audit_document(
                 'schema_version': 1,
                 'backfilled_at': None,
                 'expired_at': None,
-                'policy': retention['policy'],
+                'policy': retention_policy_document(
+                    cast('dict[str, object]', retention['policy'])
+                ),
             },
             'history': [],
             'provider_actions': [_action_document(item) for item in actions],
-            'findings': [asdict(item) for item in findings],
+            'findings': [_finding_document(item) for item in findings],
             'error': None,
         }
         if verify:
@@ -1271,7 +1282,7 @@ def build_audit_document(
             )
         )
         expired_evidence = [
-            {**entry, 'status': 'expired'}
+            evidence_document(entry, status='expired')
             for entry in cast('list[object]', retention['evidence'])
             if isinstance(entry, dict)
         ]
@@ -1286,11 +1297,13 @@ def build_audit_document(
                 'schema_version': 1,
                 'backfilled_at': None,
                 'expired_at': retention['expired_at'],
-                'policy': retention['policy'],
+                'policy': retention_policy_document(
+                    cast('dict[str, object]', retention['policy'])
+                ),
             },
             'history': [],
             'provider_actions': [_action_document(item) for item in actions],
-            'findings': [asdict(item) for item in findings],
+            'findings': [_finding_document(item) for item in findings],
             'error': None,
         }
         if verify:
@@ -1308,7 +1321,7 @@ def build_audit_document(
             if finding is not None:
                 findings.append(finding)
         else:
-            evidence.append({**entry, 'status': 'not_verified'})
+            evidence.append(evidence_document(entry, status='not_verified'))
     tasks, in_progress, task_findings = _tasks(root, job_id)
     findings.extend(task_findings)
     evidence.extend(in_progress)
@@ -1355,7 +1368,7 @@ def build_audit_document(
         'integrity': {'schema_version': 1, 'backfilled_at': backfilled_at},
         'history': history,
         'provider_actions': [_action_document(item) for item in actions],
-        'findings': [asdict(item) for item in findings],
+        'findings': [_finding_document(item) for item in findings],
         'error': None,
     }
     if verify:

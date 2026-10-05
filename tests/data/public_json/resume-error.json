@@ -1,0 +1,10 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "job_id": "missing",
+  "state": null,
+  "error": {
+    "code": "job_not_found",
+    "message": "job not found: missing"
+  }
+}

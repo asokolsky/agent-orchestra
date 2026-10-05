@@ -1,0 +1,52 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "database": "/ROOT/state.db",
+  "runs_directory": "/ROOT/runs",
+  "older_than_days": 90,
+  "mode": "dry_run",
+  "database_cleanup": false,
+  "selected": [],
+  "skipped": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "category": "job",
+      "state": "queued",
+      "age_days": null,
+      "terminal_at": null,
+      "evidence_path": "/ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa",
+      "bytes": 0,
+      "database_records": {
+        "jobs": 1,
+        "transitions": 1,
+        "provider_actions": 0
+      },
+      "action": "expire_evidence",
+      "reason": "invalid evidence identity: /ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa"
+    },
+    {
+      "job_id": "20261001T000000Z-bbbbbbbb",
+      "category": "job",
+      "state": "queued",
+      "age_days": null,
+      "terminal_at": null,
+      "evidence_path": "/ROOT/runs/2026/10/01/20261001T000000Z-bbbbbbbb",
+      "bytes": 0,
+      "database_records": {
+        "jobs": 1,
+        "transitions": 1,
+        "provider_actions": 0
+      },
+      "action": "expire_evidence",
+      "reason": "invalid evidence identity: /ROOT/runs/2026/10/01/20261001T000000Z-bbbbbbbb"
+    }
+  ],
+  "orphans": [],
+  "orphan_count": 0,
+  "invalid_paths": [
+    "/ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa",
+    "/ROOT/runs/2026/10/01/20261001T000000Z-bbbbbbbb"
+  ],
+  "outcomes": [],
+  "error": null
+}

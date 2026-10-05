@@ -629,6 +629,37 @@ document reports `AUDIT_SCHEMA_VERSION`; neither carries a literal of its own.
 The prune document did, and sat nine versions behind the rest of the CLI until a
 test asserted the property across commands.
 
+Public serializers name the fields they publish. Adding an internal record
+field therefore does not add it to CLI output. The attempt projections state
+their different field sets together in `attempt_documents.py`; usage counters,
+audit findings, and retention items also have explicit serializers.
+`public_documents.py` projects validated evidence into public reviewer batches,
+review results, audit history, and evidence entries, including their nested
+findings, dispositions, and validation outcomes. Persisted Pydantic models still
+validate canonical evidence; their fields do not automatically become public
+fields when a CLI command reports that evidence.
+
+You can check the public shapes with
+`mise exec -- uv run pytest -p no:xdist tests/test_public_json_contract.py`.
+The tests enumerate the JSON commands in `docs/cli.md` and compare fixture-built
+documents with the JSON files in `tests/data/public_json/`. Populated cases cover:
+
+- Reviewer identities, per-reviewer results, aggregate batches, and findings.
+- Audit history with developer dispositions and validation outcomes, and
+  statistics grouped by runtime.
+- Retention selections, skipped items, orphans, and apply outcomes.
+- Bulk enqueue successes and failures, and configured runtime and reviewer sets.
+
+When you intentionally change a public shape, update its serializer, the CLI
+reference, and the relevant golden files together. Apply the version policy
+above: a breaking public change advances the document's schema version; an
+additive change does not. Tests compare exact fields even for additive changes,
+so a new published field still needs an explicit fixture update. They normalize
+temporary root paths and generated UUIDs, and the size, digest, and finalization
+time of audit evidence entries; other public fields and values remain compared.
+The source distribution includes the golden files and CLI reference so you can
+run these tests from the unpacked archive too.
+
 Schema version history. Every version through 22 was assigned under the earlier
 policy of advancing for any change to a public document, so the entries below
 are not examples of the rule above; most would not have advanced the version

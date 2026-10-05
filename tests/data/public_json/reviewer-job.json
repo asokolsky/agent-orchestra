@@ -1,0 +1,78 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "job": {
+    "job_id": "20261001T000000Z-aaaaaaaa",
+    "scenario": "local_changes",
+    "repository_path": "/ROOT/worktree",
+    "worktree_path": "/ROOT/worktree",
+    "worktree_status": "not_git_worktree",
+    "state": "changes_requested",
+    "base_sha": "HEAD",
+    "head_sha": "HEAD",
+    "diff_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "iteration": 1,
+    "remote_url": null,
+    "supersedes_job_id": null,
+    "created_at": "2026-10-01T00:00:00Z",
+    "updated_at": "2026-10-01T00:00:00Z",
+    "review_batches": [
+      {
+        "schema_version": 3,
+        "iteration": 1,
+        "reviewer_set_id": "default",
+        "aggregation_policy": "all_required",
+        "diff_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "verdict": "changes_requested",
+        "reviewers": [
+          {
+            "reviewer_id": "security",
+            "outcome": "changes_requested",
+            "result_path": "messages/000002-security-review-result.json"
+          },
+          {
+            "reviewer_id": "portability",
+            "outcome": "changes_requested",
+            "result_path": "messages/000002-portability-review-result.json"
+          }
+        ],
+        "changes_requested_by": [
+          "security",
+          "portability"
+        ],
+        "blocked_by": [],
+        "incomplete_reviewers": [],
+        "findings": [
+          {
+            "finding_id": "security:finding-1",
+            "severity": "medium",
+            "title": "Cross-cutting finding",
+            "path": null,
+            "line": null,
+            "explanation": "The finding spans multiple files.",
+            "acceptance_criterion": "Address the shared behavior.",
+            "reviewer_id": "security",
+            "source_finding_id": "finding-1"
+          },
+          {
+            "finding_id": "portability:finding-1",
+            "severity": "medium",
+            "title": "Cross-cutting finding",
+            "path": null,
+            "line": null,
+            "explanation": "The finding spans multiple files.",
+            "acceptance_criterion": "Address the shared behavior.",
+            "reviewer_id": "portability",
+            "source_finding_id": "finding-1"
+          }
+        ],
+        "message_id": "<uuid>",
+        "artifact_path": "artifacts/review-batch-0001.md",
+        "job_id": "20261001T000000Z-aaaaaaaa",
+        "path": "review-batches/000001.json"
+      }
+    ],
+    "current": []
+  },
+  "error": null
+}

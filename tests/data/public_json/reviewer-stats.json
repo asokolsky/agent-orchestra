@@ -1,0 +1,90 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "window": {
+    "since": "30d",
+    "start": "2026-09-02T00:00:00Z",
+    "end": "2026-10-02T00:00:00Z",
+    "timezone": "UTC"
+  },
+  "jobs_total": 1,
+  "jobs": {
+    "approved": 0,
+    "changes_requested": 1,
+    "blocked": 0
+  },
+  "reviews": {
+    "approved": 0,
+    "changes_requested": 1,
+    "blocked": 0
+  },
+  "findings": {
+    "raised": 2,
+    "addressed": 0,
+    "rejected": 0,
+    "blocked": 0
+  },
+  "runtimes": {
+    "reviewers": {
+      "available": {
+        "claude-code": {
+          "reviews": {
+            "approved": 0,
+            "changes_requested": 1,
+            "blocked": 0
+          },
+          "findings": {
+            "raised": 1,
+            "addressed": 0,
+            "rejected": 0,
+            "blocked": 0
+          }
+        },
+        "codex": {
+          "reviews": {
+            "approved": 0,
+            "changes_requested": 1,
+            "blocked": 0
+          },
+          "findings": {
+            "raised": 1,
+            "addressed": 0,
+            "rejected": 0,
+            "blocked": 0
+          }
+        }
+      },
+      "unavailable": {
+        "reviews": {
+          "approved": 0,
+          "changes_requested": 0,
+          "blocked": 0
+        },
+        "findings": {
+          "raised": 0,
+          "addressed": 0,
+          "rejected": 0,
+          "blocked": 0
+        }
+      }
+    },
+    "jobs": {
+      "same_runtime": 0,
+      "cross_runtime": 0,
+      "unavailable": 1
+    },
+    "job_ids": {
+      "same_runtime": [],
+      "cross_runtime": [],
+      "unavailable": [
+        "20261001T000000Z-aaaaaaaa"
+      ]
+    }
+  },
+  "unavailable": {
+    "count": 0,
+    "job_ids": [],
+    "reasons": {}
+  },
+  "error": null
+}

@@ -1,0 +1,54 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "job_id": "20261001T000000Z-aaaaaaaa",
+  "provider_actions": [],
+  "tasks": [
+    {
+      "task_id": "20261001T000000Z-aaaaaaaa:000001-developer",
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "role": "developer",
+      "iteration": 1,
+      "status": "completed",
+      "conclusion": "succeeded",
+      "attempt": 1,
+      "attempts": [
+        {
+          "attempt_id": "20261001T000000Z-aaaaaaaa:000001-developer:attempt-0001",
+          "attempt": 1,
+          "status": "completed",
+          "conclusion": "succeeded",
+          "agent_vendor": "openai",
+          "requested_model": "gpt-test",
+          "effective_models": [
+            "gpt-effective"
+          ],
+          "effective_model_status": "reported",
+          "runtime": "codex",
+          "started_at": "2026-09-07T10:00:00Z",
+          "finished_at": "2026-09-07T10:01:00Z",
+          "response_received_at": "2026-09-07T10:01:00Z",
+          "validation_started_at": "2026-09-07T10:01:00Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "interrupted": false,
+          "legacy": false,
+          "streams": {
+            "stdout": {
+              "path": "/ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa/logs/000001-developer-0001.stdout.log",
+              "available": true,
+              "content": "child stdout\n"
+            },
+            "stderr": {
+              "path": "/ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa/logs/000001-developer-0001.stderr.log",
+              "available": true,
+              "content": "child stderr\n"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "review_batches": [],
+  "error": null
+}

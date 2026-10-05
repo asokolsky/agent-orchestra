@@ -1,0 +1,61 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "window": {
+    "since": "7d",
+    "start": "2026-09-24T00:00:00Z",
+    "end": "2026-10-01T00:00:00Z",
+    "timezone": "UTC"
+  },
+  "jobs_total": 0,
+  "jobs": {
+    "approved": 0,
+    "changes_requested": 0,
+    "blocked": 0
+  },
+  "reviews": {
+    "approved": 0,
+    "changes_requested": 0,
+    "blocked": 0
+  },
+  "findings": {
+    "raised": 0,
+    "addressed": 0,
+    "rejected": 0,
+    "blocked": 0
+  },
+  "runtimes": {
+    "reviewers": {
+      "available": {},
+      "unavailable": {
+        "reviews": {
+          "approved": 0,
+          "changes_requested": 0,
+          "blocked": 0
+        },
+        "findings": {
+          "raised": 0,
+          "addressed": 0,
+          "rejected": 0,
+          "blocked": 0
+        }
+      }
+    },
+    "jobs": {
+      "same_runtime": 0,
+      "cross_runtime": 0,
+      "unavailable": 0
+    },
+    "job_ids": {
+      "same_runtime": [],
+      "cross_runtime": [],
+      "unavailable": []
+    }
+  },
+  "unavailable": {
+    "count": 0,
+    "job_ids": [],
+    "reasons": {}
+  },
+  "error": null
+}

@@ -431,11 +431,25 @@ def usage_document(usage: RuntimeUsage) -> dict[str, object]:
     return {
         'schema_version': usage.schema_version,
         'turn_count': usage.turn_count,
-        'totals': asdict(usage.totals) if usage.totals is not None else None,
+        'totals': _usage_values_document(usage.totals)
+        if usage.totals is not None
+        else None,
         'models': [
-            {'model': item.model, 'values': asdict(item.values)}
+            {'model': item.model, 'values': _usage_values_document(item.values)}
             for item in usage.models
         ],
+    }
+
+
+def _usage_values_document(values: UsageValues) -> dict[str, int | float | None]:
+    """Publish only the supported usage counters and cost."""
+
+    return {
+        'input_tokens': values.input_tokens,
+        'output_tokens': values.output_tokens,
+        'cache_creation_input_tokens': values.cache_creation_input_tokens,
+        'cache_read_input_tokens': values.cache_read_input_tokens,
+        'total_cost_usd': values.total_cost_usd,
     }
 
 
