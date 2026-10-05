@@ -1,0 +1,127 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "task": {
+    "task_id": "20261001T000000Z-aaaaaaaa:000001-reviewer-security",
+    "job_id": "20261001T000000Z-aaaaaaaa",
+    "role": "reviewer",
+    "iteration": 1,
+    "status": "completed",
+    "conclusion": "succeeded",
+    "attempt": 1,
+    "attempts": [
+      {
+        "attempt_id": "20261001T000000Z-aaaaaaaa:000001-reviewer-security:attempt-0001",
+        "attempt": 1,
+        "status": "completed",
+        "conclusion": "succeeded",
+        "agent_vendor": "openai",
+        "requested_model": null,
+        "effective_models": [],
+        "effective_model_status": "unavailable",
+        "runtime": "codex",
+        "started_at": "2026-10-01T00:00:00Z",
+        "finished_at": "2026-10-01T00:00:00Z",
+        "response_received_at": "2026-10-01T00:00:00Z",
+        "validation_started_at": "2026-10-01T00:00:00Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "interrupted": false,
+        "legacy": false,
+        "streams": {
+          "stdout": {
+            "path": "/ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa/logs/000001-reviewer-security.attempt-0001.stdout.log",
+            "available": true,
+            "content": ""
+          },
+          "stderr": {
+            "path": "/ROOT/runs/2026/10/01/20261001T000000Z-aaaaaaaa/logs/000001-reviewer-security.attempt-0001.stderr.log",
+            "available": true,
+            "content": ""
+          }
+        },
+        "reviewer_id": "security"
+      }
+    ],
+    "reviewer_id": "security",
+    "review_result": {
+      "message_id": "<uuid>",
+      "path": "messages/000002-security-review-result.json",
+      "verdict": "changes_requested",
+      "summary": "changes requested",
+      "findings": [
+        {
+          "finding_id": "finding-1",
+          "severity": "medium",
+          "title": "Cross-cutting finding",
+          "path": null,
+          "line": null,
+          "explanation": "The finding spans multiple files.",
+          "acceptance_criterion": "Address the shared behavior."
+        }
+      ],
+      "validation": [
+        "mise run tests"
+      ],
+      "verification_gaps": [
+        "External service was unavailable."
+      ],
+      "artifact_path": "artifacts/review-0001-security.md"
+    },
+    "review_batch": {
+      "schema_version": 3,
+      "iteration": 1,
+      "reviewer_set_id": "default",
+      "aggregation_policy": "all_required",
+      "diff_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "verdict": "changes_requested",
+      "reviewers": [
+        {
+          "reviewer_id": "security",
+          "outcome": "changes_requested",
+          "result_path": "messages/000002-security-review-result.json"
+        },
+        {
+          "reviewer_id": "portability",
+          "outcome": "changes_requested",
+          "result_path": "messages/000002-portability-review-result.json"
+        }
+      ],
+      "changes_requested_by": [
+        "security",
+        "portability"
+      ],
+      "blocked_by": [],
+      "incomplete_reviewers": [],
+      "findings": [
+        {
+          "finding_id": "security:finding-1",
+          "severity": "medium",
+          "title": "Cross-cutting finding",
+          "path": null,
+          "line": null,
+          "explanation": "The finding spans multiple files.",
+          "acceptance_criterion": "Address the shared behavior.",
+          "reviewer_id": "security",
+          "source_finding_id": "finding-1"
+        },
+        {
+          "finding_id": "portability:finding-1",
+          "severity": "medium",
+          "title": "Cross-cutting finding",
+          "path": null,
+          "line": null,
+          "explanation": "The finding spans multiple files.",
+          "acceptance_criterion": "Address the shared behavior.",
+          "reviewer_id": "portability",
+          "source_finding_id": "finding-1"
+        }
+      ],
+      "message_id": "<uuid>",
+      "artifact_path": "artifacts/review-batch-0001.md",
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "path": "review-batches/000001.json"
+    }
+  },
+  "error": null
+}

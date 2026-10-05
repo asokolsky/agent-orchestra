@@ -1,0 +1,23 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "directory": "/ROOT",
+  "jobs": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "worktree_path": "/ROOT/changed"
+    }
+  ],
+  "summary": {
+    "enqueued": 1,
+    "clean": 1,
+    "failed": 1
+  },
+  "failures": [
+    {
+      "repository_path": "/ROOT/failed",
+      "message": "fixture inspection failure"
+    }
+  ],
+  "error": null
+}

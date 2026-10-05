@@ -1,0 +1,13 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "directory": "/ROOT/empty",
+  "jobs": [],
+  "summary": {
+    "enqueued": 0,
+    "clean": 0,
+    "failed": 0
+  },
+  "failures": [],
+  "error": null
+}

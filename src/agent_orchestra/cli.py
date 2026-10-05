@@ -73,6 +73,7 @@ from agent_orchestra.models import (
     RunState,
     utc_now,
 )
+from agent_orchestra.public_documents import batch_document, review_result_document
 from agent_orchestra.queued_review import (
     run_queued_review,
 )
@@ -985,7 +986,7 @@ def _review_batch_documents(
                 raise InvocationEvidenceError(
                     f'review batch evidence does not match job: {relative}'
                 )
-            document = parsed.model_dump(mode='json', exclude={'run_id'})
+            document = batch_document(parsed.model_dump(mode='json'))
             document['job_id'] = parsed.run_id
             document['path'] = relative
             documents.append(document)
@@ -1124,7 +1125,7 @@ def _review_result_documents(
                 documents[(iteration, reviewer_id)] = {
                     'message_id': result['message_id'],
                     'path': paths.result,
-                    **payload,
+                    **review_result_document(payload),
                 }
     except (AttributeError, KeyError, TypeError, ValueError, WorkerError) as error:
         raise InvocationEvidenceError(

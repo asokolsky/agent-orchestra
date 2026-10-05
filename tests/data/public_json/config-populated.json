@@ -1,0 +1,78 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "config_file": "/ROOT/config/agent-orchestra/config.toml",
+  "settings": {
+    "storage.database": {
+      "value": "/ROOT/state.db",
+      "source": "command_line"
+    },
+    "storage.runs_directory": {
+      "value": "/ROOT/runs",
+      "source": "command_line"
+    },
+    "retention.job_evidence_days": {
+      "value": 90,
+      "source": "built_in"
+    },
+    "defaults.developer_runtime": {
+      "value": "codex",
+      "source": "built_in"
+    },
+    "defaults.reviewer_runtime": {
+      "value": "codex",
+      "source": "built_in"
+    },
+    "runtimes": {
+      "value": {
+        "codex": {
+          "model": {
+            "value": "gpt-6-sol",
+            "source": "file"
+          },
+          "effort": {
+            "value": "medium",
+            "source": "file"
+          }
+        },
+        "claude-code": {
+          "model": {
+            "value": "claude-opus-5-5",
+            "source": "file"
+          },
+          "effort": {
+            "value": "high",
+            "source": "file"
+          }
+        }
+      },
+      "source": "file"
+    },
+    "reviewer_sets": {
+      "value": [
+        {
+          "id": "default",
+          "members": [
+            {
+              "id": "security",
+              "runtime": "codex",
+              "vendor": "openai",
+              "model": "gpt-6-sol",
+              "required": true
+            },
+            {
+              "id": "portability",
+              "runtime": "claude-code",
+              "vendor": "anthropic",
+              "model": "claude-opus-5-5",
+              "required": true
+            }
+          ]
+        }
+      ],
+      "source": "file",
+      "status": "full_workflow"
+    }
+  },
+  "error": null
+}

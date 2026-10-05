@@ -1,0 +1,76 @@
+{
+  "database": "/ROOT/state.db",
+  "runs_directory": "/ROOT/runs",
+  "older_than_days": 90,
+  "mode": "apply",
+  "database_cleanup": false,
+  "selected": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "category": "job",
+      "state": "failed",
+      "age_days": 100,
+      "terminal_at": "2026-06-23T00:00:00Z",
+      "evidence_path": "/ROOT/runs/20261001T000000Z-aaaaaaaa",
+      "bytes": 42,
+      "database_records": {
+        "jobs": 1,
+        "transitions": 2,
+        "provider_actions": 0
+      },
+      "action": "expire_evidence",
+      "reason": "eligible"
+    }
+  ],
+  "skipped": [
+    {
+      "job_id": "20261001T000000Z-bbbbbbbb",
+      "category": "job",
+      "state": "queued",
+      "age_days": null,
+      "terminal_at": null,
+      "evidence_path": "/ROOT/runs/20261001T000000Z-bbbbbbbb",
+      "bytes": 42,
+      "database_records": {
+        "jobs": 1,
+        "transitions": 2,
+        "provider_actions": 0
+      },
+      "action": "expire_evidence",
+      "reason": "state_not_eligible"
+    }
+  ],
+  "orphans": [
+    {
+      "job_id": "20260623T000000Z-cccccccc",
+      "category": "orphan",
+      "state": null,
+      "age_days": 100,
+      "terminal_at": "2026-06-23T00:00:00Z",
+      "evidence_path": "/ROOT/runs/20260623T000000Z-cccccccc",
+      "bytes": 42,
+      "database_records": {
+        "jobs": 0,
+        "transitions": 0,
+        "provider_actions": 0
+      },
+      "action": "delete_orphan",
+      "reason": "orphan_evidence"
+    }
+  ],
+  "orphan_count": 1,
+  "invalid_paths": [
+    "/ROOT/runs/invalid"
+  ],
+  "outcomes": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "status": "applied"
+    },
+    {
+      "job_id": "20260623T000000Z-cccccccc",
+      "status": "failed",
+      "error": "fixture failure"
+    }
+  ]
+}

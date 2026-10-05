@@ -6,7 +6,7 @@ import fcntl
 import json
 import os
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -611,10 +611,27 @@ def plan_document(
         'older_than_days': plan.older_than_days,
         'mode': 'apply' if applied else 'dry_run',
         'database_cleanup': plan.delete_database_records,
-        'selected': [asdict(item) for item in plan.selected],
-        'skipped': [asdict(item) for item in plan.skipped],
-        'orphans': [asdict(item) for item in plan.orphans],
+        'selected': [_prune_item_document(item) for item in plan.selected],
+        'skipped': [_prune_item_document(item) for item in plan.skipped],
+        'orphans': [_prune_item_document(item) for item in plan.orphans],
         'orphan_count': len(plan.orphans),
         'invalid_paths': list(plan.invalid_paths),
         'outcomes': list(outcomes),
+    }
+
+
+def _prune_item_document(item: PruneItem) -> dict[str, object]:
+    """Publish the selected retention fields in their existing order."""
+
+    return {
+        'job_id': item.job_id,
+        'category': item.category,
+        'state': item.state,
+        'age_days': item.age_days,
+        'terminal_at': item.terminal_at,
+        'evidence_path': item.evidence_path,
+        'bytes': item.bytes,
+        'database_records': item.database_records,
+        'action': item.action,
+        'reason': item.reason,
     }

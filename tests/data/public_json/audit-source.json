@@ -1,0 +1,123 @@
+{
+  "schema_version": 15,
+  "agent_orchestra_version": "0.1.0",
+  "job": {
+    "job_id": "20261001T000000Z-aaaaaaaa",
+    "scenario": "local_changes",
+    "state": "queued",
+    "iteration": 0,
+    "created_at": "2026-10-01T00:00:00Z",
+    "updated_at": "2026-10-01T00:00:00Z",
+    "repository_path": "/ROOT/worktree",
+    "worktree_path": "/ROOT/worktree",
+    "base_sha": "base",
+    "head_sha": "head",
+    "diff_digest": "sha256:fixture",
+    "remote_url": null,
+    "supersedes_job_id": null
+  },
+  "transitions": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "scenario": "local_changes",
+      "from_state": null,
+      "to_state": "queued",
+      "scope_digest": "sha256:fixture",
+      "occurred_at": "2026-10-01T00:00:00Z",
+      "reason": null
+    }
+  ],
+  "operations": [],
+  "tasks": [
+    {
+      "task_id": "20261001T000000Z-aaaaaaaa:000001-developer",
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "role": "developer",
+      "iteration": 1,
+      "status": "completed",
+      "conclusion": "succeeded",
+      "attempts": [
+        {
+          "task_id": "20261001T000000Z-aaaaaaaa:000001-developer",
+          "role": "developer",
+          "agent_vendor": "openai",
+          "requested_model": "gpt-test",
+          "effective_models": [
+            "gpt-effective"
+          ],
+          "effective_model_status": "reported",
+          "usage_status": "unavailable",
+          "usage": null,
+          "runtime": "codex",
+          "iteration": 1,
+          "started_at": "2026-09-07T10:00:00Z",
+          "finished_at": "2026-09-07T10:01:00Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "interrupted": false,
+          "attempt": 1,
+          "status": "completed",
+          "conclusion": "succeeded",
+          "response_received_at": "2026-09-07T10:01:00Z",
+          "validation_started_at": "2026-09-07T10:01:00Z",
+          "streams": {
+            "stdout": {
+              "path": "logs/000001-developer-0001.stdout.log"
+            },
+            "stderr": {
+              "path": "logs/000001-developer-0001.stderr.log"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "evidence_type": null,
+      "path": "invocations/000001-developer-0001.json",
+      "size": "<int>",
+      "sha256": null,
+      "finalized_at": null,
+      "status": "unverifiable"
+    },
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "evidence_type": null,
+      "path": "logs/000001-developer-0001.stderr.log",
+      "size": "<int>",
+      "sha256": null,
+      "finalized_at": null,
+      "status": "unverifiable"
+    },
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "evidence_type": null,
+      "path": "logs/000001-developer-0001.stdout.log",
+      "size": "<int>",
+      "sha256": null,
+      "finalized_at": null,
+      "status": "unverifiable"
+    }
+  ],
+  "integrity": {
+    "schema_version": 1,
+    "backfilled_at": null
+  },
+  "history": [],
+  "provider_actions": [],
+  "findings": [
+    {
+      "code": "worktree_not_git_worktree",
+      "message": "recorded path is not a Git worktree",
+      "path": "/ROOT/worktree"
+    },
+    {
+      "code": "integrity_index_missing",
+      "message": "integrity index is missing",
+      "path": null
+    }
+  ],
+  "error": null
+}

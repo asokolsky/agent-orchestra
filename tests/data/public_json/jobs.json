@@ -1,0 +1,42 @@
+{
+  "schema_version": 23,
+  "agent_orchestra_version": "0.1.0",
+  "jobs": [
+    {
+      "job_id": "20261001T000000Z-aaaaaaaa",
+      "scenario": "local_changes",
+      "repository_path": "/ROOT/worktree",
+      "worktree_path": "/ROOT/worktree",
+      "worktree_status": "not_git_worktree",
+      "state": "queued",
+      "base_sha": "base",
+      "head_sha": "head",
+      "diff_digest": "sha256:fixture",
+      "iteration": 0,
+      "remote_url": null,
+      "supersedes_job_id": null,
+      "created_at": "2026-10-01T00:00:00Z",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "job_id": "20261001T000000Z-bbbbbbbb",
+      "scenario": "issue_review",
+      "state": "queued",
+      "provider": "github",
+      "host": "github.com",
+      "remote_url": "https://github.com/example/repo/issues/1",
+      "namespace": "example",
+      "project": "repo",
+      "issue_number": 1,
+      "title": "Example issue",
+      "author": "author",
+      "source_updated_at": "2026-10-01T00:00:00Z",
+      "source_digest": "sha256:issue",
+      "iteration": 0,
+      "provider_actions": [],
+      "created_at": "2026-10-01T00:00:00Z",
+      "updated_at": "2026-10-01T00:00:00Z"
+    }
+  ],
+  "error": null
+}
